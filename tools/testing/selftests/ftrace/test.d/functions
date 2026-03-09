@@ -186,6 +186,11 @@ yield() {
 FUNCTION_FORK=`(if grep '\bkernel_clone\b' /proc/kallsyms > /dev/null; then
                 echo kernel_clone; else echo '_do_fork'; fi)`
 
+# The exit function in the kernel was renamed from "do_exit" to
+# "task_exit". Check which version exists on this kernel.
+FUNCTION_EXIT=`(if grep '\btask_exit\b' /proc/kallsyms > /dev/null; then
+                echo task_exit; else echo 'do_exit'; fi)`
+
 # Since probe event command may include backslash, explicitly use printf "%s"
 # to NOT interpret it.
 ftrace_errlog_check() { # err-prefix command-with-error-pos-by-^ command-file
