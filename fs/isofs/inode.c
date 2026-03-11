@@ -600,6 +600,12 @@ static int isofs_fill_super(struct super_block *s, struct fs_context *fc)
 	 * larger than the blocksize the user specified, then use
 	 * that value.
 	 */
+	
+	if (!s->s_bdev) {
+		printk(KERN_WARNING "ISOFS: missing underlying block device\n");
+		goto out_freesbi;
+	}
+	
 	/*
 	 * What if bugger tells us to go beyond page size?
 	 */
