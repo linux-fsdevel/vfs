@@ -413,7 +413,7 @@ static inline bool d_mountpoint(const struct dentry *dentry)
  */
 static inline unsigned __d_entry_type(const struct dentry *dentry)
 {
-	return dentry->d_flags & DCACHE_ENTRY_TYPE;
+	return data_race(dentry->d_flags) & DCACHE_ENTRY_TYPE;
 }
 
 static inline bool d_is_miss(const struct dentry *dentry)
