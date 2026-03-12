@@ -409,6 +409,7 @@ static const char * const wq_affn_names[WQ_AFFN_NR_TYPES] = {
 	[WQ_AFFN_CPU]		= "cpu",
 	[WQ_AFFN_SMT]		= "smt",
 	[WQ_AFFN_CACHE]		= "cache",
+	[WQ_AFFN_CACHE_SHARD]	= "cache_shard",
 	[WQ_AFFN_NUMA]		= "numa",
 	[WQ_AFFN_SYSTEM]	= "system",
 };
@@ -430,6 +431,9 @@ module_param_named(cpu_intensive_warning_thresh, wq_cpu_intensive_warning_thresh
 /* see the comment above the definition of WQ_POWER_EFFICIENT */
 static bool wq_power_efficient = IS_ENABLED(CONFIG_WQ_POWER_EFFICIENT_DEFAULT);
 module_param_named(power_efficient, wq_power_efficient, bool, 0444);
+
+static unsigned int wq_cache_shard_size = 8;
+module_param_named(cache_shard_size, wq_cache_shard_size, uint, 0444);
 
 static bool wq_online;			/* can kworkers be created yet? */
 static bool wq_topo_initialized __read_mostly = false;
@@ -8107,6 +8111,56 @@ static bool __init cpus_share_numa(int cpu0, int cpu1)
 }
 
 /**
+ * cpu_cache_shard_id - compute the shard index for a CPU within its LLC pod
+ * @cpu: the CPU to look up
+ *
+ * Returns a shard index that is unique within the CPU's LLC pod. CPUs in
+ * the same LLC are divided into shards no larger than wq_cache_shard_size,
+ * distributed as evenly as possible. E.g., 20 CPUs with max shard size 8
+ * gives 3 shards of 7+7+6.
+ */
+static int __init cpu_cache_shard_id(int cpu)
+{
+	struct wq_pod_type *cache_pt = &wq_pod_types[WQ_AFFN_CACHE];
+	const struct cpumask *pod_cpus;
+	int nr_cpus, nr_shards, shard_size, remainder, c;
+	int pos = 0;
+
+	/* CPUs in the same LLC as @cpu */
+	pod_cpus = cache_pt->pod_cpus[cache_pt->cpu_pod[cpu]];
+	/* Total number of CPUs sharing this LLC */
+	nr_cpus = cpumask_weight(pod_cpus);
+	/* Number of shards to split this LLC into */
+	nr_shards = DIV_ROUND_UP(nr_cpus, wq_cache_shard_size);
+	/* Minimum number of CPUs per shard */
+	shard_size = nr_cpus / nr_shards;
+	/* First @remainder shards get one extra CPU */
+	remainder = nr_cpus % nr_shards;
+
+	/* Find position of @cpu within its cache pod */
+	for_each_cpu(c, pod_cpus) {
+		if (c == cpu)
+			break;
+		pos++;
+	}
+
+	/*
+	 * Map position to shard index. The first @remainder shards have
+	 * (shard_size + 1) CPUs, the rest have @shard_size CPUs.
+	 */
+	if (pos < remainder * (shard_size + 1))
+		return pos / (shard_size + 1);
+	return remainder + (pos - remainder * (shard_size + 1)) / shard_size;
+}
+
+static bool __init cpus_share_cache_shard(int cpu0, int cpu1)
+{
+	if (!cpus_share_cache(cpu0, cpu1))
+		return false;
+	return cpu_cache_shard_id(cpu0) == cpu_cache_shard_id(cpu1);
+}
+
+/**
  * workqueue_init_topology - initialize CPU pods for unbound workqueues
  *
  * This is the third step of three-staged workqueue subsystem initialization and
@@ -8118,9 +8172,15 @@ void __init workqueue_init_topology(void)
 	struct workqueue_struct *wq;
 	int cpu;
 
+	if (!wq_cache_shard_size) {
+		pr_warn("workqueue: cache_shard_size must be > 0, setting to 1\n");
+		wq_cache_shard_size = 1;
+	}
+
 	init_pod_type(&wq_pod_types[WQ_AFFN_CPU], cpus_dont_share);
 	init_pod_type(&wq_pod_types[WQ_AFFN_SMT], cpus_share_smt);
 	init_pod_type(&wq_pod_types[WQ_AFFN_CACHE], cpus_share_cache);
+	init_pod_type(&wq_pod_types[WQ_AFFN_CACHE_SHARD], cpus_share_cache_shard);
 	init_pod_type(&wq_pod_types[WQ_AFFN_NUMA], cpus_share_numa);
 
 	wq_topo_initialized = true;
