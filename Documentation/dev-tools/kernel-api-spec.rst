@@ -56,16 +56,10 @@ The framework consists of several key components:
 2. **DebugFS Interface** (``kernel/api/kapi_debugfs.c``)
 
    - Runtime introspection via ``/sys/kernel/debug/kapi/``
-   - JSON and XML export formats
-   - Per-API detailed information
+   - Per-API detailed specification output
+   - List of all registered API specifications
 
-3. **IOCTL Support** (``kernel/api/ioctl_validation.c``)
-
-   - Extended framework for IOCTL specifications
-   - Automatic validation wrappers
-   - Structure field validation
-
-4. **Specification Macros** (``include/linux/kernel_api_spec.h``)
+3. **Specification Macros** (``include/linux/kernel_api_spec.h``)
 
    - Declarative macros for API documentation
    - Type-safe parameter specifications
@@ -186,8 +180,8 @@ Runtime validation is controlled by kernel configuration:
 2. Enable ``CONFIG_KAPI_RUNTIME_CHECKS`` for runtime validation
 3. Optionally enable ``CONFIG_KAPI_SPEC_DEBUGFS`` for debugfs interface
 
-Validation Modes
-----------------
+Validation Behavior
+-------------------
 
 When ``CONFIG_KAPI_RUNTIME_CHECKS`` is enabled, all registered API specifications
 are validated automatically at call time. The framework checks parameter constraints,
@@ -225,55 +219,39 @@ Directory Structure
 ::
 
     /sys/kernel/debug/kapi/
-    ├── apis/                    # All registered APIs
-    │   ├── kmalloc/
-    │   │   ├── specification   # Human-readable spec
-    │   │   ├── json           # JSON format
-    │   │   └── xml            # XML format
-    │   └── open/
-    │       └── ...
-    ├── summary                  # Overview of all APIs
-    ├── validation/              # Validation controls
-    │   ├── enabled             # Global enable/disable
-    │   ├── level               # Validation level
-    │   └── stats               # Validation statistics
-    └── export/                  # Bulk export options
-        ├── all.json            # All specs in JSON
-        └── all.xml             # All specs in XML
+    ├── list                     # Overview of all registered API specs
+    └── specs/                   # Per-API specification files
+        ├── sys_open             # Human-readable spec for sys_open
+        ├── sys_close            # Human-readable spec for sys_close
+        ├── sys_read             # Human-readable spec for sys_read
+        └── sys_write            # Human-readable spec for sys_write
 
 Usage Examples
 --------------
 
+List all available API specifications::
+
+    $ cat /sys/kernel/debug/kapi/list
+    Available Kernel API Specifications
+    ===================================
+
+    sys_open - Open or create a file
+    sys_close - Close a file descriptor
+    sys_read - Read data from a file descriptor
+    sys_write - Write data to a file descriptor
+
+    Total: 4 specifications
+
 Query specific API::
 
-    $ cat /sys/kernel/debug/kapi/apis/kmalloc/specification
-    API: kmalloc
-    Version: 3.0
-    Description: Allocate kernel memory
+    $ cat /sys/kernel/debug/kapi/specs/sys_open
+    Kernel API Specification
+    ========================
 
-    Parameters:
-      [0] size (size_t, in): Number of bytes to allocate
-          Range: 0 - 4194304
-      [1] flags (flags, in): Allocation flags (GFP_*)
-          Mask: 0x1ffffff
-
-    Returns: pointer - Pointer to allocated memory or NULL
-
-    Errors:
-      ENOMEM: Out of memory
-
-    Context: process, softirq, hardirq
-
-    Side Effects:
-      - Allocates memory from kernel heap
-
-Export all specifications::
-
-    $ cat /sys/kernel/debug/kapi/export/all.json > kernel-apis.json
-
-Enable validation for specific API::
-
-    $ echo 1 > /sys/kernel/debug/kapi/apis/kmalloc/validate
+    Name: sys_open
+    Version: 1
+    Description: Open or create a file
+    ...
 
 Performance Considerations
 ==========================
@@ -304,11 +282,8 @@ Optimization Strategies
 1. **Compile-time optimization**: When validation is disabled, all
    validation code is optimized away by the compiler.
 
-2. **Selective validation**: Enable validation only for specific APIs
-   or subsystems under test.
-
-3. **Caching**: The framework caches validation results for repeated
-   calls with identical parameters.
+2. **Selective enablement**: Enable ``CONFIG_KAPI_RUNTIME_CHECKS``
+   only in development/testing kernels, not in production.
 
 Documentation Generation
 ------------------------
@@ -414,10 +389,9 @@ Common Issues
 Debug Options
 -------------
 
-Enable verbose debugging::
+Enable verbose kernel logging to see KAPI validation messages::
 
     echo 8 > /proc/sys/kernel/printk
-    echo 1 > /sys/kernel/debug/kapi/debug/verbose
 
 Future Directions
 =================
