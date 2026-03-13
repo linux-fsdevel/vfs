@@ -13820,6 +13820,7 @@ F:	include/linux/syscall_api_spec.h
 F:	kernel/api/
 F:	tools/kapi/
 F:	tools/lib/python/kdoc/kdoc_apispec.py
+F:	tools/testing/selftests/kapi/
 
 KERNEL AUTOMOUNTER
 M:	Ian Kent <raven@themaw.net>
