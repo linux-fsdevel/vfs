@@ -7,6 +7,14 @@
 #define _ASM_X86_SYSCALL_WRAPPER_H
 
 #include <asm/ptrace.h>
+#ifdef CONFIG_KAPI_RUNTIME_CHECKS
+struct kernel_api_spec;
+extern const struct kernel_api_spec *kapi_get_spec(const char *name);
+extern int kapi_validate_syscall_params(const struct kernel_api_spec *spec,
+					const s64 *params, int param_count);
+extern int kapi_validate_syscall_return(const struct kernel_api_spec *spec,
+					s64 retval);
+#endif
 
 extern long __x64_sys_ni_syscall(const struct pt_regs *regs);
 extern long __ia32_sys_ni_syscall(const struct pt_regs *regs);
@@ -220,6 +228,37 @@ extern long __ia32_sys_ni_syscall(const struct pt_regs *regs);
 
 #endif /* CONFIG_COMPAT */
 
+#ifdef CONFIG_KAPI_RUNTIME_CHECKS
+#define __SYSCALL_DEFINEx(x, name, ...)					\
+	static long __se_sys##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
+	static inline long __do_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));\
+	static inline long __do_kapi_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__)); \
+	__X64_SYS_STUBx(x, name, __VA_ARGS__)				\
+	__IA32_SYS_STUBx(x, name, __VA_ARGS__)				\
+	static long __se_sys##name(__MAP(x,__SC_LONG,__VA_ARGS__))	\
+	{								\
+		long ret = __do_kapi_sys##name(__MAP(x,__SC_CAST,__VA_ARGS__));\
+		__MAP(x,__SC_TEST,__VA_ARGS__);				\
+		__PROTECT(x, ret,__MAP(x,__SC_ARGS,__VA_ARGS__));	\
+		return ret;						\
+	}								\
+	static inline long __do_kapi_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))\
+	{								\
+		const struct kernel_api_spec *__spec = kapi_get_spec("sys" #name); \
+		if (__spec) {						\
+			s64 __params[x] = { __MAP(x,__SC_CAST_TO_S64,__VA_ARGS__) }; \
+			int __ret = kapi_validate_syscall_params(__spec, __params, x); \
+			if (__ret)				\
+				return __ret;			\
+		}							\
+		long ret = __do_sys##name(__MAP(x,__SC_ARGS,__VA_ARGS__));	\
+		if (__spec) {						\
+			kapi_validate_syscall_return(__spec, (s64)ret); \
+		}							\
+		return ret;						\
+	}								\
+	static inline long __do_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))
+#else /* !CONFIG_KAPI_RUNTIME_CHECKS */
 #define __SYSCALL_DEFINEx(x, name, ...)					\
 	static long __se_sys##name(__MAP(x,__SC_LONG,__VA_ARGS__));	\
 	static inline long __do_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__));\
@@ -233,6 +272,7 @@ extern long __ia32_sys_ni_syscall(const struct pt_regs *regs);
 		return ret;						\
 	}								\
 	static inline long __do_sys##name(__MAP(x,__SC_DECL,__VA_ARGS__))
+#endif /* CONFIG_KAPI_RUNTIME_CHECKS */
 
 /*
  * As the generic SYSCALL_DEFINE0() macro does not decode any parameters for

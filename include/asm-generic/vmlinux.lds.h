@@ -296,6 +296,33 @@
 #define TRACE_SYSCALLS()
 #endif
 
+#ifdef CONFIG_KAPI_SPEC
+/*
+ * KAPI_SPECS - Include kernel API specifications in current section
+ *
+ * The .kapi_specs input section has 32-byte alignment requirement from
+ * the compiler, so we must align to 32 bytes before setting the start
+ * symbol to avoid padding between the symbol and actual data.
+ */
+#define KAPI_SPECS()				\
+	. = ALIGN(32);				\
+	__start_kapi_specs = .;			\
+	KEEP(*(.kapi_specs))			\
+	__stop_kapi_specs = .;
+
+/* For placing KAPI specs in a dedicated section */
+#define KAPI_SPECS_SECTION()			\
+	.kapi_specs : AT(ADDR(.kapi_specs) - LOAD_OFFSET) {	\
+		. = ALIGN(32);			\
+		__start_kapi_specs = .;		\
+		KEEP(*(.kapi_specs))		\
+		__stop_kapi_specs = .;		\
+	}
+#else
+#define KAPI_SPECS()
+#define KAPI_SPECS_SECTION()
+#endif
+
 #ifdef CONFIG_BPF_EVENTS
 #define BPF_RAW_TP() STRUCT_ALIGN();				\
 	BOUNDED_SECTION_BY(__bpf_raw_tp_map, __bpf_raw_tp)
@@ -485,6 +512,7 @@
 		. = ALIGN(8);						\
 		BOUNDED_SECTION_BY(__tracepoints_ptrs, ___tracepoints_ptrs) \
 		*(__tracepoints_strings)/* Tracepoints: strings */	\
+		KAPI_SPECS()						\
 	}								\
 									\
 	.rodata1          : AT(ADDR(.rodata1) - LOAD_OFFSET) {		\
