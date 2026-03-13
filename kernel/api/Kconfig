@@ -1,0 +1,70 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# Kernel API Specification Framework Configuration
+#
+
+config KAPI_SPEC
+	bool "Kernel API Specification Framework"
+	default n
+	help
+	  This option enables the kernel API specification framework,
+	  which provides formal documentation of kernel APIs in both
+	  human and machine-readable formats.
+
+	  The framework allows developers to document APIs inline with
+	  their implementation, including parameter specifications,
+	  return values, error conditions, locking requirements, and
+	  execution context constraints.
+
+	  When enabled, API specifications can be queried at runtime
+	  and exported in JSON format through debugfs.
+
+	  If unsure, say N.
+
+config KAPI_RUNTIME_CHECKS
+	bool "Runtime API specification checks"
+	depends on KAPI_SPEC
+	depends on DEBUG_KERNEL
+	default n
+	help
+	  Enable runtime validation of API usage against specifications.
+	  This includes checking execution context requirements, parameter
+	  validation, and lock state verification.
+
+	  This adds overhead and should only be used for debugging and
+	  development. The checks use WARN_ONCE to report violations.
+
+	  If unsure, say N.
+
+config KAPI_SPEC_DEBUGFS
+	bool "Export kernel API specifications via debugfs"
+	depends on KAPI_SPEC
+	depends on DEBUG_FS
+	default n
+	help
+	  This option enables exporting kernel API specifications through
+	  the debugfs filesystem. When enabled, specifications can be
+	  accessed at /sys/kernel/debug/kapi/.
+
+	  The debugfs interface provides:
+	  - A list of all available API specifications
+	  - Detailed information for each API including parameters,
+	    return values, errors, locking requirements, and constraints
+	  - Complete machine-readable representation of the specs
+
+	  This is useful for documentation tools, static analyzers, and
+	  runtime introspection of kernel APIs.
+
+	  If unsure, say N.
+
+config KAPI_KUNIT_TEST
+	tristate "KUnit tests for KAPI framework" if !KUNIT_ALL_TESTS
+	depends on KAPI_SPEC
+	depends on KUNIT
+	default KUNIT_ALL_TESTS
+	help
+	  KUnit tests for the Kernel API Specification Framework.
+	  Tests registration, lookup, validation constraints, and
+	  JSON export functionality.
+
+	  If unsure, say N.
