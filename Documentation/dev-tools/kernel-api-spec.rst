@@ -31,7 +31,9 @@ The framework aims to:
    common programming errors during development and testing.
 
 3. **Support Tooling**: Export API specifications in machine-readable formats for
-   use by static analyzers, documentation generators, and development tools.
+   use by static analyzers, documentation generators, and development tools. The
+   ``kapi`` tool (see `The kapi Tool`_) provides comprehensive extraction and
+   formatting capabilities.
 
 4. **Enhance Debugging**: Provide detailed API information at runtime through debugfs
    for debugging and introspection.
@@ -64,6 +66,13 @@ The framework consists of several key components:
    - Declarative macros for API documentation
    - Type-safe parameter specifications
    - Context and constraint definitions
+
+5. **kapi Tool** (``tools/kapi/``)
+
+   - Userspace utility for extracting specifications
+   - Multiple input sources (source, binary, debugfs)
+   - Multiple output formats (plain, JSON, RST)
+   - Testing and validation utilities
 
 Data Model
 ----------
@@ -289,8 +298,177 @@ Documentation Generation
 ------------------------
 
 The framework exports specifications via debugfs that can be used
-to generate documentation. Tools for automatic documentation generation
-from specifications are planned for future development.
+to generate documentation. The ``kapi`` tool provides comprehensive
+extraction and formatting capabilities for kernel API specifications.
+
+The kapi Tool
+=============
+
+Overview
+--------
+
+The ``kapi`` tool is a userspace utility that extracts and displays kernel API
+specifications from multiple sources. It provides a unified interface to access
+API documentation whether from compiled kernels, source code, or runtime systems.
+
+Installation
+------------
+
+Build the tool from the kernel source tree::
+
+    $ cd tools/kapi
+    $ cargo build --release
+
+    # Optional: Install system-wide
+    $ cargo install --path .
+
+The tool requires Rust and Cargo to build. The binary will be available at
+``tools/kapi/target/release/kapi``.
+
+Command-Line Usage
+------------------
+
+Basic syntax::
+
+    kapi [OPTIONS] [API_NAME]
+
+Options:
+
+- ``--vmlinux <PATH>``: Extract from compiled kernel binary
+- ``--source <PATH>``: Extract from kernel source code
+- ``--debugfs <PATH>``: Extract from debugfs (default: /sys/kernel/debug)
+- ``-f, --format <FORMAT>``: Output format (plain, json, rst)
+- ``-h, --help``: Display help information
+- ``-V, --version``: Display version information
+
+Input Modes
+-----------
+
+**1. Source Code Mode**
+
+Extract specifications directly from kernel source::
+
+    # Scan entire kernel source tree
+    $ kapi --source /path/to/linux
+
+    # Extract from specific file
+    $ kapi --source kernel/sched/core.c
+
+    # Get details for specific API
+    $ kapi --source /path/to/linux sys_sched_yield
+
+**2. Vmlinux Mode**
+
+Extract from compiled kernel with debug symbols::
+
+    # List all APIs in vmlinux
+    $ kapi --vmlinux /boot/vmlinux-5.15.0
+
+    # Get specific syscall details
+    $ kapi --vmlinux ./vmlinux sys_read
+
+**3. Debugfs Mode**
+
+Extract from running kernel via debugfs::
+
+    # Use default debugfs path
+    $ kapi
+
+    # Use custom debugfs mount
+    $ kapi --debugfs /mnt/debugfs
+
+    # Get specific API from running kernel
+    $ kapi sys_write
+
+Output Formats
+--------------
+
+**Plain Text Format** (default)::
+
+    $ kapi sys_read
+
+    Detailed information for sys_read:
+    ==================================
+    Description: Read from a file descriptor
+
+    Detailed Description:
+    Reads up to count bytes from file descriptor fd into the buffer starting at buf.
+
+    Execution Context:
+      - KAPI_CTX_PROCESS | KAPI_CTX_SLEEPABLE
+
+    Parameters (3):
+
+    Available since: 1.0
+
+**JSON Format**::
+
+    $ kapi --format json sys_read
+    {
+      "api_details": {
+        "name": "sys_read",
+        "description": "Read from a file descriptor",
+        "long_description": "Reads up to count bytes...",
+        "context_flags": ["KAPI_CTX_PROCESS | KAPI_CTX_SLEEPABLE"],
+        "since_version": "1.0"
+      }
+    }
+
+**ReStructuredText Format**::
+
+    $ kapi --format rst sys_read
+
+    sys_read
+    ========
+
+    **Read from a file descriptor**
+
+    Reads up to count bytes from file descriptor fd into the buffer...
+
+Usage Examples
+--------------
+
+**Generate complete API documentation**::
+
+    # Export all kernel APIs to JSON
+    $ kapi --source /path/to/linux --format json > kernel-apis.json
+
+    # Generate RST documentation for all syscalls
+    $ kapi --vmlinux ./vmlinux --format rst > syscalls.rst
+
+    # List APIs from specific subsystem
+    $ kapi --source drivers/gpu/drm/
+
+**Integration with other tools**::
+
+    # Find all APIs that can sleep
+    $ kapi --format json | jq '.apis[] | select(.context_flags[] | contains("SLEEPABLE"))'
+
+    # Generate markdown documentation
+    $ kapi --format rst sys_mmap | pandoc -f rst -t markdown
+
+**Debugging and analysis**::
+
+    # Compare API between kernel versions
+    $ diff <(kapi --vmlinux vmlinux-5.10) <(kapi --vmlinux vmlinux-5.15)
+
+    # Check if specific API exists
+    $ kapi --source . my_custom_api || echo "API not found"
+
+Implementation Details
+----------------------
+
+The tool extracts API specifications from three sources:
+
+1. **Source Code**: Parses KAPI specification macros using regular expressions
+2. **Vmlinux**: Reads the ``.kapi_specs`` ELF section from compiled kernels
+3. **Debugfs**: Reads from ``/sys/kernel/debug/kapi/`` filesystem interface
+
+The tool supports all KAPI specification types:
+
+- System calls (``DEFINE_KERNEL_API_SPEC`` or kerneldoc annotations)
+- IOCTLs (kerneldoc annotations with ioctl-specific tags)
+- Kernel functions (kerneldoc annotations with KAPI tags)
 
 IDE Integration
 ---------------
@@ -302,15 +480,10 @@ Modern IDEs can use the JSON export for:
 - Context validation
 - Error code documentation
 
-Testing Framework
------------------
+Example IDE integration::
 
-The framework includes test helpers::
-
-    #ifdef CONFIG_KAPI_TESTING
-    /* Verify API behaves according to specification */
-    kapi_test_api("kmalloc", test_cases);
-    #endif
+    # Generate IDE completion data
+    $ kapi --format json > .vscode/kernel-apis.json
 
 Best Practices
 ==============
