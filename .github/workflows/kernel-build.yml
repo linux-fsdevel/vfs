@@ -1,0 +1,62 @@
+name: kernel-build
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      toolchain:
+        type: string
+        default: gcc
+
+env:
+  KBUILD_OUTPUT: kbuild-output
+  SELFTEST_TARGETS: >-
+    mount mount_setattr move_mount_set_group openat2
+    filesystems statmount fchmodat2 filelock tmpfs pidfd
+    pid_namespace namespaces cachestat memfd
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    container:
+      image: debian:testing
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup build environment
+        uses: linux-fsdevel/vfs-ci/setup-build-env@main
+        with:
+          arch: ${{ inputs.arch }}
+
+      - name: Build kernel
+        uses: linux-fsdevel/vfs-ci/build-linux@main
+        with:
+          arch: ${{ inputs.arch }}
+          toolchain: ${{ inputs.toolchain }}
+          kbuild-output: ${{ env.KBUILD_OUTPUT }}
+
+      - name: Build selftests
+        run: |
+          set -euo pipefail
+          make -j$(( 4 * $(nproc) )) -C tools/testing/selftests \
+            TARGETS="${SELFTEST_TARGETS}" \
+            KBUILD_OUTPUT=$(realpath ${KBUILD_OUTPUT}) \
+            install INSTALL_PATH=${{ github.workspace }}/kselftest-install
+
+      - name: Package artifacts
+        uses: linux-fsdevel/vfs-ci/tar-artifacts@main
+        with:
+          arch: ${{ inputs.arch }}
+          archive: kernel-selftests-${{ inputs.arch }}.tar.zst
+          kbuild-output: ${{ env.KBUILD_OUTPUT }}
+          repo-root: .
+          kselftest-install: ${{ github.workspace }}/kselftest-install
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-selftests-${{ inputs.arch }}
+          path: kernel-selftests-${{ inputs.arch }}.tar.zst
+          if-no-files-found: error
