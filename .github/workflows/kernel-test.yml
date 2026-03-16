@@ -37,7 +37,9 @@ jobs:
         with:
           arch: ${{ inputs.arch }}
           kernel-test: ${{ inputs.test }}
-          vmlinuz: ./vmlinuz
+          kernel-root: '.'
+          # kbuild-output is local to the repo, extracted from the artifacts.
+          kbuild-output: kbuild-output
         env:
           VMTEST_MEMORY: 4G
           VMTEST_NUM_CPUS: 2

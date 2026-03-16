@@ -45,6 +45,8 @@ jobs:
 
       - name: Package artifacts
         uses: linux-fsdevel/vfs-ci/tar-artifacts@main
+        env:
+          ARCHIVE_MAKE_HELPERS: 'true'
         with:
           arch: ${{ inputs.arch }}
           archive: kernel-selftests-${{ inputs.arch }}.tar.zst
