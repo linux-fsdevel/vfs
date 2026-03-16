@@ -1,0 +1,60 @@
+name: inject-ci
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch on linux-fsdevel/vfs to inject CI into'
+        required: true
+        type: string
+
+concurrency:
+  group: vfs-mutations
+  cancel-in-progress: false
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: linux-fsdevel
+          repositories: vfs
+
+      - name: Inject CI into branch
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          set -euo pipefail
+          AUTH="Authorization: basic $(echo -n x-access-token:${GITHUB_TOKEN} | base64 -w0)"
+
+          git clone --depth=50 --branch "${BRANCH}" --single-branch \
+            -c "http.extraheader=${AUTH}" \
+            https://github.com/linux-fsdevel/vfs.git /tmp/vfs-inject
+
+          cd /tmp/vfs-inject
+          git config user.name "ml2pr"
+          git config user.email "ml2pr@linux-fsdevel"
+
+          # Delete existing CI files first (security: prevent malicious workflows)
+          rm -rf .github/workflows ci
+          mkdir -p .github/workflows
+
+          # Copy CI files from fsdevel-vmtest checkout
+          cp -r "${GITHUB_WORKSPACE}/.github/workflows/"* .github/workflows/
+          cp -r "${GITHUB_WORKSPACE}/ci" ci
+
+          git add -f .github/workflows ci
+          if git diff --cached --quiet; then
+            echo "CI files already up to date, nothing to push"
+          else
+            git commit --no-gpg-sign -m "ci: inject CI infrastructure [ml2pr]"
+            git -c "http.extraheader=${AUTH}" push origin "${BRANCH}"
+            echo "CI files injected into ${BRANCH}"
+          fi
