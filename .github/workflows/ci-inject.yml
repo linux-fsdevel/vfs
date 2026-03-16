@@ -32,11 +32,10 @@ jobs:
           BRANCH: ${{ inputs.branch }}
         run: |
           set -euo pipefail
-          AUTH="Authorization: basic $(echo -n x-access-token:${GITHUB_TOKEN} | base64 -w0)"
+          REPO_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/linux-fsdevel/vfs.git"
 
           git clone --depth=50 --branch "${BRANCH}" --single-branch \
-            -c "http.extraheader=${AUTH}" \
-            https://github.com/linux-fsdevel/vfs.git /tmp/vfs-inject
+            "${REPO_URL}" /tmp/vfs-inject
 
           cd /tmp/vfs-inject
           git config user.name "ml2pr"
@@ -55,6 +54,6 @@ jobs:
             echo "CI files already up to date, nothing to push"
           else
             git commit --no-gpg-sign -m "ci: inject CI infrastructure [ml2pr]"
-            git -c "http.extraheader=${AUTH}" push origin "${BRANCH}"
+            git push origin "${BRANCH}"
             echo "CI files injected into ${BRANCH}"
           fi
