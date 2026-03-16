@@ -1,0 +1,44 @@
+name: fsdevel-selftests
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+      - '!vfs.all'
+      - '!vfs.fixes'
+
+concurrency:
+  group: ci-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/kernel-build.yml
+    with:
+      arch: x86_64
+      toolchain: gcc
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - mount
+          - mount_setattr
+          - move_mount_set_group
+          - openat2
+          - filesystems
+          - statmount
+          - fchmodat2
+          - filelock
+          - tmpfs
+          - pidfd
+          - pid_namespace
+          - namespaces
+          - cachestat
+          - memfd
+    uses: ./.github/workflows/kernel-test.yml
+    with:
+      arch: x86_64
+      test: ${{ matrix.target }}
