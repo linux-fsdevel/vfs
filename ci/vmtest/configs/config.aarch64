@@ -1,0 +1,6 @@
+# aarch64-specific kernel configuration
+#
+# Most options are in the shared config and handled by olddefconfig.
+# This file adds arm64-specific options needed for QEMU virt machine boot.
+CONFIG_ARM_GIC_V3=y
+CONFIG_ARM_GIC_V3_ITS=y
