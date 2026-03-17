@@ -1,0 +1,51 @@
+name: kernel-test
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      test:
+        type: string
+        required: true
+      runs_on:
+        type: string
+        default: '["ubuntu-24.04"]'
+      timeout_minutes:
+        type: number
+        default: 30
+
+jobs:
+  test:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            .github
+            ci
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: kernel-selftests-${{ inputs.arch }}
+
+      - name: Extract artifacts
+        run: |
+          zstd -d -T0 kernel-selftests-${{ inputs.arch }}.tar.zst --stdout | \
+            tar -xf -
+
+      - name: Run ${{ inputs.test }} selftests
+        uses: linux-fsdevel/vfs-ci/run-vmtest@main
+        with:
+          arch: ${{ inputs.arch }}
+          kernel-test: ${{ inputs.test }}
+          kernel-root: ${{ github.workspace }}
+          kbuild-output: ${{ github.workspace }}/kbuild-output
+        env:
+          VMTEST_MEMORY: 4G
+          VMTEST_NUM_CPUS: 2
+          KSELFTEST_DIR: /mnt/vmtest/kselftest-install
+          DENYLIST_DIR: /mnt/vmtest/ci/vmtest/configs
