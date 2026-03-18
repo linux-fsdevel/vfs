@@ -1,0 +1,44 @@
+name: kernel-build-test
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      toolchain:
+        type: string
+        default: gcc
+      runs_on:
+        description: 'JSON-encoded runner label array, e.g. ["ubuntu-24.04"]'
+        type: string
+        default: '["ubuntu-24.04"]'
+      selftest_targets:
+        description: 'Space-separated list of kselftest targets to build'
+        type: string
+        required: true
+      test_matrix:
+        description: 'JSON test matrix for kernel-test.yml fan-out'
+        type: string
+        required: true
+
+jobs:
+  build:
+    uses: ./.github/workflows/kernel-build.yml
+    with:
+      arch: ${{ inputs.arch }}
+      toolchain: ${{ inputs.toolchain }}
+      runs_on: ${{ inputs.runs_on }}
+      selftest_targets: ${{ inputs.selftest_targets }}
+
+  test:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.test_matrix) }}
+    uses: ./.github/workflows/kernel-test.yml
+    with:
+      arch: ${{ inputs.arch }}
+      test: ${{ matrix.test }}
+      runs_on: ${{ inputs.runs_on }}
+      timeout_minutes: ${{ matrix.timeout_minutes }}

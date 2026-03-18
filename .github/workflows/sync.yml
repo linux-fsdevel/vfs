@@ -1,0 +1,70 @@
+name: sync-vfs
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: vfs-mutations
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          path: ci-source
+
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+          owner: linux-fsdevel
+          repositories: vfs
+
+      - name: Sync kernel.org to GitHub with CI files
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+
+          PUSH_URL="https://x-access-token:${GITHUB_TOKEN}@github.com/linux-fsdevel/vfs.git"
+
+          git clone --no-tags --depth 1 --no-single-branch \
+            https://git.kernel.org/pub/scm/linux/kernel/git/vfs/vfs.git \
+            /tmp/vfs-sync
+
+          cd /tmp/vfs-sync
+          git config user.name "ml2pr"
+          git config user.email "ml2pr@linux-fsdevel"
+          git remote add github "${PUSH_URL}"
+
+          for branch in vfs.all vfs.base vfs.fixes; do
+            echo "::group::Syncing ${branch}"
+            git checkout "${branch}"
+
+            # Fork .ci branch from the clean mirror
+            git checkout -B "${branch}.ci"
+
+            # Remove any stale CI files, then copy fresh ones from vfs-test
+            rm -rf .github ci
+            mkdir -p .github/workflows .github/scripts
+
+            cp -r "${GITHUB_WORKSPACE}/ci-source/.github/workflows/"* .github/workflows/
+            cp -r "${GITHUB_WORKSPACE}/ci-source/.github/scripts/"* .github/scripts/
+            cp -r "${GITHUB_WORKSPACE}/ci-source/ci" ci
+
+            git add -f .github/workflows .github/scripts ci
+            if ! git diff --cached --quiet; then
+              git commit --no-gpg-sign -m "ci: add CI infrastructure [ml2pr]"
+            fi
+
+            echo "::endgroup::"
+          done
+
+          git push --force github \
+            vfs.all vfs.base vfs.fixes \
+            vfs.all.ci vfs.base.ci vfs.fixes.ci
