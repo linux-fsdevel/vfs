@@ -1,0 +1,4 @@
+# Known-flaky or expected-failing selftests
+# One test name per line, comments allowed
+filesystems:file_stressor
+filelock:ofdlocks
