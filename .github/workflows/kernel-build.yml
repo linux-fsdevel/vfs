@@ -1,0 +1,83 @@
+name: kernel-build
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      toolchain:
+        type: string
+        default: gcc
+      runs_on:
+        type: string
+        default: '["ubuntu-24.04"]'
+      selftest_targets:
+        type: string
+        required: true
+
+env:
+  KBUILD_OUTPUT: ${{ github.workspace }}/kbuild-output
+
+jobs:
+  build:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: 45
+    steps:
+      - name: Get sources
+        uses: linux-fsdevel/vfs-ci/get-linux-source@main
+        with:
+          arch: ${{ inputs.arch }}
+
+      - name: Setup build environment
+        uses: linux-fsdevel/vfs-ci/setup-build-env@main
+        with:
+          arch: ${{ inputs.arch }}
+
+      - name: Build kernel
+        uses: linux-fsdevel/vfs-ci/build-linux@main
+        with:
+          arch: ${{ inputs.arch }}
+          toolchain: ${{ inputs.toolchain }}
+          kbuild-output: ${{ env.KBUILD_OUTPUT }}
+
+      - name: Build selftests
+        env:
+          SELFTEST_TARGETS: ${{ inputs.selftest_targets }}
+        run: |
+          set -euo pipefail
+          ARCH="${{ inputs.arch }}"
+          # Convert platform arch to kernel arch
+          case "${ARCH}" in
+            x86_64)  KARCH=x86 ;;
+            aarch64) KARCH=arm64 ;;
+            s390x)   KARCH=s390 ;;
+            *)       KARCH="${ARCH}" ;;
+          esac
+          CROSS_COMPILE=""
+          if [[ "${ARCH}" != "$(uname -m)" ]]; then
+            CROSS_COMPILE="${ARCH}-linux-gnu-"
+          fi
+          make -j$(( 4 * $(nproc) )) -C tools/testing/selftests \
+            ARCH=${KARCH} CROSS_COMPILE=${CROSS_COMPILE} \
+            TARGETS="${SELFTEST_TARGETS}" \
+            KBUILD_OUTPUT=$(realpath ${KBUILD_OUTPUT}) \
+            install INSTALL_PATH=${{ github.workspace }}/kselftest-install
+
+      - name: Package artifacts
+        uses: linux-fsdevel/vfs-ci/tar-artifacts@main
+        env:
+          ARCHIVE_MAKE_HELPERS: 'true'
+        with:
+          arch: ${{ inputs.arch }}
+          archive: kernel-selftests-${{ inputs.arch }}.tar.zst
+          kbuild-output: ${{ env.KBUILD_OUTPUT }}
+          repo-root: ${{ github.workspace }}
+          kselftest-install: ${{ github.workspace }}/kselftest-install
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: kernel-selftests-${{ inputs.arch }}
+          path: kernel-selftests-${{ inputs.arch }}.tar.zst
+          if-no-files-found: error
