@@ -409,6 +409,7 @@ static const char *wq_affn_names[WQ_AFFN_NR_TYPES] = {
 	[WQ_AFFN_CPU]		= "cpu",
 	[WQ_AFFN_SMT]		= "smt",
 	[WQ_AFFN_CACHE]		= "cache",
+	[WQ_AFFN_CACHE_SHARD]	= "cache_shard",
 	[WQ_AFFN_NUMA]		= "numa",
 	[WQ_AFFN_SYSTEM]	= "system",
 };
@@ -430,6 +431,9 @@ module_param_named(cpu_intensive_warning_thresh, wq_cpu_intensive_warning_thresh
 /* see the comment above the definition of WQ_POWER_EFFICIENT */
 static bool wq_power_efficient = IS_ENABLED(CONFIG_WQ_POWER_EFFICIENT_DEFAULT);
 module_param_named(power_efficient, wq_power_efficient, bool, 0444);
+
+static unsigned int wq_cache_shard_size = 8;
+module_param_named(cache_shard_size, wq_cache_shard_size, uint, 0444);
 
 static bool wq_online;			/* can kworkers be created yet? */
 static bool wq_topo_initialized __read_mostly = false;
@@ -8113,6 +8117,104 @@ static bool __init cpus_share_numa(int cpu0, int cpu1)
 }
 
 /**
+ * llc_count_cores - count distinct cores (SMT groups) within a cpumask
+ * @pod_cpus: the cpumask to scan (typically an LLC pod)
+ * @smt_pt:   the SMT pod type, used to identify sibling groups
+ *
+ * A core is represented by the lowest-numbered CPU in its SMT group. Returns
+ * the number of distinct cores found in @pod_cpus.
+ */
+static int __init llc_count_cores(const struct cpumask *pod_cpus,
+				  struct wq_pod_type *smt_pt)
+{
+	const struct cpumask *smt_cpus;
+	int nr_cores = 0, c;
+
+	for_each_cpu(c, pod_cpus) {
+		smt_cpus = smt_pt->pod_cpus[smt_pt->cpu_pod[c]];
+		if (cpumask_first(smt_cpus) == c)
+			nr_cores++;
+	}
+
+	return nr_cores;
+}
+
+/**
+ * llc_cpu_core_pos - find a CPU's core position within a cpumask
+ * @cpu:      the CPU to locate
+ * @pod_cpus: the cpumask to scan (typically an LLC pod)
+ * @smt_pt:   the SMT pod type, used to identify sibling groups
+ *
+ * Returns the zero-based index of @cpu's core among the distinct cores in
+ * @pod_cpus, ordered by lowest CPU number in each SMT group.
+ */
+static int __init llc_cpu_core_pos(int cpu, const struct cpumask *pod_cpus,
+				   struct wq_pod_type *smt_pt)
+{
+	const struct cpumask *smt_cpus;
+	int core_pos = 0, c;
+
+	for_each_cpu(c, pod_cpus) {
+		smt_cpus = smt_pt->pod_cpus[smt_pt->cpu_pod[c]];
+		if (cpumask_test_cpu(cpu, smt_cpus))
+			break;
+		if (cpumask_first(smt_cpus) == c)
+			core_pos++;
+	}
+
+	return core_pos;
+}
+
+/**
+ * cpu_cache_shard_id - compute the shard index for a CPU within its LLC pod
+ * @cpu: the CPU to look up
+ *
+ * Returns a shard index that is unique within the CPU's LLC pod. The LLC is
+ * divided into shards of at most wq_cache_shard_size cores, always split on
+ * core (SMT group) boundaries so that SMT siblings are never placed in
+ * different shards. Cores are distributed across shards as evenly as possible.
+ *
+ * Example: 36 cores with wq_cache_shard_size=8 gives 5 shards of
+ * 8+7+7+7+7 cores.
+ */
+static int __init cpu_cache_shard_id(int cpu)
+{
+	struct wq_pod_type *cache_pt = &wq_pod_types[WQ_AFFN_CACHE];
+	struct wq_pod_type *smt_pt = &wq_pod_types[WQ_AFFN_SMT];
+	const struct cpumask *pod_cpus;
+	int nr_cores, nr_shards, cores_per_shard, remainder, core_pos;
+
+	/* CPUs in the same LLC as @cpu */
+	pod_cpus = cache_pt->pod_cpus[cache_pt->cpu_pod[cpu]];
+	nr_cores = llc_count_cores(pod_cpus, smt_pt);
+
+	/* Compute number of shards from the max cores per shard */
+	nr_shards = DIV_ROUND_UP(nr_cores, wq_cache_shard_size);
+	/* Distribute cores as evenly as possible across shards */
+	cores_per_shard = nr_cores / nr_shards;
+	remainder = nr_cores % nr_shards;
+
+	core_pos = llc_cpu_core_pos(cpu, pod_cpus, smt_pt);
+
+	/*
+	 * Map core position to shard index. The first @remainder shards have
+	 * (cores_per_shard + 1) cores, the rest have @cores_per_shard cores.
+	 */
+	if (core_pos < remainder * (cores_per_shard + 1))
+		return core_pos / (cores_per_shard + 1);
+
+	return remainder + (core_pos - remainder * (cores_per_shard + 1)) / cores_per_shard;
+}
+
+static bool __init cpus_share_cache_shard(int cpu0, int cpu1)
+{
+	if (!cpus_share_cache(cpu0, cpu1))
+		return false;
+
+	return cpu_cache_shard_id(cpu0) == cpu_cache_shard_id(cpu1);
+}
+
+/**
  * workqueue_init_topology - initialize CPU pods for unbound workqueues
  *
  * This is the third step of three-staged workqueue subsystem initialization and
@@ -8124,9 +8226,15 @@ void __init workqueue_init_topology(void)
 	struct workqueue_struct *wq;
 	int cpu;
 
+	if (!wq_cache_shard_size) {
+		pr_warn("workqueue: cache_shard_size must be > 0, setting to 1\n");
+		wq_cache_shard_size = 1;
+	}
+
 	init_pod_type(&wq_pod_types[WQ_AFFN_CPU], cpus_dont_share);
 	init_pod_type(&wq_pod_types[WQ_AFFN_SMT], cpus_share_smt);
 	init_pod_type(&wq_pod_types[WQ_AFFN_CACHE], cpus_share_cache);
+	init_pod_type(&wq_pod_types[WQ_AFFN_CACHE_SHARD], cpus_share_cache_shard);
 	init_pod_type(&wq_pod_types[WQ_AFFN_NUMA], cpus_share_numa);
 
 	wq_topo_initialized = true;
