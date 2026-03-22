@@ -165,6 +165,7 @@ Runtime validation is controlled by kernel configuration:
 
 1. Enable ``CONFIG_KAPI_SPEC`` to build the framework
 2. Enable ``CONFIG_KAPI_RUNTIME_CHECKS`` for runtime validation
+3. Optionally enable ``CONFIG_KAPI_SPEC_DEBUGFS`` for debugfs interface
 
 Validation Behavior
 -------------------
@@ -193,6 +194,51 @@ custom validation functions via the ``validate`` field in the constraint spec:
     /* In the constraint definition: */
     .type = KAPI_CONSTRAINT_CUSTOM,
     .validate = validate_buffer_size,
+
+DebugFS Interface
+=================
+
+The debugfs interface provides runtime access to API specifications:
+
+Directory Structure
+-------------------
+
+::
+
+    /sys/kernel/debug/kapi/
+    ├── list                     # Overview of all registered API specs
+    └── specs/                   # Per-API specification files
+        ├── sys_open             # Human-readable spec for sys_open
+        ├── sys_close            # Human-readable spec for sys_close
+        ├── sys_read             # Human-readable spec for sys_read
+        └── sys_write            # Human-readable spec for sys_write
+
+Usage Examples
+--------------
+
+List all available API specifications::
+
+    $ cat /sys/kernel/debug/kapi/list
+    Available Kernel API Specifications
+    ===================================
+
+    sys_open - Open or create a file
+    sys_close - Close a file descriptor
+    sys_read - Read data from a file descriptor
+    sys_write - Write data to a file descriptor
+
+    Total: 4 specifications
+
+Query specific API::
+
+    $ cat /sys/kernel/debug/kapi/specs/sys_open
+    Kernel API Specification
+    ========================
+
+    Name: sys_open
+    Version: 1
+    Description: Open or create a file
+    ...
 
 Performance Considerations
 ==========================
@@ -557,7 +603,8 @@ Submitting Specifications
 1. Add specifications to the same file as the API implementation
 2. Follow existing patterns and naming conventions
 3. Test with CONFIG_KAPI_RUNTIME_CHECKS enabled
-4. Run scripts/checkpatch.pl on your changes
+4. Verify debugfs output is correct
+5. Run scripts/checkpatch.pl on your changes
 
 Review Criteria
 ---------------
