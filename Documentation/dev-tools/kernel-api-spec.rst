@@ -30,7 +30,9 @@ The framework aims to:
    common programming errors during development and testing.
 
 3. **Support Tooling**: Export API specifications in machine-readable formats for
-   use by static analyzers, documentation generators, and development tools.
+   use by static analyzers, documentation generators, and development tools. The
+   ``kapi`` tool (see `The kapi Tool`_) provides comprehensive extraction and
+   formatting capabilities.
 
 4. **Formalize Contracts**: Explicitly document API contracts including parameter
    constraints, execution contexts, locking requirements, and side effects.
@@ -454,15 +456,10 @@ Modern IDEs can use the specification data for:
 - Context validation
 - Error code documentation
 
-Testing Framework
------------------
+Example IDE integration::
 
-The framework includes test helpers::
-
-    #ifdef CONFIG_KAPI_TESTING
-    /* Verify API behaves according to specification */
-    kapi_test_api("kmalloc", test_cases);
-    #endif
+    # Generate IDE completion data
+    $ kapi --format json > .vscode/kernel-apis.json
 
 Best Practices
 ==============
