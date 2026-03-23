@@ -52,7 +52,7 @@ struct exportfs_block_ops {
 	 * If @write is %true, also allocate the blocks for the range if needed.
 	 */
 	int (*map_blocks)(struct inode *inode, loff_t offset, u64 len,
-			struct iomap *iomap, bool write,
+			struct iomap *iomap, bool write, u32 *dev_idx,
 			u32 *device_generation);
 
 	/*

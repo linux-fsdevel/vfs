@@ -30,10 +30,12 @@ nfsd4_block_map_extent(struct inode *inode, const struct svc_fh *fhp,
 	struct super_block *sb = inode->i_sb;
 	struct iomap iomap;
 	u32 device_generation = 0;
+	u32 dev_idx = 0;
 	int error;
 
 	error = sb->s_export_op->block_ops->map_blocks(inode, offset, length,
-			&iomap, iomode != IOMODE_READ, &device_generation);
+			&iomap, iomode != IOMODE_READ, &dev_idx,
+			&device_generation);
 	if (error) {
 		if (error == -ENXIO)
 			return nfserr_layoutunavailable;
@@ -75,7 +77,8 @@ nfsd4_block_map_extent(struct inode *inode, const struct svc_fh *fhp,
 		return nfserr_layoutunavailable;
 	}
 
-	error = nfsd4_set_deviceid(&bex->vol_id, fhp, 0, device_generation);
+	error = nfsd4_set_deviceid(&bex->vol_id, fhp, dev_idx,
+			device_generation);
 	if (error)
 		return nfserrno(error);
 

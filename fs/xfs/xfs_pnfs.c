@@ -123,6 +123,7 @@ xfs_fs_map_blocks(
 	u64			length,
 	struct iomap		*iomap,
 	bool			write,
+	u32			*dev_idx,
 	u32			*device_generation)
 {
 	struct xfs_inode	*ip = XFS_I(inode);
@@ -138,6 +139,8 @@ xfs_fs_map_blocks(
 
 	if (xfs_is_shutdown(mp))
 		return -EIO;
+
+	*dev_idx = 0;
 
 	/*
 	 * We can't export inodes residing on the realtime device.  The realtime
