@@ -46,15 +46,48 @@ xfs_break_leased_layouts(
 	return error;
 }
 
+/*
+ * Check what layouts we support for direct block device access.
+ */
 static expfs_block_layouts_t
 xfs_fs_layouts_supported(
 	struct super_block	*sb)
 {
-	expfs_block_layouts_t	supported = EXPFS_BLOCK_IN_BAND_ID;
+	struct xfs_mount	*mp = XFS_M(sb);
+	expfs_block_layouts_t	supported = 0;
 
-	if (exportfs_bdev_supports_out_of_band_id(sb->s_bdev))
+	/*
+	 * We don't have a good way to identify a specific RT device.  And
+	 * there's really no point in trying hard just for the deprecated
+	 * block layout support.
+	 */
+	if (!xfs_has_realtime(mp))
+		supported |= EXPFS_BLOCK_IN_BAND_ID;
+
+	if (exportfs_bdev_supports_out_of_band_id(sb->s_bdev) ||
+	    (mp->m_rtdev_targp &&
+	     exportfs_bdev_supports_out_of_band_id(mp->m_rtdev_targp->bt_bdev)))
 		supported |= EXPFS_BLOCK_OUT_OF_BAND_ID;
 	return supported;
+}
+
+static struct block_device *
+xfs_fs_devid_to_bdev(
+	struct super_block	*sb,
+	u32			dev_idx)
+{
+	struct xfs_mount	*mp = XFS_M(sb);
+
+	switch (dev_idx) {
+	case 0:
+		return sb->s_bdev;
+	case 1:
+		if (mp->m_rtdev_targp && mp->m_rtdev_targp->bt_bdev)
+			return mp->m_rtdev_targp->bt_bdev;
+		fallthrough;
+	default:
+		return ERR_PTR(-EINVAL);
+	}
 }
 
 /*
@@ -141,20 +174,14 @@ xfs_fs_map_blocks(
 		return -EIO;
 
 	*dev_idx = 0;
-
-	/*
-	 * We can't export inodes residing on the realtime device.  The realtime
-	 * device doesn't have a UUID to identify it, so the client has no way
-	 * to find it.
-	 */
 	if (XFS_IS_REALTIME_INODE(ip))
-		return -ENXIO;
+		*dev_idx = 1;
 
 	/*
-	 * The pNFS block layout spec actually supports reflink like
-	 * functionality, but the Linux pNFS server doesn't implement it yet.
+	 * The pNFS block layout spec supports out of place writes, but the
+	 * Linux pNFS server doesn't implement it yet.
 	 */
-	if (xfs_is_reflink_inode(ip))
+	if (xfs_is_cow_inode(ip))
 		return -ENXIO;
 
 	/*
@@ -351,6 +378,7 @@ out_drop_iolock:
 
 struct exportfs_block_ops xfs_export_block_ops = {
 	.layouts_supported	= xfs_fs_layouts_supported,
+	.devid_to_bdev		= xfs_fs_devid_to_bdev,
 	.get_uuid		= xfs_fs_get_uuid,
 	.map_blocks		= xfs_fs_map_blocks,
 	.commit_blocks		= xfs_fs_commit_blocks,
