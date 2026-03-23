@@ -303,14 +303,18 @@ nfsd4_block_get_unique_id(struct gendisk *disk, struct pnfs_block_volume *b)
 }
 
 static int
-nfsd4_block_get_device_info_scsi(struct super_block *sb,
-		struct nfs4_client *clp,
-		struct nfsd4_getdeviceinfo *gdp)
+nfsd4_block_get_device_info_scsi(struct block_device *bdev,
+		struct nfs4_client *clp, struct nfsd4_getdeviceinfo *gdp)
 {
 	struct pnfs_block_deviceaddr *dev;
 	struct pnfs_block_volume *b;
 	const struct pr_ops *ops;
 	int ret;
+
+	if (bdev_is_partition(bdev))
+		return -EINVAL;
+	if (!exportfs_bdev_supports_out_of_band_id(bdev))
+		return -EINVAL;
 
 	dev = kzalloc_flex(*dev, volumes, 1);
 	if (!dev)
@@ -323,30 +327,28 @@ nfsd4_block_get_device_info_scsi(struct super_block *sb,
 	b->type = PNFS_BLOCK_VOLUME_SCSI;
 	b->scsi.pr_key = nfsd4_scsi_pr_key(clp);
 
-	ret = nfsd4_block_get_unique_id(sb->s_bdev->bd_disk, b);
+	ret = nfsd4_block_get_unique_id(bdev->bd_disk, b);
 	if (ret < 0)
 		goto out_free_dev;
 
 	ret = -EINVAL;
-	ops = sb->s_bdev->bd_disk->fops->pr_ops;
+	ops = bdev->bd_disk->fops->pr_ops;
 	if (!ops) {
-		pr_err("pNFS: device %s does not support PRs.\n",
-			sb->s_id);
+		pr_err("pNFS: device %pg does not support persistent reservations.\n",
+			bdev);
 		goto out_free_dev;
 	}
 
-	ret = ops->pr_register(sb->s_bdev, 0, NFSD_MDS_PR_KEY, true);
+	ret = ops->pr_register(bdev, 0, NFSD_MDS_PR_KEY, true);
 	if (ret) {
-		pr_err("pNFS: failed to register key for device %s.\n",
-			sb->s_id);
+		pr_err("pNFS: failed to register key for device %pg.\n", bdev);
 		goto out_free_dev;
 	}
 
-	ret = ops->pr_reserve(sb->s_bdev, NFSD_MDS_PR_KEY,
+	ret = ops->pr_reserve(bdev, NFSD_MDS_PR_KEY,
 			PR_EXCLUSIVE_ACCESS_REG_ONLY, 0);
 	if (ret) {
-		pr_err("pNFS: failed to reserve device %s.\n",
-			sb->s_id);
+		pr_err("pNFS: failed to reserve device %pd.\n", bdev);
 		goto out_free_dev;
 	}
 
@@ -364,9 +366,16 @@ nfsd4_scsi_proc_getdeviceinfo(struct super_block *sb,
 		struct nfs4_client *clp,
 		struct nfsd4_getdeviceinfo *gdp)
 {
-	if (bdev_is_partition(sb->s_bdev))
-		return nfserr_inval;
-	return nfserrno(nfsd4_block_get_device_info_scsi(sb, clp, gdp));
+	struct block_device *bdev = sb->s_bdev;
+
+	if (sb->s_export_op->block_ops->devid_to_bdev) {
+		bdev = sb->s_export_op->block_ops->devid_to_bdev(sb,
+					gdp->gd_devid.dev_idx);
+		if (IS_ERR(bdev))
+			return nfserrno(PTR_ERR(bdev));
+	}
+
+	return nfserrno(nfsd4_block_get_device_info_scsi(bdev, clp, gdp));
 }
 static __be32
 nfsd4_scsi_proc_layoutcommit(struct inode *inode, struct svc_rqst *rqstp,

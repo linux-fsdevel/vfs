@@ -37,6 +37,12 @@ struct exportfs_block_ops {
 	expfs_block_layouts_t (*layouts_supported)(struct super_block *sb);
 
 	/*
+	 * Map from an unsigned integer device index to a block device.
+	 */
+	struct block_device *(*devid_to_bdev)(struct super_block *sb,
+			u32 dev_idx);
+
+	/*
 	 * Get the in-band device unique signature exposed to clients.
 	 */
 	int (*get_uuid)(struct super_block *sb, u8 *buf, u32 *len, u64 *offset);
