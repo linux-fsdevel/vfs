@@ -75,7 +75,7 @@ nfsd4_block_map_extent(struct inode *inode, const struct svc_fh *fhp,
 		return nfserr_layoutunavailable;
 	}
 
-	error = nfsd4_set_deviceid(&bex->vol_id, fhp, device_generation);
+	error = nfsd4_set_deviceid(&bex->vol_id, fhp, 0, device_generation);
 	if (error)
 		return nfserrno(error);
 

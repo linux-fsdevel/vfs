@@ -110,7 +110,7 @@ nfsd4_find_devid_map(int idx)
 
 int
 nfsd4_set_deviceid(struct nfsd4_deviceid *id, const struct svc_fh *fhp,
-		u32 device_generation)
+		u32 dev_idx, u32 device_generation)
 {
 	if (!fhp->fh_export->ex_devid_map) {
 		nfsd4_alloc_devid_map(fhp);
@@ -120,6 +120,7 @@ nfsd4_set_deviceid(struct nfsd4_deviceid *id, const struct svc_fh *fhp,
 
 	id->fsid_idx = fhp->fh_export->ex_devid_map->idx;
 	id->generation = device_generation;
+	id->dev_idx = dev_idx;
 	return 0;
 }
 

@@ -602,6 +602,7 @@ struct nfsd4_reclaim_complete {
 struct nfsd4_deviceid {
 	u64			fsid_idx;
 	u32			generation;
+	u32			dev_idx;
 };
 
 static inline __be32 *
@@ -612,7 +613,7 @@ svcxdr_encode_deviceid4(__be32 *p, const struct nfsd4_deviceid *devid)
 	*q = (__force __be64)devid->fsid_idx;
 	p += 2;
 	*p++ = (__force __be32)devid->generation;
-	*p++ = xdr_zero;
+	*p++ = (__force __be32)devid->dev_idx;
 	return p;
 }
 
@@ -624,7 +625,7 @@ svcxdr_decode_deviceid4(__be32 *p, struct nfsd4_deviceid *devid)
 	devid->fsid_idx = (__force u64)(*q);
 	p += 2;
 	devid->generation = (__force u32)(*p++);
-	p++; /* NFSD does not use the remaining octets */
+	devid->dev_idx = (__force u32)(*p++);
 	return p;
 }
 

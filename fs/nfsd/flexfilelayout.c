@@ -24,7 +24,6 @@ nfsd4_ff_proc_layoutget(struct svc_rqst *rqstp, struct inode *inode,
 		const struct svc_fh *fhp, struct nfsd4_layoutget *args)
 {
 	struct nfsd4_layout_seg *seg = &args->lg_seg;
-	u32 device_generation = 0;
 	int error;
 	uid_t u;
 
@@ -57,7 +56,7 @@ nfsd4_ff_proc_layoutget(struct svc_rqst *rqstp, struct inode *inode,
 		fl->uid = inode->i_uid;
 	fl->gid = inode->i_gid;
 
-	error = nfsd4_set_deviceid(&fl->deviceid, fhp, device_generation);
+	error = nfsd4_set_deviceid(&fl->deviceid, fhp, 0, 0);
 	if (error)
 		goto out_error;
 

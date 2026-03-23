@@ -65,7 +65,7 @@ __be32 nfsd4_return_client_layouts(struct svc_rqst *rqstp,
 		struct nfsd4_compound_state *cstate,
 		struct nfsd4_layoutreturn *lrp);
 int nfsd4_set_deviceid(struct nfsd4_deviceid *id, const struct svc_fh *fhp,
-		u32 device_generation);
+		u32 dev_idx, u32 device_generation);
 struct nfsd4_deviceid_map *nfsd4_find_devid_map(int idx);
 #endif /* CONFIG_NFSD_V4 */
 
