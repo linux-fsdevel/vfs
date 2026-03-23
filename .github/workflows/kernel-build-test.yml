@@ -1,0 +1,93 @@
+name: kernel-build-test
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      toolchain:
+        type: string
+        default: gcc
+      distro:
+        type: string
+        required: true
+      runs_on:
+        description: 'JSON-encoded runner label array, e.g. ["ubuntu-24.04"]'
+        type: string
+        default: '["ubuntu-24.04"]'
+      timeout_minutes:
+        type: number
+        default: 90
+      test_suite:
+        type: string
+        required: true
+
+jobs:
+  build-and-test:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      MKOSI_KERNEL: "${{ github.workspace }}/../mkosi-kernel"
+      MKOSI_FSTESTS: "${{ github.workspace }}/../fstests"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: systemd/mkosi@56d5ed4247deb3d0b11f7a6aec5a1a9f580ccde5
+
+      - name: Clone mkosi-kernel
+        run: git clone --depth=1 https://github.com/DaanDeMeyer/mkosi-kernel.git "$MKOSI_KERNEL"
+
+      - name: Clone fstests
+        if: inputs.test_suite != 'selftests'
+        run: |
+          git clone --depth=1 https://github.com/kdave/xfstests.git "$MKOSI_FSTESTS"
+          if [ "${{ inputs.test_suite }}" = "ovl-fstests" ]; then
+            git clone --depth=1 https://github.com/amir73il/unionmount-testsuite.git "$MKOSI_FSTESTS/src/unionmount-testsuite"
+          fi
+
+      - name: Configure mkosi
+        run: |
+          set -euo pipefail
+          cp -av ci/mkosi/mkosi.kernel.config "${MKOSI_KERNEL}/"
+          cp -avr ci/mkosi/mkosi.extra/. "${MKOSI_KERNEL}/mkosi.extra/"
+          cp -avr ci/mkosi/mkosi.repart  "${MKOSI_KERNEL}/"
+          mkdir -p "${MKOSI_KERNEL}/mkosi.conf.d"
+          cp -av ci/mkosi/mkosi.conf.d/99-vfs.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          if [ "${{ inputs.test_suite }}" != "selftests" ]; then
+            cp -av ci/mkosi/mkosi.conf.d/99-vfs-fstests.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          fi
+
+          if [ "${{ inputs.test_suite }}" = "ovl-fstests" ]; then
+            cp -av ci/mkosi/mkosi.conf.d/99-vfs-ovl.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          fi
+
+          cat > "${MKOSI_KERNEL}/mkosi.local.conf" <<EOF
+          [Distribution]
+          Distribution=${{ inputs.distro }}
+          EOF
+          mkosi --directory="${MKOSI_KERNEL}" genkey
+
+      - name: Run mkosi summary
+        run: mkosi --directory="${MKOSI_KERNEL}" summary
+
+      - name: Build image and kernel
+        run: mkosi --directory="${MKOSI_KERNEL}" build
+
+      - name: Run ${{ inputs.test_suite }}
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.test_suite }}" in
+            selftests)   unit=vfs-selftests.service ;;
+            xfstests)    unit=xfs-fstests.service ;;
+            ovl-fstests) unit=ovl-fstests.service ;;
+          esac
+
+          rc=0
+          mkosi --directory="${MKOSI_KERNEL}" box -- mkosi --directory="${MKOSI_KERNEL}" --kernel-command-line-extra=systemd.unit="$unit" qemu || rc=$?
+
+          if [ "$rc" -ne 123 ]; then
+            echo "::error::Tests failed (exit code $rc)"
+            exit 1
+          fi
