@@ -145,6 +145,7 @@ static void __end_buffer_read_notouch(struct buffer_head *bh, int uptodate)
 {
 	if (uptodate) {
 		set_buffer_uptodate(bh);
+		clear_buffer_read_io_error(bh);
 	} else {
 		/* This happens, due to failed read-ahead attempts. */
 		clear_buffer_uptodate(bh);
@@ -167,6 +168,7 @@ void end_buffer_write_sync(struct buffer_head *bh, int uptodate)
 {
 	if (uptodate) {
 		set_buffer_uptodate(bh);
+		clear_buffer_read_io_error(bh);
 	} else {
 		buffer_io_error(bh, ", lost sync page write");
 		mark_buffer_write_io_error(bh);
