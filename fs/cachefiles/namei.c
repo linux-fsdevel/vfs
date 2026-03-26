@@ -287,14 +287,14 @@ int cachefiles_bury_object(struct cachefiles_cache *cache,
 	if (!d_is_dir(rep)) {
 		ret = cachefiles_unlink(cache, object, dir, rep, why);
 		end_removing(rep);
-
 		_leave(" = %d", ret);
 		return ret;
 	}
 
 	/* directories have to be moved to the graveyard */
 	_debug("move stale object to graveyard");
-	end_removing(rep);
+	dget(rep);
+	end_removing(rep); /* Drops ref on rep */
 
 try_again:
 	/* first step is to make up a grave dentry in the graveyard */
@@ -304,8 +304,10 @@ try_again:
 
 	/* do the multiway lock magic */
 	trap = lock_rename(cache->graveyard, dir);
-	if (IS_ERR(trap))
-		return PTR_ERR(trap);
+	if (IS_ERR(trap)) {
+		ret = PTR_ERR(trap);
+		goto out;
+	}
 
 	/* do some checks before getting the grave dentry */
 	if (rep->d_parent != dir || IS_DEADDIR(d_inode(rep))) {
@@ -313,25 +315,27 @@ try_again:
 		 * lock */
 		unlock_rename(cache->graveyard, dir);
 		_leave(" = 0 [culled?]");
-		return 0;
+		ret = 0;
+		goto out;
 	}
 
+	ret = -EIO;
 	if (!d_can_lookup(cache->graveyard)) {
 		unlock_rename(cache->graveyard, dir);
 		cachefiles_io_error(cache, "Graveyard no longer a directory");
-		return -EIO;
+		goto out;
 	}
 
 	if (trap == rep) {
 		unlock_rename(cache->graveyard, dir);
 		cachefiles_io_error(cache, "May not make directory loop");
-		return -EIO;
+		goto out;
 	}
 
 	if (d_mountpoint(rep)) {
 		unlock_rename(cache->graveyard, dir);
 		cachefiles_io_error(cache, "Mountpoint in cache");
-		return -EIO;
+		goto out;
 	}
 
 	grave = lookup_one(&nop_mnt_idmap, &QSTR(nbuffer), cache->graveyard);
@@ -343,11 +347,12 @@ try_again:
 
 		if (PTR_ERR(grave) == -ENOMEM) {
 			_leave(" = -ENOMEM");
-			return -ENOMEM;
+			ret = -ENOMEM;
+			goto out;
 		}
 
 		cachefiles_io_error(cache, "Lookup error %ld", PTR_ERR(grave));
-		return -EIO;
+		goto out;
 	}
 
 	if (d_is_positive(grave)) {
@@ -362,7 +367,7 @@ try_again:
 		unlock_rename(cache->graveyard, dir);
 		dput(grave);
 		cachefiles_io_error(cache, "Mountpoint in graveyard");
-		return -EIO;
+		goto out;
 	}
 
 	/* target should not be an ancestor of source */
@@ -370,7 +375,7 @@ try_again:
 		unlock_rename(cache->graveyard, dir);
 		dput(grave);
 		cachefiles_io_error(cache, "May not make directory loop");
-		return -EIO;
+		goto out;
 	}
 
 	/* attempt the rename */
@@ -404,8 +409,10 @@ try_again:
 	__cachefiles_unmark_inode_in_use(object, d_inode(rep));
 	unlock_rename(cache->graveyard, dir);
 	dput(grave);
-	_leave(" = 0");
-	return 0;
+	_leave(" = %d", ret);
+out:
+	dput(rep);
+	return ret;
 }
 
 /*
@@ -812,7 +819,6 @@ int cachefiles_cull(struct cachefiles_cache *cache, struct dentry *dir,
 
 	ret = cachefiles_bury_object(cache, NULL, dir, victim,
 				     FSCACHE_OBJECT_WAS_CULLED);
-	dput(victim);
 	if (ret < 0)
 		goto error;
 
