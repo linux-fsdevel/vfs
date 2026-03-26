@@ -32,6 +32,8 @@ struct cachefiles_kiocb {
 	u64			b_writing;
 };
 
+#define IS_ERR_VALUE_LL(x) unlikely((x) >= (unsigned long long)-MAX_ERRNO)
+
 static inline void cachefiles_put_kiocb(struct cachefiles_kiocb *ki)
 {
 	if (refcount_dec_and_test(&ki->ki_refcnt)) {
@@ -193,60 +195,81 @@ presubmission_error:
 }
 
 /*
- * Query the occupancy of the cache in a region, returning where the next chunk
- * of data starts and how long it is.
+ * Query the occupancy of the cache in a region, returning the extent of the
+ * next two chunks of cached data and the next hole.
  */
 static int cachefiles_query_occupancy(struct netfs_cache_resources *cres,
-				      loff_t start, size_t len, size_t granularity,
-				      loff_t *_data_start, size_t *_data_len)
+				      struct fscache_occupancy *occ)
 {
 	struct cachefiles_object *object;
+	struct inode *inode;
 	struct file *file;
-	loff_t off, off2;
-
-	*_data_start = -1;
-	*_data_len = 0;
+	unsigned long long i_size;
+	loff_t ret;
+	int i;
 
 	if (!fscache_wait_for_operation(cres, FSCACHE_WANT_READ))
 		return -ENOBUFS;
 
 	object = cachefiles_cres_object(cres);
 	file = cachefiles_cres_file(cres);
-	granularity = max_t(size_t, object->volume->cache->bsize, granularity);
+	inode = file_inode(file);
+	occ->granularity = object->volume->cache->bsize;
 
-	_enter("%pD,%li,%llx,%zx/%llx",
-	       file, file_inode(file)->i_ino, start, len,
-	       i_size_read(file_inode(file)));
+	_enter("%pD,%li,%llx-%llx/%llx",
+	       file, inode->i_ino, occ->query_from, occ->query_to,
+	       i_size_read(inode));
 
-	off = cachefiles_inject_read_error();
-	if (off == 0)
-		off = vfs_llseek(file, start, SEEK_DATA);
-	if (off == -ENXIO)
-		return -ENODATA; /* Beyond EOF */
-	if (off < 0 && off >= (loff_t)-MAX_ERRNO)
-		return -ENOBUFS; /* Error. */
-	if (round_up(off, granularity) >= start + len)
-		return -ENODATA; /* No data in range */
+	if (i_size_read(inode) == 0)
+		goto done;
 
-	off2 = cachefiles_inject_read_error();
-	if (off2 == 0)
-		off2 = vfs_llseek(file, off, SEEK_HOLE);
-	if (off2 == -ENXIO)
-		return -ENODATA; /* Beyond EOF */
-	if (off2 < 0 && off2 >= (loff_t)-MAX_ERRNO)
-		return -ENOBUFS; /* Error. */
+	switch (object->content_info) {
+	case CACHEFILES_CONTENT_ALL:
+	case CACHEFILES_CONTENT_SINGLE:
+		i_size = i_size_read(inode);
+		if (i_size > occ->query_from) {
+			occ->cached_from[0] = 0;
+			occ->cached_to[0] = i_size;
+			occ->cached_type[0] = FSCACHE_EXTENT_DATA;
+			occ->query_from = ULLONG_MAX;
+		}
+		goto done;
+	default:
+		break;
+	}
 
-	/* Round away partial blocks */
-	off = round_up(off, granularity);
-	off2 = round_down(off2, granularity);
-	if (off2 <= off)
-		return -ENODATA;
+	for (i = 0; i < ARRAY_SIZE(occ->cached_from); i++) {
+		ret = cachefiles_inject_read_error();
+		if (ret == 0)
+			ret = file->f_op->llseek(file, occ->query_from, SEEK_DATA);
+		if (IS_ERR_VALUE_LL(ret)) {
+			if (ret != -ENXIO)
+				return ret;
+			occ->query_from = ULLONG_MAX;
+			goto done;
+		}
+		occ->cached_type[i] = FSCACHE_EXTENT_DATA;
+		occ->cached_from[i] = ret;
+		occ->query_from = ret;
 
-	*_data_start = off;
-	if (off2 > start + len)
-		*_data_len = len;
-	else
-		*_data_len = off2 - off;
+		ret = cachefiles_inject_read_error();
+		if (ret == 0)
+			ret = file->f_op->llseek(file, occ->query_from, SEEK_HOLE);
+		if (IS_ERR_VALUE_LL(ret)) {
+			if (ret != -ENXIO)
+				return ret;
+			occ->query_from = ULLONG_MAX;
+			goto done;
+		}
+		occ->cached_to[i] = ret;
+		occ->query_from = ret;
+		if (occ->query_from >= occ->query_to)
+			break;
+	}
+
+done:
+	_debug("query[0] %llx-%llx", occ->cached_from[0], occ->cached_to[0]);
+	_debug("query[1] %llx-%llx", occ->cached_from[1], occ->cached_to[1]);
 	return 0;
 }
 
@@ -490,18 +513,6 @@ out_no_object:
 }
 
 /*
- * Prepare a read operation, shortening it to a cached/uncached
- * boundary as appropriate.
- */
-static enum netfs_io_source cachefiles_prepare_read(struct netfs_io_subrequest *subreq,
-						    unsigned long long i_size)
-{
-	return cachefiles_do_prepare_read(&subreq->rreq->cache_resources,
-					  subreq->start, &subreq->len, i_size,
-					  &subreq->flags, subreq->rreq->inode->i_ino);
-}
-
-/*
  * Prepare an on-demand read operation, shortening it to a cached/uncached
  * boundary as appropriate.
  */
@@ -658,9 +669,9 @@ static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 	       wreq->debug_id, subreq->debug_index, start, start + len - 1);
 
 	/* We need to start on the cache granularity boundary */
-	off = start & (CACHEFILES_DIO_BLOCK_SIZE - 1);
+	off = start & (cache->bsize - 1);
 	if (off) {
-		pre = CACHEFILES_DIO_BLOCK_SIZE - off;
+		pre = cache->bsize - off;
 		if (pre >= len) {
 			fscache_count_dio_misfit();
 			netfs_write_subrequest_terminated(subreq, len);
@@ -674,8 +685,8 @@ static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 
 	/* We also need to end on the cache granularity boundary */
 	if (start + len == wreq->i_size) {
-		size_t part = len % CACHEFILES_DIO_BLOCK_SIZE;
-		size_t need = CACHEFILES_DIO_BLOCK_SIZE - part;
+		size_t part = len & (cache->bsize - 1);
+		size_t need = cache->bsize - part;
 
 		if (part && stream->submit_extendable_to >= need) {
 			len += need;
@@ -684,7 +695,7 @@ static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 		}
 	}
 
-	post = len & (CACHEFILES_DIO_BLOCK_SIZE - 1);
+	post = len & (cache->bsize - 1);
 	if (post) {
 		len -= post;
 		if (len == 0) {
@@ -712,6 +723,134 @@ static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 }
 
 /*
+ * Collect the result of buffered writeback to the cache.  This includes
+ * copying a read to the cache.  Netfslib collates the results, which might
+ * occur out of order, and delivers them to the cache so that it can update its
+ * content record.
+ *
+ * The writes we made are all rounded out at both sides to the nearest DIO
+ * block boundary, so if the final block contains the EOF in the middle of it
+ * (rather than at the end), padding will have been written to the file.  The
+ * backing file's filesize will have been updated if the write extended the
+ * file; the filesize may still change due to outstanding subreqs.
+ *
+ * The metadata in the cache file xattr records the size of the object we have
+ * stored, but the cache file EOF only goes up to where we've cached data to
+ * and, furthermore, is rounded up to the nearest DIO block boundary.
+ */
+static void cachefiles_collect_write(struct netfs_io_request *wreq,
+				     unsigned long long start, size_t len)
+{
+	struct netfs_cache_resources *cres = &wreq->cache_resources;
+	struct cachefiles_object *object = cachefiles_cres_object(cres);
+	struct cachefiles_cache *cache = object->volume->cache;
+	struct fscache_cookie *cookie = fscache_cres_cookie(cres);
+	struct file *file = cachefiles_cres_file(cres);
+	unsigned long long old_size = cres->cache_i_size;
+	unsigned long long new_size = i_size_read(file_inode(file));
+	unsigned long long data_to = cookie->object_size;
+	unsigned long long end = start + len;
+	int ret;
+
+	_enter("%llx,%zx,%x", start, len, cache->bsize);
+
+	if (WARN_ON(old_size	& (cache->bsize - 1)) ||
+	    WARN_ON(new_size	& (cache->bsize - 1)) ||
+	    WARN_ON(start	& (cache->bsize - 1)) ||
+	    WARN_ON(len		& (cache->bsize - 1))) {
+		trace_cachefiles_io_error(object, file_inode(file), -EIO,
+					  cachefiles_trace_alignment_error);
+		cachefiles_remove_object_xattr(cache, object, file->f_path.dentry);
+		return;
+	}
+
+	/* Zeroth case: Single monolithic files are handled specially.
+	 */
+	if (wreq->origin == NETFS_WRITEBACK_SINGLE) {
+		object->content_info = CACHEFILES_CONTENT_SINGLE;
+		goto update_sizes;
+	}
+
+	/* First case: The backing file was empty. */
+	if (old_size == 0) {
+		if (start == 0)
+			object->content_info = CACHEFILES_CONTENT_ALL;
+		else
+			object->content_info = CACHEFILES_CONTENT_BACKFS_MAP;
+		goto update_sizes;
+	}
+
+	/* Second case: The backing file is entirely within the old object size
+	 * and thus there can be no partial tail block to deal with in the
+	 * cache file.
+	 */
+	if (old_size <= data_to) {
+		if (start > old_size)
+			goto discontiguous;
+		goto update_sizes;
+	}
+
+	/* Third case: The write happened entirely within the bounds of the
+	 * current cache file's size.
+	 */
+	if (end <= old_size)
+		goto update_sizes;
+
+	/* Fourth case: The write overwrote the partial tail block and extended
+	 * the file.  We only need to update the object size because netfslib
+	 * rounds out/pads cache writes to whole disk blocks.
+	 */
+	if (start < old_size)
+		goto update_sizes;
+
+	/* Fifth case: The write started from the end of the whole tail block
+	 * and extended the file.  Just extend our notion of the filesize.
+	 */
+	if (start == old_size && old_size == data_to)
+		goto update_sizes;
+
+	/* Sixth case: The write continued on from the partial tail block and
+	 * extended the file.  Need to clear the gap.
+	 */
+	if (start == old_size && old_size > data_to)
+		goto clear_gap;
+
+discontiguous:
+	/* Seventh case: The write was beyond the EOF on the cache file, so now
+	 * there's a hole in the file and we can no longer say in the metadata
+	 * that we can assume we have it all.  We may also need to clear the
+	 * end of the partial tail block.
+	 */
+	/* TODO: For the moment, we will have to use SEEK_HOLE/SEEK_DATA. */
+	object->content_info = CACHEFILES_CONTENT_BACKFS_MAP;
+
+clear_gap:
+	/* We need to clear any partial padding that got jumped over.  It
+	 * *should* be all zeros, but shared-writable mmap exists...
+	 */
+	if (old_size > data_to) {
+		trace_cachefiles_trunc(object, file_inode(file), data_to, old_size,
+				       cachefiles_trunc_clear_padding);
+		ret = cachefiles_inject_write_error();
+		if (ret == 0)
+			ret = vfs_fallocate(file, FALLOC_FL_ZERO_RANGE,
+					    data_to, old_size - data_to);
+		if (ret < 0) {
+			trace_cachefiles_io_error(object, file_inode(file), ret,
+						  cachefiles_trace_fallocate_error);
+			cachefiles_io_error_obj(object, "fallocate zero pad failed %d", ret);
+			cachefiles_remove_object_xattr(cache, object, file->f_path.dentry);
+			return;
+		}
+	}
+
+update_sizes:
+	cres->cache_i_size = umax(old_size, end);
+	object->object_size = cookie->object_size;
+	return;
+}
+
+/*
  * Clean up an operation.
  */
 static void cachefiles_end_operation(struct netfs_cache_resources *cres)
@@ -728,11 +867,11 @@ static const struct netfs_cache_ops cachefiles_netfs_cache_ops = {
 	.read			= cachefiles_read,
 	.write			= cachefiles_write,
 	.issue_write		= cachefiles_issue_write,
-	.prepare_read		= cachefiles_prepare_read,
 	.prepare_write		= cachefiles_prepare_write,
 	.prepare_write_subreq	= cachefiles_prepare_write_subreq,
 	.prepare_ondemand_read	= cachefiles_prepare_ondemand_read,
 	.query_occupancy	= cachefiles_query_occupancy,
+	.collect_write		= cachefiles_collect_write,
 };
 
 /*
@@ -742,14 +881,18 @@ bool cachefiles_begin_operation(struct netfs_cache_resources *cres,
 				enum fscache_want_state want_state)
 {
 	struct cachefiles_object *object = cachefiles_cres_object(cres);
+	struct file *file;
 
 	if (!cachefiles_cres_file(cres)) {
 		cres->ops = &cachefiles_netfs_cache_ops;
 		if (object->file) {
 			spin_lock(&object->lock);
-			if (!cres->cache_priv2 && object->file)
-				cres->cache_priv2 = get_file(object->file);
+			file = object->file;
+			if (!cres->cache_priv2 && file)
+				cres->cache_priv2 = get_file(file);
 			spin_unlock(&object->lock);
+			cres->cache_i_size = i_size_read(file_inode(file));
+			cres->dio_size = object->volume->cache->bsize;
 		}
 	}
 

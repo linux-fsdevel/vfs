@@ -449,7 +449,6 @@ struct file *cachefiles_create_tmpfile(struct cachefiles_object *object)
 	struct dentry *fan = volume->fanout[(u8)object->cookie->key_hash];
 	struct file *file;
 	const struct path parentpath = { .mnt = cache->mnt, .dentry = fan };
-	uint64_t ni_size;
 	long ret;
 
 
@@ -481,23 +480,6 @@ struct file *cachefiles_create_tmpfile(struct cachefiles_object *object)
 	if (ret < 0)
 		goto err_unuse;
 
-	ni_size = object->cookie->object_size;
-	ni_size = round_up(ni_size, CACHEFILES_DIO_BLOCK_SIZE);
-
-	if (ni_size > 0) {
-		trace_cachefiles_trunc(object, file_inode(file), 0, ni_size,
-				       cachefiles_trunc_expand_tmpfile);
-		ret = cachefiles_inject_write_error();
-		if (ret == 0)
-			ret = vfs_truncate(&file->f_path, ni_size);
-		if (ret < 0) {
-			trace_cachefiles_vfs_error(
-				object, file_inode(file), ret,
-				cachefiles_trace_trunc_error);
-			goto err_unuse;
-		}
-	}
-
 	ret = -EINVAL;
 	if (unlikely(!file->f_op->read_iter) ||
 	    unlikely(!file->f_op->write_iter)) {
@@ -507,6 +489,7 @@ struct file *cachefiles_create_tmpfile(struct cachefiles_object *object)
 	}
 out:
 	cachefiles_end_secure(cache, saved_cred);
+	object->content_info = CACHEFILES_CONTENT_ALL;
 	return file;
 
 err_unuse:

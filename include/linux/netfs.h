@@ -22,6 +22,7 @@
 
 enum netfs_sreq_ref_trace;
 typedef struct mempool mempool_t;
+struct fscache_occupancy;
 struct folio_queue;
 
 /**
@@ -159,8 +160,10 @@ struct netfs_cache_resources {
 	const struct netfs_cache_ops	*ops;
 	void				*cache_priv;
 	void				*cache_priv2;
+	unsigned long long		cache_i_size;	/* Initial size of cache file */
 	unsigned int			debug_id;	/* Cookie debug ID */
 	unsigned int			inval_counter;	/* object->inval_counter at begin_op */
+	unsigned int			dio_size;	/* DIO block size */
 };
 
 /*
@@ -250,6 +253,7 @@ struct netfs_io_request {
 	unsigned long long	start;		/* Start position */
 	atomic64_t		issued_to;	/* Write issuer folio cursor */
 	unsigned long long	collected_to;	/* Point we've collected to */
+	unsigned long long	cache_coll_to;	/* Point the cache has collected to */
 	unsigned long long	cleaned_to;	/* Position we've cleaned folios to */
 	unsigned long long	abandon_to;	/* Position to abandon folios to */
 	pgoff_t			no_unlock_folio; /* Don't unlock this folio after read */
@@ -354,8 +358,7 @@ struct netfs_cache_ops {
 	/* Prepare a read operation, shortening it to a cached/uncached
 	 * boundary as appropriate.
 	 */
-	enum netfs_io_source (*prepare_read)(struct netfs_io_subrequest *subreq,
-					     unsigned long long i_size);
+	int (*prepare_read)(struct netfs_io_subrequest *subreq);
 
 	/* Prepare a write subrequest, working out if we're allowed to do it
 	 * and finding out the maximum amount of data to gather before
@@ -383,8 +386,13 @@ struct netfs_cache_ops {
 	 * next chunk of data starts and how long it is.
 	 */
 	int (*query_occupancy)(struct netfs_cache_resources *cres,
-			       loff_t start, size_t len, size_t granularity,
-			       loff_t *_data_start, size_t *_data_len);
+			       struct fscache_occupancy *occ);
+
+	/* Collect the result of buffered writeback to the cache.
+	 * This includes copying a read to the cache.
+	 */
+	void (*collect_write)(struct netfs_io_request *wreq,
+			      unsigned long long start, size_t len);
 };
 
 /* High-level read API. */

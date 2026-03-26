@@ -436,7 +436,6 @@ static void afs_update_i_size(struct inode *inode, loff_t new_i_size)
 		inode_set_bytes(&vnode->netfs.inode, new_i_size);
 	}
 	write_sequnlock(&vnode->cb_lock);
-	fscache_update_cookie(afs_vnode_cache(vnode), NULL, &new_i_size);
 }
 
 static void afs_netfs_invalidate_cache(struct netfs_io_request *wreq)

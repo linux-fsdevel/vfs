@@ -185,6 +185,16 @@ done:
 	wreq->buffer.first_tail_slot = slot;
 }
 
+static void netfs_cache_collect(struct netfs_io_request *wreq,
+				struct netfs_io_stream *stream)
+{
+	struct netfs_cache_resources *cres = &wreq->cache_resources;
+
+	if (cres->ops && cres->ops->collect_write)
+		cres->ops->collect_write(wreq, wreq->cache_coll_to,
+					 stream->collected_to - wreq->cache_coll_to);
+}
+
 /*
  * Collect and assess the results of various write subrequests.  We may need to
  * retry some of the results - or even do an RMW cycle for content crypto.
@@ -238,6 +248,11 @@ reassess_streams:
 			if (stream->collected_to < front->start) {
 				trace_netfs_collect_gap(wreq, stream, issued_to, 'F');
 				stream->collected_to = front->start;
+				if (stream->source == NETFS_WRITE_TO_CACHE) {
+					if (wreq->cache_coll_to < stream->collected_to)
+						netfs_cache_collect(wreq, stream);
+					wreq->cache_coll_to = stream->collected_to;
+				}
 			}
 
 			/* Stall if the front is still undergoing I/O. */
@@ -261,8 +276,19 @@ reassess_streams:
 			if (test_bit(NETFS_SREQ_FAILED, &front->flags)) {
 				stream->failed = true;
 				stream->error = front->error;
-				if (stream->source == NETFS_UPLOAD_TO_SERVER)
+				switch (stream->source) {
+				case NETFS_UPLOAD_TO_SERVER:
 					mapping_set_error(wreq->mapping, front->error);
+					break;
+				case NETFS_WRITE_TO_CACHE:
+					if (wreq->cache_coll_to < stream->collected_to)
+						netfs_cache_collect(wreq, stream);
+					wreq->cache_coll_to = stream->collected_to + front->len;
+					break;
+				default:
+					WARN_ON(1);
+					break;
+				}
 				notes |= NEED_REASSESS | SAW_FAILURE;
 				break;
 			}
@@ -355,6 +381,7 @@ need_retry:
  */
 bool netfs_write_collection(struct netfs_io_request *wreq)
 {
+	struct netfs_io_stream *cstream = &wreq->io_streams[1];
 	struct netfs_inode *ictx = netfs_inode(wreq->inode);
 	size_t transferred;
 	bool transferred_valid = false;
@@ -390,13 +417,19 @@ bool netfs_write_collection(struct netfs_io_request *wreq)
 		wreq->transferred = transferred;
 	trace_netfs_rreq(wreq, netfs_rreq_trace_write_done);
 
-	if (wreq->io_streams[1].active &&
-	    wreq->io_streams[1].failed &&
-	    ictx->ops->invalidate_cache) {
-		/* Cache write failure doesn't prevent writeback completion
-		 * unless we're in disconnected mode.
-		 */
-		ictx->ops->invalidate_cache(wreq);
+	if (cstream->active) {
+		if (cstream->failed) {
+			if (ictx->ops->invalidate_cache)
+				/* Cache write failure doesn't prevent
+				 * writeback completion unless we're in
+				 * disconnected mode.
+				 */
+				ictx->ops->invalidate_cache(wreq);
+		} else {
+			if (wreq->cache_coll_to < cstream->collected_to)
+				netfs_cache_collect(wreq, cstream);
+			wreq->cache_coll_to = cstream->collected_to;
+		}
 	}
 
 	_debug("finished");

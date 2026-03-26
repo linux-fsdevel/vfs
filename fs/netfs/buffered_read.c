@@ -127,21 +127,6 @@ static ssize_t netfs_prepare_read_iterator(struct netfs_io_subrequest *subreq,
 	return subreq->len;
 }
 
-static enum netfs_io_source netfs_cache_prepare_read(struct netfs_io_request *rreq,
-						     struct netfs_io_subrequest *subreq,
-						     loff_t i_size)
-{
-	struct netfs_cache_resources *cres = &rreq->cache_resources;
-	enum netfs_io_source source;
-
-	if (!cres->ops)
-		return NETFS_DOWNLOAD_FROM_SERVER;
-	source = cres->ops->prepare_read(subreq, i_size);
-	trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
-	return source;
-
-}
-
 /*
  * Issue a read against the cache.
  * - Eats the caller's ref on subreq.
@@ -154,6 +139,19 @@ static void netfs_read_cache_to_pagecache(struct netfs_io_request *rreq,
 	netfs_stat(&netfs_n_rh_read);
 	cres->ops->read(cres, subreq->start, &subreq->io_iter, NETFS_READ_HOLE_IGNORE,
 			netfs_cache_read_terminated, subreq);
+}
+
+int netfs_read_query_cache(struct netfs_io_request *rreq, struct fscache_occupancy *occ)
+{
+	struct netfs_cache_resources *cres = &rreq->cache_resources;
+
+	occ->granularity = PAGE_SIZE;
+	if (occ->query_from >= occ->query_to)
+		return 0;
+	if (!cres->ops)
+		return 0;
+	occ->query_from = round_up(occ->query_from, occ->granularity);
+	return cres->ops->query_occupancy(cres, occ);
 }
 
 static void netfs_queue_read(struct netfs_io_request *rreq,
@@ -214,15 +212,54 @@ static void netfs_issue_read(struct netfs_io_request *rreq,
 static void netfs_read_to_pagecache(struct netfs_io_request *rreq,
 				    struct readahead_control *ractl)
 {
+	struct fscache_occupancy _occ = {
+		.query_from	= rreq->start,
+		.query_to	= rreq->start + rreq->len,
+		.cached_from[0]	= 0,
+		.cached_to[0]	= 0,
+		.cached_from[1]	= ULLONG_MAX,
+		.cached_to[1]	= ULLONG_MAX,
+	};
+	struct fscache_occupancy *occ = &_occ;
 	struct netfs_inode *ictx = netfs_inode(rreq->inode);
 	unsigned long long start = rreq->start;
 	ssize_t size = rreq->len;
 	int ret = 0;
 
 	do {
+		int (*prepare_read)(struct netfs_io_subrequest *subreq) = NULL;
 		struct netfs_io_subrequest *subreq;
-		enum netfs_io_source source = NETFS_SOURCE_UNKNOWN;
+		unsigned long long hole_to, cache_to;
 		ssize_t slice;
+
+		/* If we don't have any, find out the next couple of data
+		 * extents from the cache, containing of following the
+		 * specified start offset.  Holes have to be fetched from the
+		 * server; data regions from the cache.
+		 */
+		hole_to = occ->cached_from[0];
+		cache_to = occ->cached_to[0];
+		if (start >= cache_to) {
+			/* Extent exhausted; shuffle down. */
+			int i;
+
+			for (i = 0; i < ARRAY_SIZE(occ->cached_from) - 1; i++) {
+				occ->cached_from[i] = occ->cached_from[i + 1];
+				occ->cached_to[i]   = occ->cached_to[i + 1];
+				occ->cached_type[i] = occ->cached_type[i + 1];
+			}
+			occ->cached_from[i] = ULLONG_MAX;
+			occ->cached_to[i]   = ULLONG_MAX;
+
+			if (occ->cached_from[0] != ULLONG_MAX)
+				continue;
+
+			/* Get new extents */
+			ret = netfs_read_query_cache(rreq, occ);
+			if (ret < 0)
+				break;
+			continue;
+		}
 
 		subreq = netfs_alloc_subrequest(rreq);
 		if (!subreq) {
@@ -233,65 +270,81 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq,
 		subreq->start	= start;
 		subreq->len	= size;
 
-		source = netfs_cache_prepare_read(rreq, subreq, rreq->i_size);
-		subreq->source = source;
-		if (source == NETFS_DOWNLOAD_FROM_SERVER) {
-			unsigned long long zp = umin(ictx->zero_point, rreq->i_size);
-			size_t len = subreq->len;
+		_debug("rsub %llx %llx-%llx", subreq->start, hole_to, cache_to);
 
-			if (unlikely(rreq->origin == NETFS_READ_SINGLE))
-				zp = rreq->i_size;
-			if (subreq->start >= zp) {
-				subreq->source = source = NETFS_FILL_WITH_ZEROES;
-				goto fill_with_zeroes;
+		if (start >= hole_to && start < cache_to) {
+			/* Overlap with a cached region, where the cache may
+			 * record a block of zeroes.
+			 */
+			_debug("cached s=%llx c=%llx l=%zx", start, cache_to, size);
+			subreq->len = umin(cache_to - start, size);
+			subreq->len = round_up(subreq->len, occ->granularity);
+			if (occ->cached_type[0] == FSCACHE_EXTENT_ZERO) {
+				subreq->source = NETFS_FILL_WITH_ZEROES;
+				netfs_stat(&netfs_n_rh_zero);
+			} else {
+				subreq->source = NETFS_READ_FROM_CACHE;
+				prepare_read = rreq->cache_resources.ops->prepare_read;
 			}
 
-			if (len > zp - subreq->start)
-				len = zp - subreq->start;
-			if (len == 0) {
-				pr_err("ZERO-LEN READ: R=%08x[%x] l=%zx/%zx s=%llx z=%llx i=%llx",
-				       rreq->debug_id, subreq->debug_index,
-				       subreq->len, size,
-				       subreq->start, ictx->zero_point, rreq->i_size);
+			trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
+
+		} else if ((subreq->start >= ictx->zero_point ||
+			    subreq->start >= rreq->i_size) &&
+			   size > 0) {
+			/* If this range lies beyond the zero-point, that part
+			 * can just be cleared locally.
+			 */
+			_debug("zero %llx-%llx", start, start + size);
+			subreq->len = size;
+			subreq->source = NETFS_FILL_WITH_ZEROES;
+			if (rreq->cache_resources.ops)
+				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+			netfs_stat(&netfs_n_rh_zero);
+		} else {
+			/* Read a cache hole from the server.  If any part of
+			 * this range lies beyond the zero-point or the EOF,
+			 * that part can just be cleared locally.
+			 */
+			unsigned long long zlimit = umin(rreq->i_size, ictx->zero_point);
+			unsigned long long limit = min3(zlimit, start + size, hole_to);
+
+			_debug("limit %llx %llx", rreq->i_size, ictx->zero_point);
+			_debug("download %llx-%llx", start, start + size);
+			subreq->len = umin(limit - subreq->start, ULONG_MAX);
+			subreq->source = NETFS_DOWNLOAD_FROM_SERVER;
+			if (rreq->cache_resources.ops)
+				__set_bit(NETFS_SREQ_COPY_TO_CACHE, &subreq->flags);
+			netfs_stat(&netfs_n_rh_download);
+		}
+
+		if (size == 0) {
+			pr_err("ZERO-LEN READ: R=%08x[%x] l=%zx/%zx s=%llx z=%llx i=%llx",
+			       rreq->debug_id, subreq->debug_index,
+			       subreq->len, size,
+			       subreq->start, ictx->zero_point, rreq->i_size);
+			trace_netfs_sreq(subreq, netfs_sreq_trace_cancel);
+			/* Not queued - release both refs. */
+			netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
+			netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
+			break;
+		}
+
+		rreq->io_streams[0].sreq_max_len = MAX_RW_COUNT;
+		rreq->io_streams[0].sreq_max_segs = INT_MAX;
+
+		if (prepare_read) {
+			ret = prepare_read(subreq);
+			if (ret < 0) {
+				subreq->error = ret;
+				/* Not queued - release both refs. */
+				netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
+				netfs_put_subrequest(subreq, netfs_sreq_trace_put_cancel);
 				break;
 			}
-			subreq->len = len;
-
-			netfs_stat(&netfs_n_rh_download);
-			if (rreq->netfs_ops->prepare_read) {
-				ret = rreq->netfs_ops->prepare_read(subreq);
-				if (ret < 0) {
-					subreq->error = ret;
-					/* Not queued - release both refs. */
-					netfs_put_subrequest(subreq,
-							     netfs_sreq_trace_put_cancel);
-					netfs_put_subrequest(subreq,
-							     netfs_sreq_trace_put_cancel);
-					break;
-				}
-				trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
-			}
-			goto issue;
+			trace_netfs_sreq(subreq, netfs_sreq_trace_prepare);
 		}
 
-	fill_with_zeroes:
-		if (source == NETFS_FILL_WITH_ZEROES) {
-			subreq->source = NETFS_FILL_WITH_ZEROES;
-			trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
-			netfs_stat(&netfs_n_rh_zero);
-			goto issue;
-		}
-
-		if (source == NETFS_READ_FROM_CACHE) {
-			trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
-			goto issue;
-		}
-
-		pr_err("Unexpected read source %u\n", source);
-		WARN_ON_ONCE(1);
-		break;
-
-	issue:
 		slice = netfs_prepare_read_iterator(subreq, ractl);
 		if (slice < 0) {
 			ret = slice;
@@ -304,6 +357,8 @@ static void netfs_read_to_pagecache(struct netfs_io_request *rreq,
 		}
 		size -= slice;
 		start += slice;
+
+		trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 
 		netfs_queue_read(rreq, subreq, size <= 0);
 		netfs_issue_read(rreq, subreq);
