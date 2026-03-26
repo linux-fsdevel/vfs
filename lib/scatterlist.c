@@ -10,6 +10,7 @@
 #include <linux/highmem.h>
 #include <linux/kmemleak.h>
 #include <linux/bvec.h>
+#include <linux/bvecq.h>
 #include <linux/uio.h>
 #include <linux/folio_queue.h>
 
@@ -1329,6 +1330,68 @@ static ssize_t extract_folioq_to_sg(struct iov_iter *iter,
 }
 
 /*
+ * Extract up to sg_max folios from an BVECQ-type iterator and add them to
+ * the scatterlist.  The pages are not pinned.
+ */
+static ssize_t extract_bvecq_to_sg(struct iov_iter *iter,
+				   ssize_t maxsize,
+				   struct sg_table *sgtable,
+				   unsigned int sg_max,
+				   iov_iter_extraction_t extraction_flags)
+{
+	const struct bvecq *bvecq = iter->bvecq;
+	struct scatterlist *sg = sgtable->sgl + sgtable->nents;
+	unsigned int seg = iter->bvecq_slot;
+	ssize_t ret = 0;
+	size_t offset = iter->iov_offset;
+
+	if (seg >= bvecq->nr_segs) {
+		bvecq = bvecq->next;
+		if (WARN_ON_ONCE(!bvecq))
+			return 0;
+		seg = 0;
+	}
+
+	do {
+		const struct bio_vec *bv = &bvecq->bv[seg];
+		size_t blen = bv->bv_len;
+
+		if (!bv->bv_page)
+			blen = 0;
+
+		if (offset < blen) {
+			size_t part = umin(maxsize - ret, blen - offset);
+
+			sg_set_page(sg, bv->bv_page, part, bv->bv_offset + offset);
+			sgtable->nents++;
+			sg++;
+			sg_max--;
+			offset += part;
+			ret += part;
+		}
+
+		if (offset >= blen) {
+			offset = 0;
+			seg++;
+			if (seg >= bvecq->nr_segs) {
+				if (!bvecq->next) {
+					WARN_ON_ONCE(ret < iter->count);
+					break;
+				}
+				bvecq = bvecq->next;
+				seg = 0;
+			}
+		}
+	} while (sg_max > 0 && ret < maxsize);
+
+	iter->bvecq = bvecq;
+	iter->bvecq_slot = seg;
+	iter->iov_offset = offset;
+	iter->count -= ret;
+	return ret;
+}
+
+/*
  * Extract up to sg_max folios from an XARRAY-type iterator and add them to
  * the scatterlist.  The pages are not pinned.
  */
@@ -1426,6 +1489,9 @@ ssize_t extract_iter_to_sg(struct iov_iter *iter, size_t maxsize,
 	case ITER_FOLIOQ:
 		return extract_folioq_to_sg(iter, maxsize, sgtable, sg_max,
 					    extraction_flags);
+	case ITER_BVECQ:
+		return extract_bvecq_to_sg(iter, maxsize, sgtable, sg_max,
+					   extraction_flags);
 	case ITER_XARRAY:
 		return extract_xarray_to_sg(iter, maxsize, sgtable, sg_max,
 					    extraction_flags);
