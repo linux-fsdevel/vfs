@@ -4539,9 +4539,13 @@ smb2_new_read_req(void **buf, unsigned int *total_len,
 	 */
 	if (rdata && smb3_use_rdma_offload(io_parms)) {
 		struct smbdirect_buffer_descriptor_v1 *v1;
+		struct iov_iter iter;
 		bool need_invalidate = server->dialect == SMB30_PROT_ID;
 
-		rdata->mr = smbd_register_mr(server->smbd_conn, &rdata->subreq.io_iter,
+		iov_iter_bvec_queue(&iter, ITER_DEST,
+				    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+				    rdata->subreq.content.offset, rdata->subreq.len);
+		rdata->mr = smbd_register_mr(server->smbd_conn, &iter,
 					     true, need_invalidate);
 		if (!rdata->mr)
 			return -EAGAIN;
@@ -4606,9 +4610,10 @@ smb2_readv_callback(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	unsigned int rreq_debug_id = rdata->rreq->debug_id;
 	unsigned int subreq_debug_index = rdata->subreq.debug_index;
 
-	if (rdata->got_bytes) {
-		rqst.rq_iter	  = rdata->subreq.io_iter;
-	}
+	if (rdata->got_bytes)
+		iov_iter_bvec_queue(&rqst.rq_iter, ITER_DEST,
+				    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+				    rdata->subreq.content.offset, rdata->subreq.len);
 
 	WARN_ONCE(rdata->server != server,
 		  "rdata server %p != mid server %p",
@@ -5096,7 +5101,9 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 		goto out;
 
 	rqst.rq_iov = iov;
-	rqst.rq_iter = wdata->subreq.io_iter;
+	iov_iter_bvec_queue(&rqst.rq_iter, ITER_SOURCE,
+			    wdata->subreq.content.bvecq, wdata->subreq.content.slot,
+			    wdata->subreq.content.offset, wdata->subreq.len);
 
 	rqst.rq_iov[0].iov_len = total_len - 1;
 	rqst.rq_iov[0].iov_base = (char *)req;
@@ -5135,9 +5142,14 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 	 */
 	if (smb3_use_rdma_offload(io_parms)) {
 		struct smbdirect_buffer_descriptor_v1 *v1;
+		struct iov_iter iter;
 		bool need_invalidate = server->dialect == SMB30_PROT_ID;
 
-		wdata->mr = smbd_register_mr(server->smbd_conn, &wdata->subreq.io_iter,
+		iov_iter_bvec_queue(&iter, ITER_SOURCE,
+				    wdata->subreq.content.bvecq, wdata->subreq.content.slot,
+				    wdata->subreq.content.offset, wdata->subreq.len);
+
+		wdata->mr = smbd_register_mr(server->smbd_conn, &iter,
 					     false, need_invalidate);
 		if (!wdata->mr) {
 			rc = -EAGAIN;
@@ -5176,8 +5188,8 @@ smb2_async_writev(struct cifs_io_subrequest *wdata)
 		smb2_set_replay(server, &rqst);
 	}
 
-	cifs_dbg(FYI, "async write at %llu %u bytes iter=%zx\n",
-		 io_parms->offset, io_parms->length, iov_iter_count(&wdata->subreq.io_iter));
+	cifs_dbg(FYI, "async write at %llu %u bytes len=%zx\n",
+		 io_parms->offset, io_parms->length, wdata->subreq.len);
 
 	if (wdata->credits.value > 0) {
 		shdr->CreditCharge = cpu_to_le16(DIV_ROUND_UP(wdata->subreq.len,

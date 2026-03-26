@@ -339,7 +339,9 @@ static int afs_deliver_fs_fetch_data(struct afs_call *call)
 		if (call->remaining == 0)
 			goto no_more_data;
 
-		call->iter = &subreq->io_iter;
+		iov_iter_bvec_queue(&call->def_iter, ITER_DEST, subreq->content.bvecq,
+				    subreq->content.slot, subreq->content.offset, subreq->len);
+
 		call->iov_len = umin(call->remaining, subreq->len - subreq->transferred);
 		call->unmarshall++;
 		fallthrough;
@@ -1085,7 +1087,7 @@ static void afs_fs_store_data64(struct afs_operation *op)
 	if (!call)
 		return afs_op_nomem(op);
 
-	call->write_iter = op->store.write_iter;
+	call->write_iter = &op->store.write_iter;
 
 	/* marshall the parameters */
 	bp = call->request;
@@ -1139,7 +1141,7 @@ void afs_fs_store_data(struct afs_operation *op)
 	if (!call)
 		return afs_op_nomem(op);
 
-	call->write_iter = op->store.write_iter;
+	call->write_iter = &op->store.write_iter;
 
 	/* marshall the parameters */
 	bp = call->request;

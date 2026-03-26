@@ -102,14 +102,14 @@ ssize_t netfs_extract_iter(struct iov_iter *orig, size_t orig_len, size_t max_se
 			}
 
 			if (got == 0) {
-				pr_err("extract_pages gave nothing from %zu, %zu\n",
+				pr_err("extract_pages gave nothing from %zx, %zx\n",
 				       extracted, orig_len);
 				ret = -EIO;
 				goto out;
 			}
 
-			if (got > orig_len - extracted) {
-				pr_err("extract_pages rc=%zd more than %zu\n",
+			if (got > orig_len) {
+				pr_err("extract_pages rc=%zx more than %zx\n",
 				       got, orig_len);
 				goto out;
 			}

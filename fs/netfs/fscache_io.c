@@ -239,10 +239,6 @@ void __fscache_write_to_cache(struct fscache_cookie *cookie,
 				    fscache_access_io_write) < 0)
 		goto abandon_free;
 
-	ret = cres->ops->prepare_write(cres, &start, &len, len, i_size, false);
-	if (ret < 0)
-		goto abandon_end;
-
 	/* TODO: Consider clearing page bits now for space the write isn't
 	 * covering.  This is more complicated than it appears when THPs are
 	 * taken into account.
@@ -252,8 +248,6 @@ void __fscache_write_to_cache(struct fscache_cookie *cookie,
 	fscache_write(cres, start, &iter, fscache_wreq_done, wreq);
 	return;
 
-abandon_end:
-	return fscache_wreq_done(wreq, ret);
 abandon_free:
 	kfree(wreq);
 abandon:

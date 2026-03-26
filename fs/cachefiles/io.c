@@ -26,7 +26,10 @@ struct cachefiles_kiocb {
 	};
 	struct cachefiles_object *object;
 	netfs_io_terminated_t	term_func;
-	void			*term_func_priv;
+	union {
+		struct netfs_io_subrequest *subreq;
+		void			*term_func_priv;
+	};
 	bool			was_async;
 	unsigned int		inval_counter;	/* Copy of cookie->inval_counter */
 	u64			b_writing;
@@ -192,6 +195,125 @@ presubmission_error:
 	if (term_func)
 		term_func(term_func_priv, ret < 0 ? ret : skipped);
 	return ret;
+}
+
+/*
+ * Handle completion of a read from the cache issued by netfslib.
+ */
+static void cachefiles_issue_read_complete(struct kiocb *iocb, long ret)
+{
+	struct cachefiles_kiocb *ki = container_of(iocb, struct cachefiles_kiocb, iocb);
+	struct netfs_io_subrequest *subreq = ki->subreq;
+	struct inode *inode = file_inode(ki->iocb.ki_filp);
+
+	_enter("%ld", ret);
+
+	if (ret < 0) {
+		subreq->error = -ESTALE;
+		trace_cachefiles_io_error(ki->object, inode, ret,
+					  cachefiles_trace_read_error);
+	}
+
+	if (ret >= 0) {
+		if (ki->object->cookie->inval_counter == ki->inval_counter) {
+			subreq->error = 0;
+			if (ret > 0) {
+				subreq->transferred += ret;
+				__set_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
+			}
+		} else {
+			subreq->error = -ESTALE;
+		}
+	}
+
+	netfs_read_subreq_terminated(subreq);
+	cachefiles_put_kiocb(ki);
+}
+
+/*
+ * Issue a read operation to the cache.
+ */
+static int cachefiles_issue_read(struct netfs_io_subrequest *subreq)
+{
+	struct netfs_cache_resources *cres = &subreq->rreq->cache_resources;
+	struct cachefiles_object *object;
+	struct cachefiles_kiocb *ki;
+	struct iov_iter iter;
+	struct file *file;
+	unsigned int old_nofs;
+	ssize_t ret = -ENOBUFS;
+
+	if (!fscache_wait_for_operation(cres, FSCACHE_WANT_READ))
+		return -ENOBUFS;
+
+	fscache_count_read();
+	object = cachefiles_cres_object(cres);
+	file = cachefiles_cres_file(cres);
+
+	_enter("%pD,%li,%llx,%zx/%llx",
+	       file, file_inode(file)->i_ino, subreq->start, subreq->len,
+	       i_size_read(file_inode(file)));
+
+	if (subreq->len > MAX_RW_COUNT)
+		subreq->len = MAX_RW_COUNT;
+
+	ret = netfs_prepare_read_buffer(subreq, BIO_MAX_VECS);
+	if (ret < 0)
+		return ret;
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
+
+	ki = kzalloc_obj(struct cachefiles_kiocb);
+	if (!ki)
+		return -ENOMEM;
+
+	refcount_set(&ki->ki_refcnt, 2);
+	ki->iocb.ki_filp	= file;
+	ki->iocb.ki_pos		= subreq->start;
+	ki->iocb.ki_flags	= IOCB_DIRECT;
+	ki->iocb.ki_ioprio	= get_current_ioprio();
+	ki->iocb.ki_complete	= cachefiles_issue_read_complete;
+	ki->object		= object;
+	ki->inval_counter	= cres->inval_counter;
+	ki->subreq		= subreq;
+	ki->was_async		= true;
+
+	/* After this point, we're not allowed to return an error. */
+	netfs_mark_read_submission(subreq);
+
+	get_file(ki->iocb.ki_filp);
+	cachefiles_grab_object(object, cachefiles_obj_get_ioreq);
+
+	trace_cachefiles_read(object, file_inode(file), ki->iocb.ki_pos, subreq->len);
+	old_nofs = memalloc_nofs_save();
+	ret = cachefiles_inject_read_error();
+	if (ret == 0)
+		ret = vfs_iocb_iter_read(file, &ki->iocb, &iter);
+	memalloc_nofs_restore(old_nofs);
+
+	switch (ret) {
+	case -EIOCBQUEUED:
+		break;
+
+	case -ERESTARTSYS:
+	case -ERESTARTNOINTR:
+	case -ERESTARTNOHAND:
+	case -ERESTART_RESTARTBLOCK:
+		/* There's no easy way to restart the syscall since other AIO's
+		 * may be already running. Just fail this IO with EINTR.
+		 */
+		ret = -EINTR;
+		fallthrough;
+	default:
+		ki->was_async = false;
+		cachefiles_issue_read_complete(&ki->iocb, ret);
+		break;
+	}
+
+	cachefiles_put_kiocb(ki);
+	_leave(" = %zd", ret);
+	return -EIOCBQUEUED;
 }
 
 /*
@@ -610,104 +732,67 @@ check_space:
 				    cachefiles_has_space_for_write);
 }
 
-static int cachefiles_prepare_write(struct netfs_cache_resources *cres,
-				    loff_t *_start, size_t *_len, size_t upper_len,
-				    loff_t i_size, bool no_space_allocated_yet)
+static int cachefiles_estimate_write(struct netfs_io_request *wreq,
+				     struct netfs_io_stream *stream,
+				     struct netfs_write_estimate *estimate)
 {
-	struct cachefiles_object *object = cachefiles_cres_object(cres);
-	struct cachefiles_cache *cache = object->volume->cache;
-	const struct cred *saved_cred;
-	int ret;
-
-	if (!cachefiles_cres_file(cres)) {
-		if (!fscache_wait_for_operation(cres, FSCACHE_WANT_WRITE))
-			return -ENOBUFS;
-		if (!cachefiles_cres_file(cres))
-			return -ENOBUFS;
-	}
-
-	cachefiles_begin_secure(cache, &saved_cred);
-	ret = __cachefiles_prepare_write(object, cachefiles_cres_file(cres),
-					 _start, _len, upper_len,
-					 no_space_allocated_yet);
-	cachefiles_end_secure(cache, saved_cred);
-	return ret;
+	estimate->issue_at = stream->issue_from + MAX_RW_COUNT;
+	estimate->max_segs = BIO_MAX_VECS;
+	return 0;
 }
 
-static void cachefiles_prepare_write_subreq(struct netfs_io_subrequest *subreq)
-{
-	struct netfs_io_request *wreq = subreq->rreq;
-	struct netfs_cache_resources *cres = &wreq->cache_resources;
-	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
-
-	_enter("W=%x[%x] %llx", wreq->debug_id, subreq->debug_index, subreq->start);
-
-	stream->sreq_max_len = MAX_RW_COUNT;
-	stream->sreq_max_segs = BIO_MAX_VECS;
-
-	if (!cachefiles_cres_file(cres)) {
-		if (!fscache_wait_for_operation(cres, FSCACHE_WANT_WRITE))
-			return netfs_prepare_write_failed(subreq);
-		if (!cachefiles_cres_file(cres))
-			return netfs_prepare_write_failed(subreq);
-	}
-}
-
-static void cachefiles_issue_write(struct netfs_io_subrequest *subreq)
+static int cachefiles_issue_write(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
 	struct netfs_cache_resources *cres = &wreq->cache_resources;
 	struct cachefiles_object *object = cachefiles_cres_object(cres);
 	struct cachefiles_cache *cache = object->volume->cache;
+	struct iov_iter iter;
 	const struct cred *saved_cred;
-	size_t off, pre, post, len = subreq->len;
 	loff_t start = subreq->start;
+	size_t len = subreq->len;
 	int ret;
 
 	_enter("W=%x[%x] %llx-%llx",
 	       wreq->debug_id, subreq->debug_index, start, start + len - 1);
 
-	/* We need to start on the cache granularity boundary */
-	off = start & (cache->bsize - 1);
-	if (off) {
-		pre = cache->bsize - off;
-		if (pre >= len) {
-			fscache_count_dio_misfit();
-			netfs_write_subrequest_terminated(subreq, len);
-			return;
-		}
-		subreq->transferred += pre;
-		start += pre;
-		len -= pre;
-		iov_iter_advance(&subreq->io_iter, pre);
+	if (!cachefiles_cres_file(cres)) {
+		if (!fscache_wait_for_operation(cres, FSCACHE_WANT_WRITE))
+			return -EINVAL;
+		if (!cachefiles_cres_file(cres))
+			return -EINVAL;
 	}
 
-	/* We also need to end on the cache granularity boundary */
-	post = len & (cache->bsize - 1);
-	if (post) {
-		len -= post;
-		if (len == 0) {
-			fscache_count_dio_misfit();
-			netfs_write_subrequest_terminated(subreq, post);
-			return;
-		}
-		iov_iter_truncate(&subreq->io_iter, len);
+	ret = netfs_prepare_write_buffer(subreq, BIO_MAX_VECS);
+	if (ret < 0)
+		return ret;
+
+	/* The buffer extraction func may round out start and end. */
+	start = subreq->start;
+	len = subreq->len;
+
+	/* We need to start and end on cache granularity boundaries. */
+	if (WARN_ON_ONCE(start & (cache->bsize - 1)) ||
+	    WARN_ON_ONCE(len   & (cache->bsize - 1))) {
+		fscache_count_dio_misfit();
+		return -EIO;
 	}
+
+	iov_iter_bvec_queue(&iter, ITER_SOURCE, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, len);
 
 	trace_netfs_sreq(subreq, netfs_sreq_trace_cache_prepare);
 	cachefiles_begin_secure(cache, &saved_cred);
 	ret = __cachefiles_prepare_write(object, cachefiles_cres_file(cres),
 					 &start, &len, len, true);
 	cachefiles_end_secure(cache, saved_cred);
-	if (ret < 0) {
-		netfs_write_subrequest_terminated(subreq, ret);
-		return;
-	}
+	if (ret < 0)
+		return ret;
 
 	trace_netfs_sreq(subreq, netfs_sreq_trace_cache_write);
-	cachefiles_write(&subreq->rreq->cache_resources,
-			 subreq->start, &subreq->io_iter,
+	cachefiles_write(&subreq->rreq->cache_resources, subreq->start, &iter,
 			 netfs_write_subrequest_terminated, subreq);
+	return -EIOCBQUEUED;
 }
 
 /*
@@ -854,9 +939,9 @@ static const struct netfs_cache_ops cachefiles_netfs_cache_ops = {
 	.end_operation		= cachefiles_end_operation,
 	.read			= cachefiles_read,
 	.write			= cachefiles_write,
+	.issue_read		= cachefiles_issue_read,
 	.issue_write		= cachefiles_issue_write,
-	.prepare_write		= cachefiles_prepare_write,
-	.prepare_write_subreq	= cachefiles_prepare_write_subreq,
+	.estimate_write		= cachefiles_estimate_write,
 	.prepare_ondemand_read	= cachefiles_prepare_ondemand_read,
 	.query_occupancy	= cachefiles_query_occupancy,
 	.collect_write		= cachefiles_collect_write,

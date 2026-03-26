@@ -12,12 +12,43 @@
 #include "internal.h"
 
 /*
- * Perform retries on the streams that need it.
+ * Prepare the write buffer for a retry.  We can't necessarily reuse the write
+ * buffer from the previous run of a subrequest because the filesystem is
+ * permitted to modify it (add headers/trailers, encrypt it).  Further, the
+ * subrequest may now be a different size (e.g. cifs has to negotiate for
+ * maximum transfer size).  Also, we can't look at *stream as that may still
+ * refer to the source material being broken up into original subrequests.
+ */
+int netfs_prepare_write_retry_buffer(struct netfs_io_subrequest *subreq,
+				     unsigned int max_segs)
+{
+	struct netfs_io_request *wreq = subreq->rreq;
+	struct netfs_io_stream *stream = &wreq->io_streams[subreq->stream_nr];
+	size_t len;
+
+	bvecq_pos_set(&subreq->dispatch_pos, &wreq->retry_cursor);
+	bvecq_pos_set(&subreq->content, &wreq->retry_cursor);
+	len = bvecq_slice(&wreq->retry_cursor, subreq->len, max_segs, &subreq->nr_segs);
+
+	if (len < subreq->len) {
+		subreq->len = len;
+		trace_netfs_sreq(subreq, netfs_sreq_trace_limited);
+	}
+
+	stream->issue_from += len;
+	stream->buffered   -= len;
+	if (stream->buffered == 0)
+		bvecq_pos_unset(&wreq->retry_cursor);
+	return 0;
+}
+
+/*
+ * Perform retries on the streams that need it.  This only has to deal with
+ * buffered writes; unbuffered write retry is handled in direct_write.c.
  */
 static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 				     struct netfs_io_stream *stream)
 {
-	struct bvecq_pos dispatch_cursor = {};
 	struct list_head *next;
 
 	_enter("R=%x[%x:]", wreq->debug_id, stream->stream_nr);
@@ -32,30 +63,14 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 	if (unlikely(stream->failed))
 		return;
 
-	/* If there's no renegotiation to do, just resend each failed subreq. */
-	if (!stream->prepare_write) {
-		struct netfs_io_subrequest *subreq;
-
-		list_for_each_entry(subreq, &stream->subrequests, rreq_link) {
-			if (test_bit(NETFS_SREQ_FAILED, &subreq->flags))
-				break;
-			if (__test_and_clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags)) {
-				netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
-				netfs_reissue_write(stream, subreq);
-			}
-		}
-		return;
-	}
-
 	next = stream->subrequests.next;
 
 	do {
 		struct netfs_io_subrequest *subreq = NULL, *from, *to, *tmp;
 		unsigned long long start, len;
-		size_t part;
-		bool boundary = false;
+		int ret;
 
-		bvecq_pos_unset(&dispatch_cursor);
+		bvecq_pos_unset(&wreq->retry_cursor);
 
 		/* Go through the stream and find the next span of contiguous
 		 * data that we then rejig (cifs, for example, needs the wsize
@@ -73,7 +88,6 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 		list_for_each_continue(next, &stream->subrequests) {
 			subreq = list_entry(next, struct netfs_io_subrequest, rreq_link);
 			if (subreq->start + subreq->transferred != start + len ||
-			    test_bit(NETFS_SREQ_BOUNDARY, &subreq->flags) ||
 			    !test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags))
 				break;
 			to = subreq;
@@ -83,43 +97,40 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 		/* Determine the set of buffers we're going to use.  Each
 		 * subreq gets a subset of a single overall contiguous buffer.
 		 */
-		bvecq_pos_transfer(&dispatch_cursor, &from->dispatch_pos);
-		bvecq_pos_advance(&dispatch_cursor, from->transferred);
+		bvecq_pos_transfer(&wreq->retry_cursor, &from->dispatch_pos);
+		bvecq_pos_advance(&wreq->retry_cursor, from->transferred);
+		wreq->retry_start = start;
+		wreq->retry_buffered = len;
 
 		/* Work through the sublist. */
 		subreq = from;
 		list_for_each_entry_from(subreq, &stream->subrequests, rreq_link) {
-			if (!len)
+			if (!wreq->retry_buffered)
 				break;
-
-			subreq->start	= start;
-			subreq->len	= len;
-			__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
-			trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 
 			bvecq_pos_unset(&subreq->dispatch_pos);
 			bvecq_pos_unset(&subreq->content);
+			subreq->content.bvecq = NULL;
+			subreq->content.slot = 0;
+			subreq->content.offset = 0;
 
-			/* Renegotiate max_len (wsize) */
-			stream->sreq_max_len = len;
-			stream->sreq_max_segs = INT_MAX;
-			stream->prepare_write(subreq);
+			__clear_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
+			__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
+			__clear_bit(NETFS_SREQ_FAILED, &subreq->flags);
+			__set_bit(NETFS_SREQ_IN_PROGRESS, &subreq->flags);
+			subreq->start		= wreq->retry_start;
+			subreq->len		= wreq->retry_buffered;
+			subreq->transferred	= 0;
+			subreq->retry_count	+= 1;
+			subreq->error		= 0;
 
-			bvecq_pos_set(&subreq->dispatch_pos, &dispatch_cursor);
-			part = bvecq_slice(&dispatch_cursor,
-					   umin(len, stream->sreq_max_len),
-					   stream->sreq_max_segs,
-					   &subreq->nr_segs);
-			subreq->len = subreq->transferred + part;
-			subreq->transferred = 0;
-			len -= part;
-			start += part;
-			if (len && subreq == to &&
-			    __test_and_clear_bit(NETFS_SREQ_BOUNDARY, &to->flags))
-				boundary = true;
-
+			netfs_stat(&netfs_n_wh_retry_write_subreq);
+			trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 			netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
-			netfs_reissue_write(stream, subreq);
+			ret = stream->issue_write(subreq);
+			if (ret < 0 && ret != -EIOCBQUEUED)
+				netfs_write_subrequest_terminated(subreq, ret);
+
 			if (subreq == to)
 				break;
 		}
@@ -160,12 +171,9 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 			to = list_next_entry(to, rreq_link);
 			trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 
-			stream->sreq_max_len	= len;
-			stream->sreq_max_segs	= INT_MAX;
 			switch (stream->source) {
 			case NETFS_UPLOAD_TO_SERVER:
 				netfs_stat(&netfs_n_wh_upload);
-				stream->sreq_max_len = umin(len, wreq->wsize);
 				break;
 			case NETFS_WRITE_TO_CACHE:
 				netfs_stat(&netfs_n_wh_write);
@@ -174,32 +182,16 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 				WARN_ON_ONCE(1);
 			}
 
-			stream->prepare_write(subreq);
-
-			bvecq_pos_set(&subreq->dispatch_pos, &dispatch_cursor);
-			part = bvecq_slice(&dispatch_cursor,
-					   umin(len, stream->sreq_max_len),
-					   stream->sreq_max_segs,
-					   &subreq->nr_segs);
-			subreq->len = subreq->transferred + part;
-
-			len -= part;
-			start += part;
-			if (!len && boundary) {
-				__set_bit(NETFS_SREQ_BOUNDARY, &to->flags);
-				boundary = false;
-			}
-
-			netfs_reissue_write(stream, subreq);
-			if (!len)
-				break;
+			ret = stream->issue_write(subreq);
+			if (ret < 0 && ret != -EIOCBQUEUED)
+				netfs_write_subrequest_terminated(subreq, ret);
 
 		} while (len);
 
 	} while (!list_is_head(next, &stream->subrequests));
 
 out:
-	bvecq_pos_unset(&dispatch_cursor);
+	bvecq_pos_unset(&wreq->retry_cursor);
 }
 
 /*
@@ -237,4 +229,6 @@ void netfs_retry_writes(struct netfs_io_request *wreq)
 			netfs_retry_write_stream(wreq, stream);
 		}
 	}
+
+	pr_notice("Retrying\n");
 }

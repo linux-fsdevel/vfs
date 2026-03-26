@@ -49,31 +49,70 @@ static void v9fs_begin_writeback(struct netfs_io_request *wreq)
 }
 
 /*
+ * Estimate how much data should be accumulated before we start issuing
+ * write subrequests.
+ */
+static int v9fs_estimate_write(struct netfs_io_request *wreq,
+			       struct netfs_io_stream *stream,
+			       struct netfs_write_estimate *estimate)
+{
+	struct p9_fid *fid = wreq->netfs_priv;
+	unsigned long long limit = ULLONG_MAX - stream->issue_from;
+	unsigned long long max_len = fid->clnt->msize - P9_IOHDRSZ;
+
+	estimate->issue_at = stream->issue_from + umin(max_len, limit);
+	return 0;
+}
+
+/*
  * Issue a subrequest to write to the server.
  */
-static void v9fs_issue_write(struct netfs_io_subrequest *subreq)
+static int v9fs_issue_write(struct netfs_io_subrequest *subreq)
 {
+	struct iov_iter iter;
 	struct p9_fid *fid = subreq->rreq->netfs_priv;
 	int err, len;
 
-	len = p9_client_write(fid, subreq->start, &subreq->io_iter, &err);
+	subreq->len = umin(subreq->len, fid->clnt->msize - P9_IOHDRSZ);
+
+	err = netfs_prepare_write_buffer(subreq, INT_MAX);
+	if (err < 0)
+		return err;
+
+	iov_iter_bvec_queue(&iter, ITER_SOURCE, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
+
+	len = p9_client_write(fid, subreq->start, &iter, &err);
 	if (len > 0)
 		__set_bit(NETFS_SREQ_MADE_PROGRESS, &subreq->flags);
 	netfs_write_subrequest_terminated(subreq, len ?: err);
+	return err;
 }
 
 /**
  * v9fs_issue_read - Issue a read from 9P
  * @subreq: The read to make
+ * @rctx: Read generation context
  */
-static void v9fs_issue_read(struct netfs_io_subrequest *subreq)
+static int v9fs_issue_read(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
+	struct iov_iter iter;
 	struct p9_fid *fid = rreq->netfs_priv;
 	unsigned long long pos = subreq->start + subreq->transferred;
 	int total, err;
 
-	total = p9_client_read(fid, pos, &subreq->io_iter, &err);
+	err = netfs_prepare_read_buffer(subreq, INT_MAX);
+	if (err < 0)
+		return err;
+
+	iov_iter_bvec_queue(&iter, ITER_DEST, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
+
+	/* After this point, we're not allowed to return an error. */
+	netfs_mark_read_submission(subreq);
+
+	total = p9_client_read(fid, pos, &iter, &err);
 
 	/* if we just extended the file size, any portion not in
 	 * cache won't be on server and is zeroes */
@@ -89,6 +128,7 @@ static void v9fs_issue_read(struct netfs_io_subrequest *subreq)
 
 	subreq->error = err;
 	netfs_read_subreq_terminated(subreq);
+	return -EIOCBQUEUED;
 }
 
 /**
@@ -154,6 +194,7 @@ const struct netfs_request_ops v9fs_req_ops = {
 	.free_request		= v9fs_free_request,
 	.issue_read		= v9fs_issue_read,
 	.begin_writeback	= v9fs_begin_writeback,
+	.estimate_write		= v9fs_estimate_write,
 	.issue_write		= v9fs_issue_write,
 };
 

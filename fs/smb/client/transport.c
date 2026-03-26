@@ -1264,12 +1264,19 @@ cifs_readv_receive(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	}
 
 #ifdef CONFIG_CIFS_SMB_DIRECT
-	if (rdata->mr)
+	if (rdata->mr) {
 		length = data_len; /* An RDMA read is already done. */
-	else
+	} else {
 #endif
-		length = cifs_read_iter_from_socket(server, &rdata->subreq.io_iter,
-						    data_len);
+		struct iov_iter iter;
+
+		iov_iter_bvec_queue(&iter, ITER_DEST, rdata->subreq.content.bvecq,
+				    rdata->subreq.content.slot, rdata->subreq.content.offset,
+				    data_len);
+		length = cifs_read_iter_from_socket(server, &iter, data_len);
+#ifdef CONFIG_CIFS_SMB_DIRECT
+	}
+#endif
 	if (length > 0)
 		rdata->got_bytes += length;
 	server->total_read += length;

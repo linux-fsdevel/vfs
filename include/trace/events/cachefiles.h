@@ -70,6 +70,7 @@ enum cachefiles_coherency_trace {
 enum cachefiles_trunc_trace {
 	cachefiles_trunc_clear_padding,
 	cachefiles_trunc_dio_adjust,
+	cachefiles_trunc_discard_tail,
 	cachefiles_trunc_expand_tmpfile,
 	cachefiles_trunc_shrink,
 };
@@ -160,6 +161,7 @@ enum cachefiles_error_trace {
 #define cachefiles_trunc_traces						\
 	EM(cachefiles_trunc_clear_padding,	"CLRPAD")		\
 	EM(cachefiles_trunc_dio_adjust,		"DIOADJ")		\
+	EM(cachefiles_trunc_discard_tail,	"DSCDTL")		\
 	EM(cachefiles_trunc_expand_tmpfile,	"EXPTMP")		\
 	E_(cachefiles_trunc_shrink,		"SHRINK")
 

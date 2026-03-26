@@ -906,7 +906,7 @@ struct afs_operation {
 			afs_lock_type_t type;
 		} lock;
 		struct {
-			struct iov_iter	*write_iter;
+			struct iov_iter	write_iter;
 			loff_t	pos;
 			loff_t	size;
 			loff_t	i_size;
@@ -1680,8 +1680,10 @@ extern int afs_check_volume_status(struct afs_volume *, struct afs_operation *);
 /*
  * write.c
  */
-void afs_prepare_write(struct netfs_io_subrequest *subreq);
-void afs_issue_write(struct netfs_io_subrequest *subreq);
+int afs_estimate_write(struct netfs_io_request *wreq,
+		       struct netfs_io_stream *stream,
+		       struct netfs_write_estimate *estimate);
+int afs_issue_write(struct netfs_io_subrequest *subreq);
 void afs_begin_writeback(struct netfs_io_request *wreq);
 void afs_retry_request(struct netfs_io_request *wreq, struct netfs_io_stream *stream);
 extern int afs_writepages(struct address_space *, struct writeback_control *);

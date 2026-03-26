@@ -273,8 +273,6 @@ static int nfs_netfs_init_request(struct netfs_io_request *rreq, struct file *fi
 	rreq->debug_id = atomic_inc_return(&nfs_netfs_debug_id);
 	/* [DEPRECATED] Use PG_private_2 to mark folio being written to the cache. */
 	__set_bit(NETFS_RREQ_USE_PGPRIV2, &rreq->flags);
-	rreq->io_streams[0].sreq_max_len = NFS_SB(rreq->inode->i_sb)->rsize;
-
 	return 0;
 }
 
@@ -296,8 +294,9 @@ static struct nfs_netfs_io_data *nfs_netfs_alloc(struct netfs_io_subrequest *sre
 	return netfs;
 }
 
-static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
+static int nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 {
+	struct netfs_io_request		*rreq = sreq->rreq;
 	struct nfs_netfs_io_data	*netfs;
 	struct nfs_pageio_descriptor	pgio;
 	struct inode *inode = sreq->rreq->inode;
@@ -307,6 +306,13 @@ static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 	pgoff_t start, last;
 	int err;
 
+	if (sreq->len > NFS_SB(rreq->inode->i_sb)->rsize)
+		sreq->len = NFS_SB(rreq->inode->i_sb)->rsize;
+
+	err = netfs_prepare_read_buffer(sreq, INT_MAX);
+	if (err < 0)
+		return err;
+
 	start = (sreq->start + sreq->transferred) >> PAGE_SHIFT;
 	last = ((sreq->start + sreq->len - sreq->transferred - 1) >> PAGE_SHIFT);
 
@@ -314,14 +320,15 @@ static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 			     &nfs_async_read_completion_ops);
 
 	netfs = nfs_netfs_alloc(sreq);
-	if (!netfs) {
-		sreq->error = -ENOMEM;
-		return netfs_read_subreq_terminated(sreq);
-	}
+	if (!netfs)
+		return -ENOMEM;
+
+	/* After this point, we're not allowed to return an error. */
+	netfs_mark_read_submission(sreq);
 
 	pgio.pg_netfs = netfs; /* used in completion */
 
-	xa_for_each_range(&sreq->rreq->mapping->i_pages, idx, page, start, last) {
+	xa_for_each_range(&rreq->mapping->i_pages, idx, page, start, last) {
 		/* nfs_read_add_folio() may schedule() due to pNFS layout and other RPCs  */
 		err = nfs_read_add_folio(&pgio, ctx, page_folio(page));
 		if (err < 0) {
@@ -332,6 +339,7 @@ static void nfs_netfs_issue_read(struct netfs_io_subrequest *sreq)
 out:
 	nfs_pageio_complete_read(&pgio);
 	nfs_netfs_put(netfs);
+	return -EIOCBQUEUED;
 }
 
 void nfs_netfs_initiate_read(struct nfs_pgio_header *hdr)

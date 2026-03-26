@@ -44,17 +44,33 @@ static int cifs_reopen_file(struct cifsFileInfo *cfile, bool can_flush);
  * Prepare a subrequest to upload to the server.  We need to allocate credits
  * so that we know the maximum amount of data that we can include in it.
  */
-static void cifs_prepare_write(struct netfs_io_subrequest *subreq)
+static int cifs_estimate_write(struct netfs_io_request *wreq,
+			       struct netfs_io_stream *stream,
+			       struct netfs_write_estimate *estimate)
+{
+	struct cifs_sb_info *cifs_sb = CIFS_SB(wreq->inode->i_sb);
+
+	estimate->issue_at = stream->issue_from + cifs_sb->ctx->wsize;
+	return 0;
+}
+
+/*
+ * Issue a subrequest to upload to the server.
+ */
+static int cifs_issue_write(struct netfs_io_subrequest *subreq)
 {
 	struct cifs_io_subrequest *wdata =
 		container_of(subreq, struct cifs_io_subrequest, subreq);
 	struct cifs_io_request *req = wdata->req;
-	struct netfs_io_stream *stream = &req->rreq.io_streams[subreq->stream_nr];
 	struct TCP_Server_Info *server;
 	struct cifsFileInfo *open_file = req->cfile;
-	struct cifs_sb_info *cifs_sb = CIFS_SB(wdata->rreq->inode->i_sb);
-	size_t wsize = req->rreq.wsize;
+	struct cifs_sb_info *cifs_sb = CIFS_SB(subreq->rreq->inode->i_sb);
+	unsigned int max_segs = INT_MAX;
+	size_t len;
 	int rc;
+
+	if (cifs_forced_shutdown(cifs_sb))
+		return smb_EIO(smb_eio_trace_forced_shutdown);
 
 	if (!wdata->have_xid) {
 		wdata->xid = get_xid();
@@ -74,18 +90,16 @@ retry:
 		if (rc < 0) {
 			if (rc == -EAGAIN)
 				goto retry;
-			subreq->error = rc;
-			return netfs_prepare_write_failed(subreq);
+			return rc;
 		}
 	}
 
-	rc = server->ops->wait_mtu_credits(server, wsize, &stream->sreq_max_len,
-					   &wdata->credits);
-	if (rc < 0) {
-		subreq->error = rc;
-		return netfs_prepare_write_failed(subreq);
-	}
+	len = umin(subreq->len, cifs_sb->ctx->wsize);
+	rc = server->ops->wait_mtu_credits(server, len, &len, &wdata->credits);
+	if (rc < 0)
+		return rc;
 
+	subreq->len = len;
 	wdata->credits.rreq_debug_id = subreq->rreq->debug_id;
 	wdata->credits.rreq_debug_index = subreq->debug_index;
 	wdata->credits.in_flight_check = 1;
@@ -101,39 +115,29 @@ retry:
 		const struct smbdirect_socket_parameters *sp =
 			smbd_get_parameters(server->smbd_conn);
 
-		stream->sreq_max_segs = sp->max_frmr_depth;
+		max_segs = sp->max_frmr_depth;
 	}
 #endif
-}
 
-/*
- * Issue a subrequest to upload to the server.
- */
-static void cifs_issue_write(struct netfs_io_subrequest *subreq)
-{
-	struct cifs_io_subrequest *wdata =
-		container_of(subreq, struct cifs_io_subrequest, subreq);
-	struct cifs_sb_info *sbi = CIFS_SB(subreq->rreq->inode->i_sb);
-	int rc;
-
-	if (cifs_forced_shutdown(sbi)) {
-		rc = smb_EIO(smb_eio_trace_forced_shutdown);
-		goto fail;
+	rc = netfs_prepare_write_buffer(subreq, max_segs);
+	if (rc < 0) {
+		add_credits_and_wake_if(wdata->server, &wdata->credits, 0);
+		return rc;
 	}
 
-	rc = adjust_credits(wdata->server, wdata, cifs_trace_rw_credits_issue_write_adjust);
+	rc = adjust_credits(server, wdata, cifs_trace_rw_credits_issue_write_adjust);
 	if (rc)
-		goto fail;
+		goto fail_with_credits;
 
 	rc = -EAGAIN;
 	if (wdata->req->cfile->invalidHandle)
-		goto fail;
+		goto fail_with_credits;
 
 	wdata->server->ops->async_writev(wdata);
 out:
-	return;
+	return -EIOCBQUEUED;
 
-fail:
+fail_with_credits:
 	if (rc == -EAGAIN)
 		trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 	else
@@ -149,17 +153,25 @@ static void cifs_netfs_invalidate_cache(struct netfs_io_request *wreq)
 }
 
 /*
- * Negotiate the size of a read operation on behalf of the netfs library.
+ * Issue a read operation on behalf of the netfs helper functions.  We're asked
+ * to make a read of a certain size at a point in the file.  We are permitted
+ * to only read a portion of that, but as long as we read something, the netfs
+ * helper will call us again so that we can issue another read.
  */
-static int cifs_prepare_read(struct netfs_io_subrequest *subreq)
+static int cifs_issue_read(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *rreq = subreq->rreq;
 	struct cifs_io_subrequest *rdata = container_of(subreq, struct cifs_io_subrequest, subreq);
 	struct cifs_io_request *req = container_of(subreq->rreq, struct cifs_io_request, rreq);
-	struct TCP_Server_Info *server;
+	struct TCP_Server_Info *server = rdata->server;
 	struct cifs_sb_info *cifs_sb = CIFS_SB(rreq->inode->i_sb);
-	size_t size;
-	int rc = 0;
+	unsigned int max_segs = INT_MAX;
+	size_t len;
+	int rc;
+
+	cifs_dbg(FYI, "%s: op=%08x[%x] mapping=%p len=%zu/%zu\n",
+		 __func__, rreq->debug_id, subreq->debug_index, rreq->mapping,
+		 subreq->transferred, subreq->len);
 
 	if (!rdata->have_xid) {
 		rdata->xid = get_xid();
@@ -173,17 +185,15 @@ static int cifs_prepare_read(struct netfs_io_subrequest *subreq)
 		cifs_negotiate_rsize(server, cifs_sb->ctx,
 				     tlink_tcon(req->cfile->tlink));
 
-	rc = server->ops->wait_mtu_credits(server, cifs_sb->ctx->rsize,
-					   &size, &rdata->credits);
+	len = umin(subreq->len, cifs_sb->ctx->rsize);
+	rc = server->ops->wait_mtu_credits(server, len, &len, &rdata->credits);
 	if (rc)
 		return rc;
 
-	rreq->io_streams[0].sreq_max_len = size;
-
-	rdata->credits.in_flight_check = 1;
+	subreq->len = len;
 	rdata->credits.rreq_debug_id = rreq->debug_id;
 	rdata->credits.rreq_debug_index = subreq->debug_index;
-
+	rdata->credits.in_flight_check = 1;
 	trace_smb3_rw_credits(rdata->rreq->debug_id,
 			      rdata->subreq.debug_index,
 			      rdata->credits.value,
@@ -195,33 +205,17 @@ static int cifs_prepare_read(struct netfs_io_subrequest *subreq)
 		const struct smbdirect_socket_parameters *sp =
 			smbd_get_parameters(server->smbd_conn);
 
-		rreq->io_streams[0].sreq_max_segs = sp->max_frmr_depth;
+		max_segs = sp->max_frmr_depth;
 	}
 #endif
-	return 0;
-}
 
-/*
- * Issue a read operation on behalf of the netfs helper functions.  We're asked
- * to make a read of a certain size at a point in the file.  We are permitted
- * to only read a portion of that, but as long as we read something, the netfs
- * helper will call us again so that we can issue another read.
- */
-static void cifs_issue_read(struct netfs_io_subrequest *subreq)
-{
-	struct netfs_io_request *rreq = subreq->rreq;
-	struct cifs_io_subrequest *rdata = container_of(subreq, struct cifs_io_subrequest, subreq);
-	struct cifs_io_request *req = container_of(subreq->rreq, struct cifs_io_request, rreq);
-	struct TCP_Server_Info *server = rdata->server;
-	int rc = 0;
-
-	cifs_dbg(FYI, "%s: op=%08x[%x] mapping=%p len=%zu/%zu\n",
-		 __func__, rreq->debug_id, subreq->debug_index, rreq->mapping,
-		 subreq->transferred, subreq->len);
+	rc = netfs_prepare_read_buffer(subreq, max_segs);
+	if (rc < 0)
+		goto fail_with_credits;
 
 	rc = adjust_credits(server, rdata, cifs_trace_rw_credits_issue_read_adjust);
 	if (rc)
-		goto failed;
+		goto fail_with_credits;
 
 	if (req->cfile->invalidHandle) {
 		do {
@@ -235,15 +229,24 @@ static void cifs_issue_read(struct netfs_io_subrequest *subreq)
 	    subreq->rreq->origin != NETFS_DIO_READ)
 		__set_bit(NETFS_SREQ_CLEAR_TAIL, &subreq->flags);
 
-	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
-	rc = rdata->server->ops->async_readv(rdata);
-	if (rc)
-		goto failed;
-	return;
+	/* After this point, we're not allowed to return an error. */
+	netfs_mark_read_submission(subreq);
 
+	rc = rdata->server->ops->async_readv(rdata);
+	if (rc) {
+		subreq->error = rc;
+		netfs_read_subreq_terminated(subreq);
+	}
+	return -EIOCBQUEUED;
+
+fail_with_credits:
+	if (rc == -EAGAIN)
+		trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
+	else
+		trace_netfs_sreq(subreq, netfs_sreq_trace_fail);
+	add_credits_and_wake_if(rdata->server, &rdata->credits, 0);
 failed:
-	subreq->error = rc;
-	netfs_read_subreq_terminated(subreq);
+	return rc;
 }
 
 /*
@@ -353,11 +356,10 @@ const struct netfs_request_ops cifs_req_ops = {
 	.init_request		= cifs_init_request,
 	.free_request		= cifs_free_request,
 	.free_subrequest	= cifs_free_subrequest,
-	.prepare_read		= cifs_prepare_read,
 	.issue_read		= cifs_issue_read,
 	.done			= cifs_rreq_done,
 	.begin_writeback	= cifs_begin_writeback,
-	.prepare_write		= cifs_prepare_write,
+	.estimate_write		= cifs_estimate_write,
 	.issue_write		= cifs_issue_write,
 	.invalidate_cache	= cifs_netfs_invalidate_cache,
 };

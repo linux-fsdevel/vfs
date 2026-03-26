@@ -233,6 +233,37 @@ void netfs_subreq_clear_in_progress(struct netfs_io_subrequest *subreq)
 }
 
 /*
+ * Wait for a subrequest to come to completion.
+ */
+int netfs_wait_for_in_progress_subreq(struct netfs_io_request *rreq,
+				      struct netfs_io_subrequest *subreq)
+{
+	if (netfs_check_subreq_in_progress(subreq)) {
+		DEFINE_WAIT(myself);
+
+		trace_netfs_rreq(rreq, netfs_rreq_trace_wait_quiesce);
+		for (;;) {
+			prepare_to_wait(&rreq->waitq, &myself, TASK_UNINTERRUPTIBLE);
+
+			if (!netfs_check_subreq_in_progress(subreq))
+				break;
+
+			trace_netfs_sreq(subreq, netfs_sreq_trace_wait_for);
+			schedule();
+		}
+
+		trace_netfs_rreq(rreq, netfs_rreq_trace_waited_quiesce);
+		finish_wait(&rreq->waitq, &myself);
+	}
+
+	if (test_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags))
+		return -EAGAIN;
+	if (test_bit(NETFS_SREQ_FAILED, &subreq->flags))
+		return subreq->error;
+	return 0;
+}
+
+/*
  * Wait for all outstanding I/O in a stream to quiesce.
  */
 void netfs_wait_for_in_progress_stream(struct netfs_io_request *rreq,
@@ -361,7 +392,7 @@ all_collected:
 		case NETFS_UNBUFFERED_WRITE:
 			break;
 		default:
-			if (rreq->submitted < rreq->len) {
+			if (rreq->transferred < rreq->len) {
 				trace_netfs_failure(rreq, NULL, ret, netfs_fail_short_read);
 				ret = -EIO;
 			}

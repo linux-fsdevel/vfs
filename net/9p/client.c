@@ -1561,6 +1561,7 @@ void
 p9_client_write_subreq(struct netfs_io_subrequest *subreq)
 {
 	struct netfs_io_request *wreq = subreq->rreq;
+	struct iov_iter iter;
 	struct p9_fid *fid = wreq->netfs_priv;
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
@@ -1571,14 +1572,17 @@ p9_client_write_subreq(struct netfs_io_subrequest *subreq)
 	p9_debug(P9_DEBUG_9P, ">>> TWRITE fid %d offset %llu len %d\n",
 		 fid->fid, start, len);
 
+	iov_iter_bvec_queue(&iter, ITER_SOURCE, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
+
 	/* Don't bother zerocopy for small IO (< 1024) */
 	if (clnt->trans_mod->zc_request && len > 1024) {
-		req = p9_client_zc_rpc(clnt, P9_TWRITE, NULL, &subreq->io_iter,
+		req = p9_client_zc_rpc(clnt, P9_TWRITE, NULL, &iter,
 				       0, wreq->len, P9_ZC_HDR_SZ, "dqd",
 				       fid->fid, start, len);
 	} else {
 		req = p9_client_rpc(clnt, P9_TWRITE, "dqV", fid->fid,
-				    start, len, &subreq->io_iter);
+				    start, len, &iter);
 	}
 	if (IS_ERR(req)) {
 		netfs_write_subrequest_terminated(subreq, PTR_ERR(req));

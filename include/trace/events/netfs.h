@@ -49,6 +49,7 @@
 	E_(NETFS_PGPRIV2_COPY_TO_CACHE,		"2C")
 
 #define netfs_rreq_traces					\
+	EM(netfs_rreq_trace_all_queued,		"ALL-Q  ")	\
 	EM(netfs_rreq_trace_assess,		"ASSESS ")	\
 	EM(netfs_rreq_trace_collect,		"COLLECT")	\
 	EM(netfs_rreq_trace_complete,		"COMPLET")	\
@@ -77,7 +78,8 @@
 	EM(netfs_rreq_trace_waited_quiesce,	"DONE-QUIESCE")	\
 	EM(netfs_rreq_trace_wake_ip,		"WAKE-IP")	\
 	EM(netfs_rreq_trace_wake_queue,		"WAKE-Q ")	\
-	E_(netfs_rreq_trace_write_done,		"WR-DONE")
+	EM(netfs_rreq_trace_write_done,		"WR-DONE")	\
+	E_(netfs_rreq_trace_zero_unread,	"ZERO-UR")
 
 #define netfs_sreq_sources					\
 	EM(NETFS_SOURCE_UNKNOWN,		"----")		\
@@ -126,6 +128,7 @@
 	EM(netfs_sreq_trace_superfluous,	"SPRFL")	\
 	EM(netfs_sreq_trace_terminated,		"TERM ")	\
 	EM(netfs_sreq_trace_too_much,		"!TOOM")	\
+	EM(netfs_sreq_trace_too_many_retries,	"!RETR")	\
 	EM(netfs_sreq_trace_wait_for,		"_WAIT")	\
 	EM(netfs_sreq_trace_write,		"WRITE")	\
 	EM(netfs_sreq_trace_write_skip,		"SKIP ")	\
@@ -189,12 +192,12 @@
 	EM(netfs_folio_trace_alloc_buffer,	"alloc-buf")	\
 	EM(netfs_folio_trace_cancel_copy,	"cancel-copy")	\
 	EM(netfs_folio_trace_cancel_store,	"cancel-store")	\
-	EM(netfs_folio_trace_clear,		"clear")	\
-	EM(netfs_folio_trace_clear_cc,		"clear-cc")	\
-	EM(netfs_folio_trace_clear_g,		"clear-g")	\
-	EM(netfs_folio_trace_clear_s,		"clear-s")	\
 	EM(netfs_folio_trace_copy_to_cache,	"mark-copy")	\
 	EM(netfs_folio_trace_end_copy,		"end-copy")	\
+	EM(netfs_folio_trace_endwb,		"endwb")	\
+	EM(netfs_folio_trace_endwb_cc,		"endwb-cc")	\
+	EM(netfs_folio_trace_endwb_g,		"endwb-g")	\
+	EM(netfs_folio_trace_endwb_s,		"endwb-s")	\
 	EM(netfs_folio_trace_filled_gaps,	"filled-gaps")	\
 	EM(netfs_folio_trace_kill,		"kill")		\
 	EM(netfs_folio_trace_kill_cc,		"kill-cc")	\
@@ -381,10 +384,10 @@ TRACE_EVENT(netfs_sreq,
 		    __entry->len	= sreq->len;
 		    __entry->transferred = sreq->transferred;
 		    __entry->start	= sreq->start;
-		    __entry->slot	= sreq->dispatch_pos.slot;
+		    __entry->slot	= sreq->content.slot;
 			   ),
 
-	    TP_printk("R=%08x[%x] %s %s f=%03x s=%llx %zx/%zx qs=%u e=%d",
+	    TP_printk("R=%08x[%x] %s %s f=%03x s=%llx %zx/%zx bv=%u e=%d",
 		      __entry->rreq, __entry->index,
 		      __print_symbolic(__entry->source, netfs_sreq_sources),
 		      __print_symbolic(__entry->what, netfs_sreq_traces),
@@ -492,6 +495,7 @@ TRACE_EVENT(netfs_folio,
 	    TP_STRUCT__entry(
 		    __field(ino_t,			ino)
 		    __field(pgoff_t,			index)
+		    __field(unsigned long,		pfn)
 		    __field(unsigned int,		nr)
 		    __field(enum netfs_folio_trace,	why)
 			     ),
@@ -502,11 +506,38 @@ TRACE_EVENT(netfs_folio,
 		    __entry->why = why;
 		    __entry->index = folio->index;
 		    __entry->nr = folio_nr_pages(folio);
+		    __entry->pfn = folio_pfn(folio);
 			   ),
 
-	    TP_printk("i=%05lx ix=%05lx-%05lx %s",
+	    TP_printk("p=%lx i=%05lx ix=%05lx-%05lx %s",
+		      __entry->pfn,
 		      __entry->ino, __entry->index, __entry->index + __entry->nr - 1,
 		      __print_symbolic(__entry->why, netfs_folio_traces))
+	    );
+
+TRACE_EVENT(netfs_wback,
+	    TP_PROTO(struct netfs_io_request *wreq, struct folio *folio, unsigned int notes),
+
+	    TP_ARGS(wreq, folio, notes),
+
+	    TP_STRUCT__entry(
+		    __field(pgoff_t,			index)
+		    __field(unsigned int,		wreq)
+		    __field(unsigned int,		nr)
+		    __field(unsigned int,		notes)
+			     ),
+
+	    TP_fast_assign(
+		    __entry->wreq = wreq->debug_id;
+		    __entry->notes = notes;
+		    __entry->index = folio->index;
+		    __entry->nr = folio_nr_pages(folio);
+			   ),
+
+	    TP_printk("R=%08x ix=%05lx-%05lx n=%02x",
+		      __entry->wreq,
+		      __entry->index, __entry->index + __entry->nr - 1,
+		      __entry->notes)
 	    );
 
 TRACE_EVENT(netfs_write_iter,
@@ -751,7 +782,7 @@ TRACE_EVENT(netfs_collect_stream,
 		    __entry->wreq	= wreq->debug_id;
 		    __entry->stream	= stream->stream_nr;
 		    __entry->collected_to = stream->collected_to;
-		    __entry->issued_to	= atomic64_read(&wreq->issued_to);
+		    __entry->issued_to	= atomic64_read(&stream->issued_to);
 			   ),
 
 	    TP_printk("R=%08x[%x:] cto=%llx ito=%llx",
@@ -775,7 +806,7 @@ TRACE_EVENT(netfs_bvecq,
 		    __entry->trace	= trace;
 			   ),
 
-	    TP_printk("fq=%x %s",
+	    TP_printk("bq=%x %s",
 		      __entry->id,
 		      __print_symbolic(__entry->trace, netfs_bvecq_traces))
 	    );

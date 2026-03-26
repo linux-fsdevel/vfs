@@ -13,8 +13,39 @@
 #include <linux/task_io_accounting_ops.h>
 #include "internal.h"
 
+int netfs_prepare_pgpriv2_write_buffer(struct netfs_io_subrequest *subreq,
+				       unsigned int max_segs)
+{
+	struct netfs_io_request *creq = subreq->rreq;
+	struct netfs_io_stream *stream = &creq->io_streams[1];
+	size_t len;
+
+	bvecq_pos_set(&subreq->dispatch_pos, &stream->dispatch_cursor);
+	bvecq_pos_set(&subreq->content, &stream->dispatch_cursor);
+	len = bvecq_slice(&stream->dispatch_cursor, subreq->len, max_segs,
+			  &subreq->nr_segs);
+
+	if (len < subreq->len) {
+		subreq->len = len;
+		trace_netfs_sreq(subreq, netfs_sreq_trace_limited);
+	}
+
+	// TODO: Wait here for completion of prev subreq
+
+	stream->issue_from += subreq->len;
+	stream->buffered   -= subreq->len;
+	if (stream->buffered == 0) {
+		smp_wmb(); /* Write lists before ALL_QUEUED. */
+		set_bit(NETFS_RREQ_ALL_QUEUED, &creq->flags);
+	}
+	return 0;
+}
+
 /*
- * [DEPRECATED] Copy a folio to the cache with PG_private_2 set.
+ * [DEPRECATED] Copy a folio to the cache with PG_private_2 set.  Note that the
+ * folio won't necessarily be contiguous with the previous one as there might
+ * be a mixture of folios read from the cache and downloaded from the server
+ * (or just zeroed).
  */
 static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio *folio)
 {
@@ -24,7 +55,6 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	size_t dio_size = PAGE_SIZE;
 	size_t fsize = folio_size(folio), flen = fsize;
 	loff_t fpos = folio_pos(folio), i_size;
-	bool to_eof = false;
 
 	_enter("");
 
@@ -44,19 +74,14 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	if (fpos + fsize > creq->i_size)
 		creq->i_size = i_size;
 
-	if (flen > i_size - fpos) {
+	if (flen > i_size - fpos)
 		flen = i_size - fpos;
-		to_eof = true;
-	} else if (flen == i_size - fpos) {
-		to_eof = true;
-	}
 
 	flen = round_up(flen, dio_size);
 
 	_debug("folio %zx %zx", flen, fsize);
 
 	trace_netfs_folio(folio, netfs_folio_trace_store_copy);
-
 
 	/* Institute a new bvec queue segment if the current one is full or if
 	 * we encounter a discontiguity.  The discontiguity break is important
@@ -79,40 +104,13 @@ static void netfs_pgpriv2_copy_folio(struct netfs_io_request *creq, struct folio
 	/* Attach the folio to the rolling buffer. */
 	slot = queue->nr_slots;
 	bvec_set_folio(&queue->bv[slot], folio, fsize, 0);
-	/* Order incrementing the slot counter after the slot is filled. */
-	smp_store_release(&queue->nr_slots, slot + 1);
+	queue->nr_slots = slot + 1;
 	creq->load_cursor.slot = slot + 1;
 	creq->load_cursor.offset = 0;
 	trace_netfs_bv_slot(queue, slot);
+	trace_netfs_wback(creq, folio, 0);
 
-	cache->submit_off = 0;
-	cache->submit_len = flen;
-
-	/* Attach the folio to one or more subrequests.  For a big folio, we
-	 * could end up with thousands of subrequests if the wsize is small -
-	 * but we might need to wait during the creation of subrequests for
-	 * network resources (eg. SMB credits).
-	 */
-	do {
-		ssize_t part;
-
-		creq->dispatch_cursor.offset = cache->submit_off;
-
-		atomic64_set(&creq->issued_to, fpos + cache->submit_off);
-		part = netfs_advance_write(creq, cache, fpos + cache->submit_off,
-					   cache->submit_len, to_eof);
-		cache->submit_off += part;
-		if (part > cache->submit_len)
-			cache->submit_len = 0;
-		else
-			cache->submit_len -= part;
-	} while (cache->submit_len > 0);
-
-	bvecq_pos_step(&creq->dispatch_cursor);
-	atomic64_set(&creq->issued_to, fpos + fsize);
-
-	if (flen < fsize)
-		netfs_issue_write(creq, cache);
+	cache->buffered += flen;
 }
 
 /*
@@ -122,6 +120,7 @@ static struct netfs_io_request *netfs_pgpriv2_begin_copy_to_cache(
 	struct netfs_io_request *rreq, struct folio *folio)
 {
 	struct netfs_io_request *creq;
+	struct netfs_io_stream *cache;
 
 	if (!fscache_resources_valid(&rreq->cache_resources))
 		goto cancel;
@@ -131,12 +130,15 @@ static struct netfs_io_request *netfs_pgpriv2_begin_copy_to_cache(
 	if (IS_ERR(creq))
 		goto cancel;
 
-	if (!creq->io_streams[1].avail)
+	cache = &creq->io_streams[1];
+	if (!cache->avail)
 		goto cancel_put;
 
-	bvecq_buffer_init(&creq->load_cursor, GFP_KERNEL);
-	bvecq_pos_set(&creq->dispatch_cursor, &creq->load_cursor);
-	bvecq_pos_set(&creq->collect_cursor, &creq->dispatch_cursor);
+	if (bvecq_buffer_init(&creq->load_cursor, GFP_KERNEL) < 0)
+		goto cancel_put;
+
+	bvecq_pos_set(&cache->dispatch_cursor, &creq->load_cursor);
+	bvecq_pos_set(&creq->collect_cursor, &creq->load_cursor);
 
 	__set_bit(NETFS_RREQ_OFFLOAD_COLLECTION, &creq->flags);
 	trace_netfs_copy2cache(rreq, creq);
@@ -172,18 +174,42 @@ void netfs_pgpriv2_copy_to_cache(struct netfs_io_request *rreq, struct folio *fo
 }
 
 /*
+ * Issue all pending writes on the cache stream.
+ */
+static int netfs_pgpriv2_issue_stream(struct netfs_io_request *wreq,
+				      struct netfs_io_stream *stream)
+{
+	int ret;
+
+	atomic64_set_release(&stream->issued_to, wreq->start);
+
+	do {
+		struct netfs_io_subrequest *subreq;
+
+		subreq = netfs_alloc_write_subreq(wreq, stream);
+		if (!subreq)
+			return -ENOMEM;
+
+		ret = stream->issue_write(subreq);
+		if (ret < 0 && ret != -EIOCBQUEUED)
+			break;
+	} while (stream->buffered > 0);
+
+	return ret;
+}
+
+/*
  * [DEPRECATED] End writing to the cache, flushing out any outstanding writes.
  */
 void netfs_pgpriv2_end_copy_to_cache(struct netfs_io_request *rreq)
 {
 	struct netfs_io_request *creq = rreq->copy_to_cache;
+	struct netfs_io_stream *stream = &creq->io_streams[1];
 
 	if (IS_ERR_OR_NULL(creq))
 		return;
 
-	netfs_issue_write(creq, &creq->io_streams[1]);
-	smp_wmb(); /* Write lists before ALL_QUEUED. */
-	set_bit(NETFS_RREQ_ALL_QUEUED, &creq->flags);
+	netfs_pgpriv2_issue_stream(creq, stream);
 	trace_netfs_rreq(rreq, netfs_rreq_trace_end_copy_to_cache);
 	if (list_empty_careful(&creq->io_streams[1].subrequests))
 		netfs_wake_collector(creq);

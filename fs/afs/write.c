@@ -84,17 +84,20 @@ static const struct afs_operation_ops afs_store_data_operation = {
 };
 
 /*
- * Prepare a subrequest to write to the server.  This sets the max_len
- * parameter.
+ * Estimate the maximum size of a write we can send to the server.
  */
-void afs_prepare_write(struct netfs_io_subrequest *subreq)
+int afs_estimate_write(struct netfs_io_request *wreq,
+		       struct netfs_io_stream *stream,
+		       struct netfs_write_estimate *estimate)
 {
-	struct netfs_io_stream *stream = &subreq->rreq->io_streams[subreq->stream_nr];
+	unsigned long long limit = ULLONG_MAX - stream->issue_from;
+	unsigned long long max_len = 256 * 1024 * 1024;
 
 	//if (test_bit(NETFS_SREQ_RETRYING, &subreq->flags))
-	//	subreq->max_len = 512 * 1024;
-	//else
-	stream->sreq_max_len = 256 * 1024 * 1024;
+	//	max_len = 512 * 1024;
+
+	estimate->issue_at = stream->issue_from + umin(max_len, limit);
+	return 0;
 }
 
 /*
@@ -140,11 +143,14 @@ static void afs_issue_write_worker(struct work_struct *work)
 	op->flags		|= AFS_OPERATION_UNINTR;
 	op->ops			= &afs_store_data_operation;
 
+	trace_netfs_sreq(subreq, netfs_sreq_trace_submit);
 	afs_begin_vnode_operation(op);
 
-	op->store.write_iter	= &subreq->io_iter;
 	op->store.i_size	= umax(pos + len, vnode->netfs.remote_i_size);
 	op->mtime		= inode_get_mtime(&vnode->netfs.inode);
+
+	iov_iter_bvec_queue(&op->store.write_iter, ITER_SOURCE, subreq->content.bvecq,
+			    subreq->content.slot, subreq->content.offset, subreq->len);
 
 	afs_wait_for_operation(op);
 	ret = afs_put_operation(op);
@@ -169,11 +175,20 @@ static void afs_issue_write_worker(struct work_struct *work)
 	netfs_write_subrequest_terminated(subreq, ret < 0 ? ret : subreq->len);
 }
 
-void afs_issue_write(struct netfs_io_subrequest *subreq)
+int afs_issue_write(struct netfs_io_subrequest *subreq)
 {
+	int ret;
+
+	if (subreq->len > 256 * 1024 * 1024)
+		subreq->len = 256 * 1024 * 1024;
+	ret = netfs_prepare_write_buffer(subreq, INT_MAX);
+	if (ret < 0)
+		return ret;
+
 	subreq->work.func = afs_issue_write_worker;
 	if (!queue_work(system_dfl_wq, &subreq->work))
 		WARN_ON_ONCE(1);
+	return -EIOCBQUEUED;
 }
 
 /*
@@ -184,6 +199,8 @@ void afs_begin_writeback(struct netfs_io_request *wreq)
 {
 	if (S_ISREG(wreq->inode->i_mode))
 		afs_get_writeback_key(wreq);
+
+	wreq->io_streams[0].avail = true;
 }
 
 /*

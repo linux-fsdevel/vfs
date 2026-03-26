@@ -4705,6 +4705,7 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 	unsigned int cur_page_idx;
 	unsigned int pad_len;
 	struct cifs_io_subrequest *rdata = mid->callback_data;
+	struct iov_iter iter;
 	struct smb2_hdr *shdr = (struct smb2_hdr *)buf;
 	size_t copied;
 	bool use_rdma_mr = false;
@@ -4777,6 +4778,10 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 
 	pad_len = data_offset - server->vals->read_rsp_size;
 
+	iov_iter_bvec_queue(&iter, ITER_DEST,
+			    rdata->subreq.content.bvecq, rdata->subreq.content.slot,
+			    rdata->subreq.content.offset, rdata->subreq.len);
+
 	if (buf_len <= data_offset) {
 		/* read response payload is in pages */
 		cur_page_idx = pad_len / PAGE_SIZE;
@@ -4806,7 +4811,7 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 
 		/* Copy the data to the output I/O iterator. */
 		rdata->result = cifs_copy_bvecq_to_iter(buffer, buffer_len,
-							cur_off, &rdata->subreq.io_iter);
+							cur_off, &iter);
 		if (rdata->result != 0) {
 			if (is_offloaded)
 				mid->mid_state = MID_RESPONSE_MALFORMED;
@@ -4819,7 +4824,7 @@ handle_read_data(struct TCP_Server_Info *server, struct mid_q_entry *mid,
 	} else if (buf_len >= data_offset + data_len) {
 		/* read response payload is in buf */
 		WARN_ONCE(buffer, "read data can be either in buf or in buffer");
-		copied = copy_to_iter(buf + data_offset, data_len, &rdata->subreq.io_iter);
+		copied = copy_to_iter(buf + data_offset, data_len, &iter);
 		if (copied == 0)
 			return smb_EIO2(smb_eio_trace_rx_copy_to_iter, copied, data_len);
 		rdata->got_bytes = copied;
