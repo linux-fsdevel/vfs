@@ -31,12 +31,12 @@ void afs_init_new_symlink(struct afs_vnode *vnode, struct afs_operation *op)
 	size_t dsize = 0;
 	char *p;
 
-	if (netfs_alloc_folioq_buffer(NULL, &vnode->directory, &dsize, size,
-				      mapping_gfp_mask(vnode->netfs.inode.i_mapping)) < 0)
+	if (bvecq_expand_buffer(&vnode->directory, &dsize, size,
+				mapping_gfp_mask(vnode->netfs.inode.i_mapping)) < 0)
 		return;
 
 	vnode->directory_size = dsize;
-	p = kmap_local_folio(folioq_folio(vnode->directory, 0), 0);
+	p = kmap_local_bvec(&vnode->directory->bv[0], 0);
 	memcpy(p, op->create.symlink, size);
 	kunmap_local(p);
 	set_bit(AFS_VNODE_DIR_READ, &vnode->flags);
@@ -45,17 +45,17 @@ void afs_init_new_symlink(struct afs_vnode *vnode, struct afs_operation *op)
 
 static void afs_put_link(void *arg)
 {
-	struct folio *folio = virt_to_folio(arg);
+	struct page *page = virt_to_page(arg);
 
 	kunmap_local(arg);
-	folio_put(folio);
+	put_page(page);
 }
 
 const char *afs_get_link(struct dentry *dentry, struct inode *inode,
 			 struct delayed_call *callback)
 {
 	struct afs_vnode *vnode = AFS_FS_I(inode);
-	struct folio *folio;
+	struct page *page;
 	char *content;
 	ssize_t ret;
 
@@ -84,9 +84,9 @@ fetch:
 	set_bit(AFS_VNODE_DIR_READ, &vnode->flags);
 
 good:
-	folio = folioq_folio(vnode->directory, 0);
-	folio_get(folio);
-	content = kmap_local_folio(folio, 0);
+	page = vnode->directory->bv[0].bv_page;
+	get_page(page);
+	content = kmap_local_page(page);
 	set_delayed_call(callback, afs_put_link, content);
 	return content;
 }
@@ -761,7 +761,7 @@ void afs_evict_inode(struct inode *inode)
 
 	netfs_wait_for_outstanding_io(inode);
 	truncate_inode_pages_final(&inode->i_data);
-	netfs_free_folioq_buffer(vnode->directory);
+	bvecq_put(vnode->directory);
 
 	afs_set_cache_aux(vnode, &aux);
 	netfs_clear_inode_writeback(inode, &aux);
