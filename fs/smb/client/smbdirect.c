@@ -3299,6 +3299,63 @@ static ssize_t smb_extract_folioq_to_rdma(struct iov_iter *iter,
 }
 
 /*
+ * Extract memory fragments from a BVECQ-class iterator and add them to an RDMA
+ * list.  The folios are not pinned.
+ */
+static ssize_t smb_extract_bvecq_to_rdma(struct iov_iter *iter,
+					 struct smb_extract_to_rdma *rdma,
+					 ssize_t maxsize)
+{
+	const struct bvecq *bq = iter->bvecq;
+	unsigned int slot = iter->bvecq_slot;
+	ssize_t ret = 0;
+	size_t offset = iter->iov_offset;
+
+	if (slot >= bq->nr_slots) {
+		bq = bq->next;
+		if (WARN_ON_ONCE(!bq))
+			return -EIO;
+		slot = 0;
+	}
+
+	do {
+		struct bio_vec *bv = &bq->bv[slot];
+		struct page *page = bv->bv_page;
+		size_t bsize = bv->bv_len;
+
+		if (offset < bsize) {
+			size_t part = umin(maxsize, bsize - offset);
+
+			if (!smb_set_sge(rdma, page, bv->bv_offset + offset, part))
+				return -EIO;
+
+			offset += part;
+			ret += part;
+			maxsize -= part;
+		}
+
+		if (offset >= bsize) {
+			offset = 0;
+			slot++;
+			if (slot >= bq->nr_slots) {
+				if (!bq->next) {
+					WARN_ON_ONCE(ret < iter->count);
+					break;
+				}
+				bq = bq->next;
+				slot = 0;
+			}
+		}
+	} while (rdma->nr_sge < rdma->max_sge && maxsize > 0);
+
+	iter->bvecq = bq;
+	iter->bvecq_slot = slot;
+	iter->iov_offset = offset;
+	iter->count -= ret;
+	return ret;
+}
+
+/*
  * Extract page fragments from up to the given amount of the source iterator
  * and build up an RDMA list that refers to all of those bits.  The RDMA list
  * is appended to, up to the maximum number of elements set in the parameter
@@ -3324,6 +3381,9 @@ static ssize_t smb_extract_iter_to_rdma(struct iov_iter *iter, size_t len,
 		break;
 	case ITER_FOLIOQ:
 		ret = smb_extract_folioq_to_rdma(iter, rdma, len);
+		break;
+	case ITER_BVECQ:
+		ret = smb_extract_bvecq_to_rdma(iter, rdma, len);
 		break;
 	default:
 		WARN_ON_ONCE(1);
