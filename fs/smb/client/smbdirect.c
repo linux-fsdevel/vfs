@@ -6,7 +6,6 @@
  */
 #include <linux/module.h>
 #include <linux/highmem.h>
-#include <linux/folio_queue.h>
 #define __SMBDIRECT_SOCKET_DISCONNECT(__sc) smbd_disconnect_rdma_connection(__sc)
 #include "../common/smbdirect/smbdirect_pdu.h"
 #include "smbdirect.h"
