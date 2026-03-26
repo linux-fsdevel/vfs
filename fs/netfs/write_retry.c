@@ -17,6 +17,7 @@
 static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 				     struct netfs_io_stream *stream)
 {
+	struct bvecq_pos dispatch_cursor = {};
 	struct list_head *next;
 
 	_enter("R=%x[%x:]", wreq->debug_id, stream->stream_nr);
@@ -39,12 +40,8 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 			if (test_bit(NETFS_SREQ_FAILED, &subreq->flags))
 				break;
 			if (__test_and_clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags)) {
-				struct iov_iter source;
-
-				netfs_reset_iter(subreq);
-				source = subreq->io_iter;
 				netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
-				netfs_reissue_write(stream, subreq, &source);
+				netfs_reissue_write(stream, subreq);
 			}
 		}
 		return;
@@ -54,10 +51,11 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 
 	do {
 		struct netfs_io_subrequest *subreq = NULL, *from, *to, *tmp;
-		struct iov_iter source;
 		unsigned long long start, len;
 		size_t part;
 		bool boundary = false;
+
+		bvecq_pos_unset(&dispatch_cursor);
 
 		/* Go through the stream and find the next span of contiguous
 		 * data that we then rejig (cifs, for example, needs the wsize
@@ -70,7 +68,7 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 
 		if (test_bit(NETFS_SREQ_FAILED, &from->flags) ||
 		    !test_bit(NETFS_SREQ_NEED_RETRY, &from->flags))
-			return;
+			goto out;
 
 		list_for_each_continue(next, &stream->subrequests) {
 			subreq = list_entry(next, struct netfs_io_subrequest, rreq_link);
@@ -85,9 +83,8 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 		/* Determine the set of buffers we're going to use.  Each
 		 * subreq gets a subset of a single overall contiguous buffer.
 		 */
-		netfs_reset_iter(from);
-		source = from->io_iter;
-		source.count = len;
+		bvecq_pos_transfer(&dispatch_cursor, &from->dispatch_pos);
+		bvecq_pos_advance(&dispatch_cursor, from->transferred);
 
 		/* Work through the sublist. */
 		subreq = from;
@@ -100,14 +97,20 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 			__clear_bit(NETFS_SREQ_NEED_RETRY, &subreq->flags);
 			trace_netfs_sreq(subreq, netfs_sreq_trace_retry);
 
+			bvecq_pos_unset(&subreq->dispatch_pos);
+			bvecq_pos_unset(&subreq->content);
+
 			/* Renegotiate max_len (wsize) */
 			stream->sreq_max_len = len;
+			stream->sreq_max_segs = INT_MAX;
 			stream->prepare_write(subreq);
 
-			part = umin(len, stream->sreq_max_len);
-			if (unlikely(stream->sreq_max_segs))
-				part = netfs_limit_iter(&source, 0, part, stream->sreq_max_segs);
-			subreq->len = part;
+			bvecq_pos_set(&subreq->dispatch_pos, &dispatch_cursor);
+			part = bvecq_slice(&dispatch_cursor,
+					   umin(len, stream->sreq_max_len),
+					   stream->sreq_max_segs,
+					   &subreq->nr_segs);
+			subreq->len = subreq->transferred + part;
 			subreq->transferred = 0;
 			len -= part;
 			start += part;
@@ -116,7 +119,7 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 				boundary = true;
 
 			netfs_get_subrequest(subreq, netfs_sreq_trace_get_resubmit);
-			netfs_reissue_write(stream, subreq, &source);
+			netfs_reissue_write(stream, subreq);
 			if (subreq == to)
 				break;
 		}
@@ -173,8 +176,13 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 
 			stream->prepare_write(subreq);
 
-			part = umin(len, stream->sreq_max_len);
+			bvecq_pos_set(&subreq->dispatch_pos, &dispatch_cursor);
+			part = bvecq_slice(&dispatch_cursor,
+					   umin(len, stream->sreq_max_len),
+					   stream->sreq_max_segs,
+					   &subreq->nr_segs);
 			subreq->len = subreq->transferred + part;
+
 			len -= part;
 			start += part;
 			if (!len && boundary) {
@@ -182,13 +190,16 @@ static void netfs_retry_write_stream(struct netfs_io_request *wreq,
 				boundary = false;
 			}
 
-			netfs_reissue_write(stream, subreq, &source);
+			netfs_reissue_write(stream, subreq);
 			if (!len)
 				break;
 
 		} while (len);
 
 	} while (!list_is_head(next, &stream->subrequests));
+
+out:
+	bvecq_pos_unset(&dispatch_cursor);
 }
 
 /*

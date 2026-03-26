@@ -111,12 +111,12 @@ end_wb:
 static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 					  unsigned int *notes)
 {
-	struct folio_queue *folioq = wreq->buffer.tail;
+	struct bvecq *bvecq = wreq->collect_cursor.bvecq;
 	unsigned long long collected_to = wreq->collected_to;
-	unsigned int slot = wreq->buffer.first_tail_slot;
+	unsigned int slot = wreq->collect_cursor.slot;
 
-	if (WARN_ON_ONCE(!folioq)) {
-		pr_err("[!] Writeback unlock found empty rolling buffer!\n");
+	if (WARN_ON_ONCE(!bvecq)) {
+		pr_err("[!] Writeback unlock found empty buffer!\n");
 		netfs_dump_request(wreq);
 		return;
 	}
@@ -127,9 +127,15 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		return;
 	}
 
-	if (slot >= folioq_nr_slots(folioq)) {
-		folioq = rolling_buffer_delete_spent(&wreq->buffer);
-		if (!folioq)
+	if (slot >= bvecq->nr_slots) {
+		/* We need to be very careful - the cleanup can catch the
+		 * dispatcher, which could lead to us having nothing left in
+		 * the queue, causing the front and back pointers to end up on
+		 * different tracks.  To avoid this, we must always keep at
+		 * least one segment in the queue.
+		 */
+		bvecq = bvecq_delete_spent(&wreq->collect_cursor);
+		if (!bvecq)
 			return;
 		slot = 0;
 	}
@@ -140,7 +146,7 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		unsigned long long fpos, fend;
 		size_t fsize, flen;
 
-		folio = folioq_folio(folioq, slot);
+		folio = page_folio(bvecq->bv[slot].bv_page);
 		if (WARN_ONCE(!folio_test_writeback(folio),
 			      "R=%08x: folio %lx is not under writeback\n",
 			      wreq->debug_id, folio->index))
@@ -163,15 +169,15 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 		wreq->cleaned_to = fpos + fsize;
 		*notes |= MADE_PROGRESS;
 
-		/* Clean up the head folioq.  If we clear an entire folioq, then
-		 * we can get rid of it provided it's not also the tail folioq
+		/* Clean up the head bvecq.  If we clear an entire bvecq, then
+		 * we can get rid of it provided it's not also the tail bvecq
 		 * being filled by the issuer.
 		 */
-		folioq_clear(folioq, slot);
+		bvecq->bv[slot].bv_page = NULL;
 		slot++;
-		if (slot >= folioq_nr_slots(folioq)) {
-			folioq = rolling_buffer_delete_spent(&wreq->buffer);
-			if (!folioq)
+		if (slot >= bvecq->nr_slots) {
+			bvecq = bvecq_delete_spent(&wreq->collect_cursor);
+			if (!bvecq)
 				goto done;
 			slot = 0;
 		}
@@ -180,9 +186,8 @@ static void netfs_writeback_unlock_folios(struct netfs_io_request *wreq,
 			break;
 	}
 
-	wreq->buffer.tail = folioq;
 done:
-	wreq->buffer.first_tail_slot = slot;
+	wreq->collect_cursor.slot = slot;
 }
 
 static void netfs_cache_collect(struct netfs_io_request *wreq,
@@ -217,7 +222,8 @@ static void netfs_collect_write_results(struct netfs_io_request *wreq)
 	trace_netfs_rreq(wreq, netfs_rreq_trace_collect);
 
 reassess_streams:
-	issued_to = atomic64_read(&wreq->issued_to);
+	/* Order reading the issued_to point before reading the queue it refers to. */
+	issued_to = atomic64_read_acquire(&wreq->issued_to);
 	smp_rmb();
 	collected_to = ULLONG_MAX;
 	if (wreq->origin == NETFS_WRITEBACK ||

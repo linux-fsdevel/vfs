@@ -213,7 +213,9 @@
 	EM(netfs_folio_trace_store_copy,	"store-copy")	\
 	EM(netfs_folio_trace_store_plus,	"store+")	\
 	EM(netfs_folio_trace_wthru,		"wthru")	\
-	E_(netfs_folio_trace_wthru_plus,	"wthru+")
+	EM(netfs_folio_trace_wthru_plus,	"wthru+")	\
+	EM(netfs_folio_trace_zero,		"zero")		\
+	E_(netfs_folio_trace_zero_ra,		"zero-ra")
 
 #define netfs_collect_contig_traces				\
 	EM(netfs_contig_trace_collect,		"Collect")	\
@@ -226,13 +228,13 @@
 	EM(netfs_trace_donate_to_next,		"to-next")	\
 	E_(netfs_trace_donate_to_deferred_next,	"defer-next")
 
-#define netfs_folioq_traces					\
-	EM(netfs_trace_folioq_alloc_buffer,	"alloc-buf")	\
-	EM(netfs_trace_folioq_clear,		"clear")	\
-	EM(netfs_trace_folioq_delete,		"delete")	\
-	EM(netfs_trace_folioq_make_space,	"make-space")	\
-	EM(netfs_trace_folioq_rollbuf_init,	"roll-init")	\
-	E_(netfs_trace_folioq_read_progress,	"r-progress")
+#define netfs_bvecq_traces					\
+	EM(netfs_trace_bvecq_alloc_buffer,	"alloc-buf")	\
+	EM(netfs_trace_bvecq_clear,		"clear")	\
+	EM(netfs_trace_bvecq_delete,		"delete")	\
+	EM(netfs_trace_bvecq_make_space,	"make-space")	\
+	EM(netfs_trace_bvecq_rollbuf_init,	"roll-init")	\
+	E_(netfs_trace_bvecq_read_progress,	"r-progress")
 
 #ifndef __NETFS_DECLARE_TRACE_ENUMS_ONCE_ONLY
 #define __NETFS_DECLARE_TRACE_ENUMS_ONCE_ONLY
@@ -252,7 +254,7 @@ enum netfs_sreq_ref_trace { netfs_sreq_ref_traces } __mode(byte);
 enum netfs_folio_trace { netfs_folio_traces } __mode(byte);
 enum netfs_collect_contig_trace { netfs_collect_contig_traces } __mode(byte);
 enum netfs_donate_trace { netfs_donate_traces } __mode(byte);
-enum netfs_folioq_trace { netfs_folioq_traces } __mode(byte);
+enum netfs_bvecq_trace { netfs_bvecq_traces } __mode(byte);
 
 #endif
 
@@ -276,7 +278,7 @@ netfs_sreq_ref_traces;
 netfs_folio_traces;
 netfs_collect_contig_traces;
 netfs_donate_traces;
-netfs_folioq_traces;
+netfs_bvecq_traces;
 
 /*
  * Now redefine the EM() and E_() macros to map the enums to the strings that
@@ -378,10 +380,10 @@ TRACE_EVENT(netfs_sreq,
 		    __entry->len	= sreq->len;
 		    __entry->transferred = sreq->transferred;
 		    __entry->start	= sreq->start;
-		    __entry->slot	= sreq->io_iter.folioq_slot;
+		    __entry->slot	= sreq->dispatch_pos.slot;
 			   ),
 
-	    TP_printk("R=%08x[%x] %s %s f=%03x s=%llx %zx/%zx s=%u e=%d",
+	    TP_printk("R=%08x[%x] %s %s f=%03x s=%llx %zx/%zx qs=%u e=%d",
 		      __entry->rreq, __entry->index,
 		      __print_symbolic(__entry->source, netfs_sreq_sources),
 		      __print_symbolic(__entry->what, netfs_sreq_traces),
@@ -756,27 +758,25 @@ TRACE_EVENT(netfs_collect_stream,
 		      __entry->collected_to, __entry->issued_to)
 	    );
 
-TRACE_EVENT(netfs_folioq,
-	    TP_PROTO(const struct folio_queue *fq,
-		     enum netfs_folioq_trace trace),
+TRACE_EVENT(netfs_bvecq,
+	    TP_PROTO(const struct bvecq *bq,
+		     enum netfs_bvecq_trace trace),
 
-	    TP_ARGS(fq, trace),
+	    TP_ARGS(bq, trace),
 
 	    TP_STRUCT__entry(
-		    __field(unsigned int,		rreq)
 		    __field(unsigned int,		id)
-		    __field(enum netfs_folioq_trace,	trace)
+		    __field(enum netfs_bvecq_trace,	trace)
 			     ),
 
 	    TP_fast_assign(
-		    __entry->rreq	= fq ? fq->rreq_id : 0;
-		    __entry->id		= fq ? fq->debug_id : 0;
+		    __entry->id		= bq ? bq->priv : 0;
 		    __entry->trace	= trace;
 			   ),
 
-	    TP_printk("R=%08x fq=%x %s",
-		      __entry->rreq, __entry->id,
-		      __print_symbolic(__entry->trace, netfs_folioq_traces))
+	    TP_printk("fq=%x %s",
+		      __entry->id,
+		      __print_symbolic(__entry->trace, netfs_bvecq_traces))
 	    );
 
 TRACE_EVENT(netfs_bv_slot,
