@@ -543,28 +543,28 @@ static void iov_kunit_destroy_bvecq(void *data)
 
 	for (bq = data; bq; bq = next) {
 		next = bq->next;
-		for (int i = 0; i < bq->nr_segs; i++)
+		for (int i = 0; i < bq->nr_slots; i++)
 			if (bq->bv[i].bv_page)
 				put_page(bq->bv[i].bv_page);
 		kfree(bq);
 	}
 }
 
-static struct bvecq *iov_kunit_alloc_bvecq(struct kunit *test, unsigned int max_segs)
+static struct bvecq *iov_kunit_alloc_bvecq(struct kunit *test, unsigned int max_slots)
 {
 	struct bvecq *bq;
 
-	bq = kzalloc(struct_size(bq, __bv, max_segs), GFP_KERNEL);
+	bq = kzalloc(struct_size(bq, __bv, max_slots), GFP_KERNEL);
 	KUNIT_ASSERT_NOT_ERR_OR_NULL(test, bq);
-	bq->max_segs = max_segs;
+	bq->max_slots = max_slots;
 	return bq;
 }
 
-static struct bvecq *iov_kunit_create_bvecq(struct kunit *test, unsigned int max_segs)
+static struct bvecq *iov_kunit_create_bvecq(struct kunit *test, unsigned int max_slots)
 {
 	struct bvecq *bq;
 
-	bq = iov_kunit_alloc_bvecq(test, max_segs);
+	bq = iov_kunit_alloc_bvecq(test, max_slots);
 	kunit_add_action_or_reset(test, iov_kunit_destroy_bvecq, bq);
 	return bq;
 }
@@ -578,13 +578,13 @@ static void __init iov_kunit_load_bvecq(struct kunit *test,
 	size_t size = 0;
 
 	for (int i = 0; i < npages; i++) {
-		if (bq->nr_segs >= bq->max_segs) {
+		if (bq->nr_slots >= bq->max_slots) {
 			bq->next = iov_kunit_alloc_bvecq(test, 8);
 			bq->next->prev = bq;
 			bq = bq->next;
 		}
-		bvec_set_page(&bq->bv[bq->nr_segs], pages[i], PAGE_SIZE, 0);
-		bq->nr_segs++;
+		bvec_set_page(&bq->bv[bq->nr_slots], pages[i], PAGE_SIZE, 0);
+		bq->nr_slots++;
 		size += PAGE_SIZE;
 	}
 	iov_iter_bvec_queue(iter, dir, bq_head, 0, 0, size);

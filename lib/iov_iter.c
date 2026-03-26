@@ -580,7 +580,7 @@ static void iov_iter_bvecq_advance(struct iov_iter *i, size_t by)
 		return;
 	i->count -= by;
 
-	if (slot >= bq->nr_segs) {
+	if (slot >= bq->nr_slots) {
 		bq = bq->next;
 		slot = 0;
 	}
@@ -593,7 +593,7 @@ static void iov_iter_bvecq_advance(struct iov_iter *i, size_t by)
 			break;
 		by -= len;
 		slot++;
-		if (slot >= bq->nr_segs && bq->next) {
+		if (slot >= bq->nr_slots && bq->next) {
 			bq = bq->next;
 			slot = 0;
 		}
@@ -662,7 +662,7 @@ static void iov_iter_bvecq_revert(struct iov_iter *i, size_t unroll)
 
 		if (slot == 0) {
 			bq = bq->prev;
-			slot = bq->nr_segs;
+			slot = bq->nr_slots;
 		}
 		slot--;
 
@@ -947,7 +947,7 @@ static unsigned long iov_iter_alignment_bvecq(const struct iov_iter *iter)
 		return res;
 
 	for (bq = iter->bvecq; bq; bq = bq->next) {
-		for (; slot < bq->nr_segs; slot++) {
+		for (; slot < bq->nr_slots; slot++) {
 			const struct bio_vec *bvec = &bq->bv[slot];
 			size_t part = umin(bvec->bv_len - skip, size);
 
@@ -1331,7 +1331,7 @@ static size_t iov_npages_bvecq(const struct iov_iter *iter, size_t maxpages)
 	size_t size = iter->count;
 
 	for (bq = iter->bvecq; bq; bq = bq->next) {
-		for (; slot < bq->nr_segs; slot++) {
+		for (; slot < bq->nr_slots; slot++) {
 			const struct bio_vec *bvec = &bq->bv[slot];
 			size_t offs = (bvec->bv_offset + skip) % PAGE_SIZE;
 			size_t part = umin(bvec->bv_len - skip, size);
@@ -1731,7 +1731,7 @@ static ssize_t iov_iter_extract_bvecq_pages(struct iov_iter *iter,
 	unsigned int seg = iter->bvecq_slot, count = 0, nr = 0;
 	size_t extracted = 0, offset = iter->iov_offset;
 
-	if (seg >= bvecq->nr_segs) {
+	if (seg >= bvecq->nr_slots) {
 		bvecq = bvecq->next;
 		if (WARN_ON_ONCE(!bvecq))
 			return 0;
@@ -1763,7 +1763,7 @@ static ssize_t iov_iter_extract_bvecq_pages(struct iov_iter *iter,
 		if (offset >= blen) {
 			offset = 0;
 			seg++;
-			if (seg >= bvecq->nr_segs) {
+			if (seg >= bvecq->nr_slots) {
 				if (!bvecq->next) {
 					WARN_ON_ONCE(extracted < iter->count);
 					break;
@@ -1816,7 +1816,7 @@ static ssize_t iov_iter_extract_bvecq_pages(struct iov_iter *iter,
 		if (offset >= blen) {
 			offset = 0;
 			seg++;
-			if (seg >= bvecq->nr_segs) {
+			if (seg >= bvecq->nr_slots) {
 				if (!bvecq->next) {
 					WARN_ON_ONCE(extracted < iter->count);
 					break;

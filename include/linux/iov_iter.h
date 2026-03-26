@@ -152,7 +152,7 @@ size_t iterate_bvecq(struct iov_iter *iter, size_t len, void *priv, void *priv2,
 	unsigned int slot = iter->bvecq_slot;
 	size_t progress = 0, skip = iter->iov_offset;
 
-	if (slot == bq->nr_segs) {
+	if (slot == bq->nr_slots) {
 		/* The iterator may have been extended. */
 		bq = bq->next;
 		slot = 0;
@@ -176,7 +176,7 @@ size_t iterate_bvecq(struct iov_iter *iter, size_t len, void *priv, void *priv2,
 		if (skip >= bvec->bv_len) {
 			skip = 0;
 			slot++;
-			if (slot >= bq->nr_segs) {
+			if (slot >= bq->nr_slots) {
 				if (!bq->next)
 					break;
 				bq = bq->next;

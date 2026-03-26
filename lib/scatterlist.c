@@ -1345,7 +1345,7 @@ static ssize_t extract_bvecq_to_sg(struct iov_iter *iter,
 	ssize_t ret = 0;
 	size_t offset = iter->iov_offset;
 
-	if (seg >= bvecq->nr_segs) {
+	if (seg >= bvecq->nr_slots) {
 		bvecq = bvecq->next;
 		if (WARN_ON_ONCE(!bvecq))
 			return 0;
@@ -1373,7 +1373,7 @@ static ssize_t extract_bvecq_to_sg(struct iov_iter *iter,
 		if (offset >= blen) {
 			offset = 0;
 			seg++;
-			if (seg >= bvecq->nr_segs) {
+			if (seg >= bvecq->nr_slots) {
 				if (!bvecq->next) {
 					WARN_ON_ONCE(ret < iter->count);
 					break;
