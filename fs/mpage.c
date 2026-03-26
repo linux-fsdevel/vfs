@@ -655,8 +655,10 @@ out:
  * address_space_operation.
  */
 int
-mpage_writepages(struct address_space *mapping,
-		struct writeback_control *wbc, get_block_t get_block)
+__mpage_writepages(struct address_space *mapping,
+		   struct writeback_control *wbc, get_block_t get_block,
+		   int (*write_folio)(struct folio *folio,
+				      struct writeback_control *wbc))
 {
 	struct mpage_data mpd = {
 		.get_block	= get_block,
@@ -666,11 +668,22 @@ mpage_writepages(struct address_space *mapping,
 	int error;
 
 	blk_start_plug(&plug);
-	while ((folio = writeback_iter(mapping, wbc, folio, &error)))
+	while ((folio = writeback_iter(mapping, wbc, folio, &error))) {
+		if (write_folio) {
+			error = write_folio(folio, wbc);
+			/*
+			 * == 0 means folio is handled, < 0 means error. In
+			 * both cases hand back control to writeback_iter()
+			 */
+			if (error <= 0)
+				continue;
+			/* Let mpage_write_folio() handle the folio. */
+		}
 		error = mpage_write_folio(wbc, folio, &mpd);
+	}
 	if (mpd.bio)
 		mpage_bio_submit_write(mpd.bio);
 	blk_finish_plug(&plug);
 	return error;
 }
-EXPORT_SYMBOL(mpage_writepages);
+EXPORT_SYMBOL(__mpage_writepages);
