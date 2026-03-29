@@ -298,6 +298,14 @@ properties:
       reg:
         const: 0x19
 
+  protocol@1B:
+    $ref: '#/$defs/protocol-node'
+    unevaluatedProperties: false
+
+    properties:
+      reg:
+        const: 0x1B
+
     patternProperties:
       '-pins$':
         type: object
