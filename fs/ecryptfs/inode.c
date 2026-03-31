@@ -709,7 +709,6 @@ upper_size_to_lower_size(struct ecryptfs_crypt_stat *crypt_stat,
 /**
  * truncate_upper
  * @dentry: The ecryptfs layer dentry
- * @ia: Address of the ecryptfs inode's attributes
  * @lower_ia: Address of the lower inode's attributes
  *
  * Function to handle truncations modifying the size of the file. Note
@@ -722,8 +721,7 @@ upper_size_to_lower_size(struct ecryptfs_crypt_stat *crypt_stat,
  *
  * Returns zero on success; non-zero otherwise
  */
-static int truncate_upper(struct dentry *dentry, struct iattr *ia,
-			  struct iattr *lower_ia)
+static int truncate_upper(struct dentry *dentry, struct iattr *lower_ia)
 {
 	struct inode *inode = d_inode(dentry);
 	struct ecryptfs_crypt_stat *crypt_stat;
@@ -733,7 +731,7 @@ static int truncate_upper(struct dentry *dentry, struct iattr *ia,
 	size_t num_zeros;
 	int rc;
 
-	if (unlikely((ia->ia_size == i_size))) {
+	if (unlikely(lower_ia->ia_size == i_size)) {
 		lower_ia->ia_valid &= ~ATTR_SIZE;
 		return 0;
 	}
@@ -742,7 +740,7 @@ static int truncate_upper(struct dentry *dentry, struct iattr *ia,
 	if (rc)
 		return rc;
 
-	if (ia->ia_size > i_size) {
+	if (lower_ia->ia_size > i_size) {
 		char zero[] = { 0x00 };
 
 		/*
@@ -751,16 +749,14 @@ static int truncate_upper(struct dentry *dentry, struct iattr *ia,
 		 * intermediate portion of the previous end of the file and the
 		 * new and of the file.
 		 */
-		rc = ecryptfs_write(inode, zero, ia->ia_size - 1, 1);
+		rc = ecryptfs_write(inode, zero, lower_ia->ia_size - 1, 1);
 		lower_ia->ia_valid &= ~ATTR_SIZE;
 		goto out;
 	}
 
 	crypt_stat = &ecryptfs_inode_to_private(d_inode(dentry))->crypt_stat;
 	if (!(crypt_stat->flags & ECRYPTFS_ENCRYPTED)) {
-		truncate_setsize(inode, ia->ia_size);
-		lower_ia->ia_size = ia->ia_size;
-		lower_ia->ia_valid |= ATTR_SIZE;
+		truncate_setsize(inode, lower_ia->ia_size);
 		goto out;
 	}
 
@@ -769,17 +765,17 @@ static int truncate_upper(struct dentry *dentry, struct iattr *ia,
 	 * ia->ia_size is located. Fill in the end of that page from
 	 * (ia->ia_size & ~PAGE_MASK) to PAGE_SIZE with zeros.
 	 */
-	num_zeros = PAGE_SIZE - (ia->ia_size & ~PAGE_MASK);
+	num_zeros = PAGE_SIZE - (lower_ia->ia_size & ~PAGE_MASK);
 	if (num_zeros) {
 		rc = ecryptfs_write(inode, page_address(ZERO_PAGE(0)),
-				ia->ia_size, num_zeros);
+				lower_ia->ia_size, num_zeros);
 		if (rc) {
 			pr_err("Error attempting to zero out the remainder of the end page on reducing truncate; rc = [%d]\n",
 				rc);
 			goto out;
 		}
 	}
-	truncate_setsize(inode, ia->ia_size);
+	truncate_setsize(inode, lower_ia->ia_size);
 	rc = ecryptfs_write_inode_size_to_metadata(inode);
 	if (rc) {
 		pr_err("Problem with ecryptfs_write_inode_size_to_metadata; rc = [%d]\n",
@@ -794,13 +790,12 @@ static int truncate_upper(struct dentry *dentry, struct iattr *ia,
 	lower_size_before_truncate =
 		upper_size_to_lower_size(crypt_stat, i_size);
 	lower_size_after_truncate =
-		upper_size_to_lower_size(crypt_stat, ia->ia_size);
-	if (lower_size_after_truncate < lower_size_before_truncate) {
+		upper_size_to_lower_size(crypt_stat, lower_ia->ia_size);
+	if (lower_size_after_truncate < lower_size_before_truncate)
 		lower_ia->ia_size = lower_size_after_truncate;
-		lower_ia->ia_valid |= ATTR_SIZE;
-	} else {
+	else
 		lower_ia->ia_valid &= ~ATTR_SIZE;
-	}
+
 out:
 	ecryptfs_put_lower_file(inode);
 	return rc;
@@ -840,15 +835,17 @@ static int ecryptfs_inode_newsize_ok(struct inode *inode, loff_t offset)
  */
 int ecryptfs_truncate(struct dentry *dentry, loff_t new_length)
 {
-	struct iattr ia = { .ia_valid = ATTR_SIZE, .ia_size = new_length };
-	struct iattr lower_ia = { .ia_valid = 0 };
+	struct iattr lower_ia = {
+		.ia_valid	= ATTR_SIZE,
+		.ia_size	= new_length,
+	};
 	int rc;
 
 	rc = ecryptfs_inode_newsize_ok(d_inode(dentry), new_length);
 	if (rc)
 		return rc;
 
-	rc = truncate_upper(dentry, &ia, &lower_ia);
+	rc = truncate_upper(dentry, &lower_ia);
 	if (!rc && lower_ia.ia_valid & ATTR_SIZE) {
 		struct dentry *lower_dentry = ecryptfs_dentry_to_lower(dentry);
 
@@ -943,7 +940,7 @@ static int ecryptfs_setattr(struct mnt_idmap *idmap,
 		if (rc)
 			goto out;
 
-		rc = truncate_upper(dentry, ia, &lower_ia);
+		rc = truncate_upper(dentry, &lower_ia);
 		if (rc < 0)
 			goto out;
 	}
