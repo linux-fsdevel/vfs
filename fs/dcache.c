@@ -595,7 +595,7 @@ EXPORT_SYMBOL(__d_drop);
  * __d_drop requires dentry->d_lock
  *
  * ___d_drop doesn't mark dentry as "unhashed"
- * (dentry->d_hash.pprev will be LIST_POISON2, not NULL).
+ * (dentry->d_hash.pprev will not be set to NULL).
  */
 void d_drop(struct dentry *dentry)
 {
