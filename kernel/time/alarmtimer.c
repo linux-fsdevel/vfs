@@ -556,8 +556,7 @@ static bool alarm_timer_rearm(struct k_itimer *timr)
 	struct alarm *alarm = &timr->it.alarm.alarmtimer;
 
 	timr->it_overrun += alarm_forward_now(alarm, timr->it_interval);
-	alarm_start(alarm, alarm->node.expires);
-	return true;
+	return alarmtimer_start(alarm, alarm->node.expires, false);
 }
 
 /**
@@ -621,11 +620,16 @@ static bool alarm_timer_arm(struct k_itimer *timr, ktime_t expires,
 
 	if (!absolute)
 		expires = ktime_add_safe(expires, base->get_ktime());
-	if (sigev_none)
+
+	/*
+	 * sigev_none needs to update the expires value and pretend
+	 * that the timer is queued
+	 */
+	if (sigev_none) {
 		alarm->node.expires = expires;
-	else
-		alarm_start(&timr->it.alarm.alarmtimer, expires);
-	return true;
+		return true;
+	}
+	return alarmtimer_start(&timr->it.alarm.alarmtimer, expires, false);
 }
 
 /**
@@ -732,7 +736,9 @@ static int alarmtimer_do_nsleep(struct alarm *alarm, ktime_t absexp,
 	alarm->data = (void *)current;
 	do {
 		set_current_state(TASK_INTERRUPTIBLE);
-		alarm_start(alarm, absexp);
+		if (!alarmtimer_start(alarm, absexp, false))
+			alarm->data = NULL;
+
 		if (likely(alarm->data))
 			schedule();
 
