@@ -881,7 +881,7 @@ static bool cm_setup_timer(void)
 	mutex_unlock(&cm_list_mtx);
 
 	if (timer_req && cm_timer) {
-		ktime_t now, add;
+		ktime_t exp;
 
 		/*
 		 * Set alarm with the polling interval (wakeup_ms)
@@ -893,14 +893,16 @@ static bool cm_setup_timer(void)
 
 		pr_info("Charger Manager wakeup timer: %u ms\n", wakeup_ms);
 
-		now = ktime_get_boottime();
-		add = ktime_set(wakeup_ms / MSEC_PER_SEC,
+		exp = ktime_set(wakeup_ms / MSEC_PER_SEC,
 				(wakeup_ms % MSEC_PER_SEC) * NSEC_PER_MSEC);
-		alarm_start(cm_timer, ktime_add(now, add));
 
 		cm_suspend_duration_ms = wakeup_ms;
 
-		return true;
+		/*
+		 * The timer should always be queued as the timeout is at least
+		 * two seconds out. Handle it correctly nevertheless.
+		 */
+		return alarmtimer_start(cm_timer, exp, true);
 	}
 	return false;
 }
