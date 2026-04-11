@@ -301,7 +301,6 @@ int __hfsplus_setxattr(struct inode *inode, const char *name,
 
 	if (!strcmp_xattr_finder_info(name)) {
 		if (flags & XATTR_CREATE) {
-			pr_err("xattr exists yet\n");
 			err = -EOPNOTSUPP;
 			goto end_setxattr;
 		}
@@ -348,7 +347,6 @@ int __hfsplus_setxattr(struct inode *inode, const char *name,
 
 	if (hfsplus_attr_exists(inode, name)) {
 		if (flags & XATTR_CREATE) {
-			pr_err("xattr exists yet\n");
 			err = -EOPNOTSUPP;
 			goto end_setxattr;
 		}
