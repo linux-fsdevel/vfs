@@ -263,6 +263,13 @@ static int proc_fill_super(struct super_block *s, struct fs_context *fc)
 	if (ret)
 		return ret;
 
+	/*
+	 * The dynamic part of procfs cannot be hidden using overmount.
+	 * Therefore, the check for "not fully visible" can be skipped.
+	 */
+	if (fs_info->pidonly)
+		fc->skip_visibility = true;
+
 	/* User space would break if executables or devices appear on proc */
 	s->s_iflags |= SB_I_USERNS_VISIBLE | SB_I_NOEXEC | SB_I_NODEV;
 	s->s_flags |= SB_NODIRATIME | SB_NOSUID | SB_NOEXEC;

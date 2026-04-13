@@ -545,6 +545,7 @@ void vfs_clean_context(struct fs_context *fc)
 	kfree(fc->source);
 	fc->source = NULL;
 	fc->exclusive = false;
+	fc->skip_visibility = false;
 
 	fc->purpose = FS_CONTEXT_FOR_RECONFIGURE;
 	fc->phase = FS_CONTEXT_AWAITING_RECONF;

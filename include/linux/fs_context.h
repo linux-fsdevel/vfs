@@ -110,6 +110,7 @@ struct fs_context {
 	bool			global:1;	/* Goes into &init_user_ns */
 	bool			oldapi:1;	/* Coming from mount(2) */
 	bool			exclusive:1;    /* create new superblock, reject existing one */
+	bool			skip_visibility:1; /* Skip visibility check for SB_I_USERNS_VISIBLE */
 };
 
 struct fs_context_operations {

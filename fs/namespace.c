@@ -3755,7 +3755,7 @@ static int do_add_mount(struct mount *newmnt, const struct pinned_mountpoint *mp
 	return graft_tree(newmnt, mp);
 }
 
-static bool mount_too_revealing(const struct super_block *sb, int *new_mnt_flags);
+static bool mount_too_revealing(struct fs_context *fc, int *new_mnt_flags);
 
 /*
  * Create a new mount using a superblock configuration and request it
@@ -3764,19 +3764,17 @@ static bool mount_too_revealing(const struct super_block *sb, int *new_mnt_flags
 static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
 			   unsigned int mnt_flags)
 {
-	struct super_block *sb;
 	struct vfsmount *mnt __free(mntput) = fc_mount(fc);
 	int error;
 
 	if (IS_ERR(mnt))
 		return PTR_ERR(mnt);
 
-	sb = fc->root->d_sb;
-	error = security_sb_kern_mount(sb);
+	error = security_sb_kern_mount(fc->root->d_sb);
 	if (unlikely(error))
 		return error;
 
-	if (unlikely(mount_too_revealing(sb, &mnt_flags))) {
+	if (unlikely(mount_too_revealing(fc, &mnt_flags))) {
 		errorfcp(fc, "VFS", "Mount too revealing");
 		return -EPERM;
 	}
@@ -4463,7 +4461,7 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 		return ret;
 
 	ret = -EPERM;
-	if (mount_too_revealing(fc->root->d_sb, &mnt_flags)) {
+	if (mount_too_revealing(fc, &mnt_flags)) {
 		errorfcp(fc, "VFS", "Mount too revealing");
 		return ret;
 	}
@@ -6368,10 +6366,11 @@ static bool mnt_already_visible(struct mnt_namespace *ns,
 	return false;
 }
 
-static bool mount_too_revealing(const struct super_block *sb, int *new_mnt_flags)
+static bool mount_too_revealing(struct fs_context *fc, int *new_mnt_flags)
 {
 	const unsigned long required_iflags = SB_I_NOEXEC | SB_I_NODEV;
 	struct mnt_namespace *ns = current->nsproxy->mnt_ns;
+	const struct super_block *sb = fc->root->d_sb;
 	unsigned long s_iflags;
 
 	if (ns->user_ns == &init_user_ns)
@@ -6388,7 +6387,7 @@ static bool mount_too_revealing(const struct super_block *sb, int *new_mnt_flags
 		return true;
 	}
 
-	return !mnt_already_visible(ns, sb, new_mnt_flags);
+	return (!fc->skip_visibility && !mnt_already_visible(ns, sb, new_mnt_flags));
 }
 
 bool mnt_may_suid(struct vfsmount *mnt)
