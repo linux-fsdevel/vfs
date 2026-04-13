@@ -1859,8 +1859,9 @@ static enum scan_result collapse_file(struct mm_struct *mm, unsigned long addr,
 	int nr_none = 0;
 	bool is_shmem = shmem_file(file);
 
-	VM_BUG_ON(!IS_ENABLED(CONFIG_READ_ONLY_THP_FOR_FS) && !is_shmem);
-	VM_BUG_ON(start & (HPAGE_PMD_NR - 1));
+	/* MADV_COLLAPSE ignores shmem huge config, so do not check shmem */
+	VM_WARN_ON_ONCE(!is_shmem && mapping_max_folio_order(mapping) < PMD_ORDER);
+	VM_WARN_ON_ONCE(start & (HPAGE_PMD_NR - 1));
 
 	result = alloc_charge_folio(&new_folio, mm, cc);
 	if (result != SCAN_SUCCEED)
@@ -2288,6 +2289,13 @@ static enum scan_result hpage_collapse_scan_file(struct mm_struct *mm, unsigned 
 	int present, swap;
 	int node = NUMA_NO_NODE;
 	enum scan_result result = SCAN_SUCCEED;
+
+	/*
+	 * skip files without PMD-order folio support
+	 * do not check shmem, since MADV_COLLAPSE ignores shmem huge config
+	 */
+	if (!shmem_file(file) && mapping_max_folio_order(mapping) < PMD_ORDER)
+		return SCAN_FAIL;
 
 	present = 0;
 	swap = 0;
