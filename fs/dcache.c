@@ -89,11 +89,11 @@ EXPORT_SYMBOL(rename_lock);
 static struct kmem_cache *__dentry_cache __ro_after_init;
 #define dentry_cache runtime_const_ptr(__dentry_cache)
 
-const struct qstr empty_name = QSTR_INIT("", 0);
+const struct qstr empty_name = QSTR("");
 EXPORT_SYMBOL(empty_name);
-const struct qstr slash_name = QSTR_INIT("/", 1);
+const struct qstr slash_name = QSTR("/");
 EXPORT_SYMBOL(slash_name);
-const struct qstr dotdot_name = QSTR_INIT("..", 2);
+const struct qstr dotdot_name = QSTR("..");
 EXPORT_SYMBOL(dotdot_name);
 
 /*
