@@ -35,6 +35,9 @@ __clean-files   := $(filter-out $(no-clean-files), $(__clean-files))
 
 __clean-files   := $(wildcard $(addprefix $(obj)/, $(__clean-files)))
 
+# Also clean generated apispec headers (computed dynamically in Makefile.build)
+__clean-files   += $(wildcard $(obj)/*.apispec.h)
+
 # ==========================================================================
 
 # To make this rule robust against "Argument list too long" error,

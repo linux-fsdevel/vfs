@@ -239,6 +239,17 @@ execution context, and return values. Parameter violations are reported via
 ``pr_warn_ratelimited`` and return value violations via ``WARN_ONCE`` to avoid
 flooding the kernel log.
 
+.. warning::
+
+   Userspace errno is affected when this option is on. For syscalls that
+   violate their parameter specification, KAPI short-circuits the call and
+   returns ``-EINVAL`` from the validator **before** the real handler runs.
+   That errno can differ from what the real handler would have produced for
+   the same condition (for example, ``-ENOMEM`` from an allocation path or
+   ``-EFAULT`` from a deeper copy-in). ``CONFIG_KAPI_RUNTIME_CHECKS`` is a
+   debug-only option; do not enable it on production kernels or in
+   userspace-visible test environments where error-code fidelity matters.
+
 Custom Validators
 -----------------
 
