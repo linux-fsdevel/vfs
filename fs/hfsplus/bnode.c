@@ -452,7 +452,7 @@ static struct hfs_bnode *__hfs_bnode_create(struct hfs_btree *tree, u32 cnid)
 	struct hfs_bnode *node, *node2;
 	struct address_space *mapping;
 	struct page *page;
-	int size, block, i, hash;
+	int block, i, hash;
 	loff_t off;
 
 	if (cnid >= tree->node_count) {
@@ -461,9 +461,7 @@ static struct hfs_bnode *__hfs_bnode_create(struct hfs_btree *tree, u32 cnid)
 		return NULL;
 	}
 
-	size = sizeof(struct hfs_bnode) + tree->pages_per_bnode *
-		sizeof(struct page *);
-	node = kzalloc(size, GFP_KERNEL);
+	node = kzalloc_flex(*node, page, tree->pages_per_bnode);
 	if (!node)
 		return NULL;
 	node->tree = tree;
