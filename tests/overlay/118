@@ -1,0 +1,62 @@
+#! /bin/bash
+# SPDX-License-Identifier: GPL-2.0
+# Copyright (C) 2026 Red Hat, Inc. All Rights Reserved.
+#
+# FS QA Test No. 118
+#
+# Regression test for the overlayfs lazy fsverity load path.
+#
+# See also overlay/080 which builds a metacopy midlayer over a
+# verity-enabled data lower layer (the composefs architecture).
+#
+. ./common/preamble
+_begin_fstest auto quick metacopy redirect verity
+
+# Import common functions.
+. ./common/filter
+. ./common/verity
+
+# We use non-default scratch underlying overlay dirs, we need to check
+# them explicitly after the test.
+_require_scratch_nocheck
+_require_scratch_overlay_features redirect_dir metacopy
+_require_scratch_overlay_verity
+
+# remove all files from previous tests
+_scratch_mkfs
+
+testfile="verityfile"
+lowerdir=$OVL_BASE_SCRATCH_MNT/lower
+midlayer=$OVL_BASE_SCRATCH_MNT/midlayer
+upperdir=$OVL_BASE_SCRATCH_MNT/upper
+workdir=$OVL_BASE_SCRATCH_MNT/workdir
+workdir2=$OVL_BASE_SCRATCH_MNT/workdir2
+
+mkdir -p $lowerdir $midlayer $upperdir $workdir $workdir2
+
+# Create a verity-enabled file on the lower (data) layer.
+echo -n "overlay verity lazy load test" > $lowerdir/$testfile
+chmod 600 $lowerdir/$testfile
+_fsv_enable $lowerdir/$testfile >> $seqres.full 2>&1 \
+	|| _fail "failed to enable fsverity on $lowerdir/$testfile"
+
+# This is the same structure composefs creates at install time.
+_overlay_scratch_mount_dirs $lowerdir $midlayer $workdir2 \
+	-o redirect_dir=on,index=on,metacopy=on,verity=on
+chmod 400 $SCRATCH_MNT/$testfile
+$UMOUNT_PROG $SCRATCH_MNT
+
+# Drop all caches to reproduce the bug.
+echo 3 > /proc/sys/vm/drop_caches
+
+# Remount and verify we can read.
+_overlay_scratch_mount_dirs "$midlayer:$lowerdir" $upperdir $workdir \
+	-o redirect_dir=on,index=on,metacopy=on,verity=require
+cat $SCRATCH_MNT/$testfile > /dev/null 2>>$seqres.full \
+	|| echo "verity file read failed through overlay (regression)"
+
+$UMOUNT_PROG $SCRATCH_MNT
+
+# success, all done
+status=0
+exit
