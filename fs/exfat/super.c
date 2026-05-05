@@ -702,6 +702,7 @@ free_alloc_bitmap:
 	exfat_free_bitmap(sbi);
 free_bh:
 	brelse(sbi->boot_bh);
+	exfat_free_upcase_table(sbi);
 	return ret;
 }
 
@@ -797,6 +798,7 @@ static int exfat_get_tree(struct fs_context *fc)
 
 static void exfat_free_sbi(struct exfat_sb_info *sbi)
 {
+	exfat_free_upcase_table(sbi);
 	exfat_free_iocharset(sbi);
 	kfree(sbi);
 }
