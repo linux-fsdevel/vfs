@@ -937,14 +937,16 @@ static void pidfs_put_data(void *data)
 }
 
 /**
- * pidfs_register_pid - register a struct pid in pidfs
+ * pidfs_register_pid_gfp - register a struct pid in pidfs with custom GFP
+ * flags
  * @pid: pid to pin
+ * @gfp: GFP flags for memory allocation
  *
- * Register a struct pid in pidfs.
+ * Register a struct pid in pidfs with custom GFP flags.
  *
  * Return: On success zero, on error a negative error code is returned.
  */
-int pidfs_register_pid(struct pid *pid)
+int pidfs_register_pid_gfp(struct pid *pid, gfp_t gfp)
 {
 	struct pidfs_attr *new_attr __free(kfree) = NULL;
 	struct pidfs_attr *attr;
@@ -960,7 +962,7 @@ int pidfs_register_pid(struct pid *pid)
 	if (attr)
 		return 0;
 
-	new_attr = kmem_cache_zalloc(pidfs_attr_cachep, GFP_KERNEL);
+	new_attr = kmem_cache_zalloc(pidfs_attr_cachep, gfp);
 	if (!new_attr)
 		return -ENOMEM;
 
@@ -975,6 +977,19 @@ int pidfs_register_pid(struct pid *pid)
 
 	pid->attr = no_free_ptr(new_attr);
 	return 0;
+}
+
+/**
+ * pidfs_register_pid - register a struct pid in pidfs
+ * @pid: pid to pin
+ *
+ * Register a struct pid in pidfs.
+ *
+ * Return: On success zero, on error a negative error code is returned.
+ */
+int pidfs_register_pid(struct pid *pid)
+{
+	return pidfs_register_pid_gfp(pid, GFP_KERNEL);
 }
 
 static struct dentry *pidfs_stash_dentry(struct dentry **stashed,
