@@ -112,6 +112,12 @@ unsigned long qnx4_block_map( struct inode *inode, long iblock )
 					brelse(bh);
 					return -EIO;
 				}
+				if (xblk->xblk_num_xtnts > QNX4_MAX_XTNTS_PER_XBLK) {
+					QNX4DEBUG((KERN_ERR "qnx4: bad xtnt count %u\n",
+						   xblk->xblk_num_xtnts));
+					brelse(bh);
+					return -EIO;
+				}
 			}
 			block = try_extent(&xblk->xblk_xtnts[ix], &offset);
 			if (block) {
