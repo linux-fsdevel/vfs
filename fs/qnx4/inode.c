@@ -109,6 +109,7 @@ unsigned long qnx4_block_map( struct inode *inode, long iblock )
 				xblk = (struct qnx4_xblk*)bh->b_data;
 				if ( memcmp( xblk->xblk_signature, "IamXblk", 7 ) ) {
 					QNX4DEBUG((KERN_ERR "qnx4: block at %ld is not a valid xtnt\n", qnx4_inode->i_xblk));
+					brelse(bh);
 					return -EIO;
 				}
 			}
