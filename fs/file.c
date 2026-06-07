@@ -1211,6 +1211,11 @@ struct fd fdget(unsigned int fd)
 }
 EXPORT_SYMBOL(fdget);
 
+struct fd fdget_except(unsigned int fd, fmode_t mask)
+{
+	return __fget_light(fd, mask);
+}
+
 struct fd fdget_raw(unsigned int fd)
 {
 	return __fget_light(fd, 0);
