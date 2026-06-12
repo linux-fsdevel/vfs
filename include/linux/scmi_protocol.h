@@ -1076,6 +1076,12 @@ struct scmi_notify_ops {
  *			 never sleep and act accordingly.
  *			 An optional atomic threshold value could be returned
  *			 where configured.
+ * @debugfs_entry_get: method to get, and possibly create, a debugfs dentry
+ *		       rooted under the top debugfs directory for the SCMI
+ *		       instance referred by handle.
+ * @debugfs_entry_put: method to put, and possibly destroy, a debugfs dentry
+ *		       rooted under the top debugfs directory for the SCMI
+ *		       instance referred by handle.
  * @notify_ops: pointer to set of notifications related operations
  */
 struct scmi_handle {
@@ -1090,7 +1096,11 @@ struct scmi_handle {
 	void (*devm_protocol_put)(struct scmi_device *sdev, u8 proto);
 	bool (*is_transport_atomic)(const struct scmi_handle *handle,
 				    unsigned int *atomic_threshold);
-
+	struct dentry __must_check *
+		(*debugfs_entry_get)(const struct scmi_handle *handle,
+				     const char *name);
+	void (*debugfs_entry_put)(const struct scmi_handle *handle,
+				  struct dentry *dentry);
 	const struct scmi_notify_ops *notify_ops;
 };
 
