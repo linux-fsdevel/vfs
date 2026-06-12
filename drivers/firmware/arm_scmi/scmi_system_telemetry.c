@@ -19,12 +19,14 @@
 #include <linux/list.h>
 #include <linux/module.h>
 #include <linux/overflow.h>
+#include <linux/poll.h>
 #include <linux/scmi_protocol.h>
 #include <linux/slab.h>
 #include <linux/sprintf.h>
 #include <linux/string.h>
 #include <linux/types.h>
 #include <linux/uaccess.h>
+#include <linux/wait.h>
 
 #include <uapi/linux/scmi.h>
 
@@ -1368,6 +1370,91 @@ static const struct file_operations available_interv_fops = {
 	.release = scmi_tlm_priv_release,
 };
 
+struct scmi_tlm_gen_priv {
+	unsigned int last_seen;
+	struct wait_queue_head *wq;
+	struct scmi_tlm_buffer tb;
+};
+
+static int scmi_tlm_generation_open(struct inode *ino, struct file *filp)
+{
+	struct scmi_tlm_inode *tlmi = to_tlm_inode(ino);
+	struct scmi_tlm_setup *tsp = tlmi->tsp;
+	struct scmi_tlm_gen_priv *gen;
+
+	gen = kzalloc_obj(*gen);
+	if (!gen)
+		return -ENOMEM;
+
+	gen->wq = tsp->ops->event_wq_get(tsp->ph);
+	if (!gen->wq) {
+		kfree(gen);
+		return -ENOMEM;
+	}
+
+	gen->last_seen = SCMI_TLM_GENERATION_INVALID;
+	filp->private_data = gen;
+
+	return nonseekable_open(ino, filp);
+}
+
+static ssize_t
+scmi_tlm_generation_read(struct file *filp, char __user *buf,
+			 size_t count, loff_t *ppos)
+{
+	struct scmi_tlm_inode *tlmi = to_tlm_inode(file_inode(filp));
+	struct scmi_tlm_gen_priv *gen = filp->private_data;
+	struct scmi_telemetry_info *info = (struct scmi_telemetry_info *)tlmi->priv;
+	unsigned int c;
+
+	if (*ppos == gen->tb.used)
+		gen->tb.used = *ppos = 0;
+
+	if (!gen->tb.used) {
+		int ret;
+
+		ret = wait_event_interruptible(*gen->wq,
+					       (c = atomic_read(&info->generation)) !=
+					       gen->last_seen);
+		if (ret)
+			return -ERESTARTSYS;
+
+		gen->last_seen = c;
+		gen->tb.used = scnprintf(gen->tb.buf, SCMI_TLM_MAX_BUF_SZ, "%u\n", c);
+	}
+
+	return simple_read_from_buffer(buf, count, ppos, gen->tb.buf, gen->tb.used);
+}
+
+static __poll_t scmi_tlm_generation_poll(struct file *filp, poll_table *wait)
+{
+	struct scmi_tlm_inode *tlmi = to_tlm_inode(file_inode(filp));
+	struct scmi_telemetry_info *info = (struct scmi_telemetry_info *)tlmi->priv;
+	struct scmi_tlm_gen_priv *gen = filp->private_data;
+
+	poll_wait(filp, gen->wq, wait);
+	if (atomic_read(&info->generation) != gen->last_seen)
+		return EPOLLIN | EPOLLRDNORM;
+
+	return 0;
+}
+
+static int scmi_tlm_generation_release(struct inode *ino, struct file *filp)
+{
+	struct scmi_tlm_gen_priv *gen = filp->private_data;
+
+	kfree(gen);
+
+	return 0;
+}
+
+static const struct file_operations generation_fops = {
+	.open = scmi_tlm_generation_open,
+	.read = scmi_tlm_generation_read,
+	.poll = scmi_tlm_generation_poll,
+	.release = scmi_tlm_generation_release,
+};
+
 static const struct scmi_tlm_class tlm_tops[] = {
 	TLM_ANON_CLASS("all_des_enable", TLM_IS_STATE,
 		       S_IFREG | 0666, &all_des_fops, NULL),
@@ -1383,6 +1470,8 @@ static const struct scmi_tlm_class tlm_tops[] = {
 		       S_IFREG | 0444, &de_impl_vers_fops, NULL),
 	TLM_ANON_CLASS("tlm_enable", 0,
 		       S_IFREG | 0666, &tlm_enable_fops, NULL),
+	TLM_ANON_CLASS("generation", 0,
+		       S_IFREG | 0444, &generation_fops, NULL),
 	TLM_ANON_CLASS(NULL, 0, 0, NULL, NULL),
 };
 
