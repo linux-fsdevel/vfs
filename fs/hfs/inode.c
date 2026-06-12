@@ -369,6 +369,8 @@ static int hfs_read_inode(struct inode *inode, void *data)
 	rec = idata->rec;
 	switch (rec->type) {
 	case HFS_CDR_FIL:
+		if (be32_to_cpu(rec->file.FlNum) < HFS_FIRSTUSER_CNID)
+			return -EFSCORRUPTED;
 		if (!HFS_IS_RSRC(inode)) {
 			hfs_inode_read_fork(inode, rec->file.ExtRec, rec->file.LgLen,
 					    rec->file.PyLen, be16_to_cpu(rec->file.ClpSize));
@@ -390,6 +392,9 @@ static int hfs_read_inode(struct inode *inode, void *data)
 		inode->i_mapping->a_ops = &hfs_aops;
 		break;
 	case HFS_CDR_DIR:
+		if (be32_to_cpu(rec->dir.DirID) < HFS_FIRSTUSER_CNID &&
+		    be32_to_cpu(rec->dir.DirID) != HFS_ROOT_CNID)
+			return -EFSCORRUPTED;
 		inode->i_ino = be32_to_cpu(rec->dir.DirID);
 		inode->i_size = be16_to_cpu(rec->dir.Val) + 2;
 		HFS_I(inode)->fs_blocks = 0;

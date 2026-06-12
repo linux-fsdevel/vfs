@@ -174,8 +174,10 @@ int hfs_brec_read(struct hfs_find_data *fd, void *rec, u32 rec_len)
 	res = hfs_brec_find(fd);
 	if (res)
 		return res;
+	if (fd->entryoffset < 0 || fd->entrylength <= 0)
+		return -EFSCORRUPTED;
 	if (fd->entrylength > rec_len)
-		return -EINVAL;
+		return -EFSCORRUPTED;
 	hfs_bnode_read(fd->bnode, rec, fd->entryoffset, fd->entrylength);
 	return 0;
 }
