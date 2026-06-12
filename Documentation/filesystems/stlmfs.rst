@@ -109,6 +109,25 @@ sense to allow this FS to be mounted inside a container.
 All files are created world readable and, where needed for configuration,
 owner writable.
 
+Mount Options
+=============
+
+This FS supports the typical mount options needed to modify, at mount time, the
+ownership of the root and all of the underlying inodes:
+
+ - uid: id of the owner of the root inode and all of the files subsequently
+	created under it
+
+ - gid: id of the group of the root inode and all of the files subsequently
+	created under it
+
+ - umask: a standard umask filter to be applied to user/group/other: defaults
+	  to 00222
+
+Note that all of the above options are explicitly designed NOT to support
+a remount operation, so as not have surprising effects on permissions of
+already discovered/created telemetry files.
+
 Usage
 =====
 
