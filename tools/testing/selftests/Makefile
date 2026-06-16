@@ -73,6 +73,7 @@ TARGETS += mseal_system_mappings
 TARGETS += nci
 TARGETS += net
 TARGETS += net/af_unix
+TARGETS += net/af_unix/scm_rights_denial
 TARGETS += net/can
 TARGETS += net/forwarding
 TARGETS += net/hsr
