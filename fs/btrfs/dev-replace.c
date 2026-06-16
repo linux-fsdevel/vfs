@@ -64,7 +64,7 @@
  */
 
 static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
-				       int scrub_ret);
+				       int scrub_ret, bool *suspended);
 static int btrfs_dev_replace_kthread(void *data);
 static void btrfs_rm_dev_replace_blocked(struct btrfs_fs_info *fs_info);
 static void btrfs_rm_dev_replace_unblocked(struct btrfs_fs_info *fs_info);
@@ -585,7 +585,7 @@ bool btrfs_finish_block_group_to_copy(struct btrfs_device *srcdev,
 
 static int btrfs_dev_replace_start(struct btrfs_fs_info *fs_info,
 		const char *tgtdev_name, u64 srcdevid, const char *srcdev_name,
-		int read_src)
+		int read_src, bool *suspended)
 {
 	struct btrfs_root *root = fs_info->dev_root;
 	struct btrfs_trans_handle *trans;
@@ -705,7 +705,7 @@ static int btrfs_dev_replace_start(struct btrfs_fs_info *fs_info,
 			      btrfs_device_get_total_bytes(src_device),
 			      &dev_replace->scrub_progress, false, true);
 
-	ret = btrfs_dev_replace_finishing(fs_info, ret);
+	ret = btrfs_dev_replace_finishing(fs_info, ret, suspended);
 	if (ret == -EINPROGRESS)
 		ret = BTRFS_IOCTL_DEV_REPLACE_RESULT_SCRUB_INPROGRESS;
 
@@ -734,7 +734,8 @@ static int btrfs_check_replace_dev_names(struct btrfs_ioctl_dev_replace_args *ar
 }
 
 int btrfs_dev_replace_by_ioctl(struct btrfs_fs_info *fs_info,
-			    struct btrfs_ioctl_dev_replace_args *args)
+			    struct btrfs_ioctl_dev_replace_args *args,
+			    bool *suspended)
 {
 	int ret;
 
@@ -752,7 +753,8 @@ int btrfs_dev_replace_by_ioctl(struct btrfs_fs_info *fs_info,
 	ret = btrfs_dev_replace_start(fs_info, args->start.tgtdev_name,
 					args->start.srcdevid,
 					args->start.srcdev_name,
-					args->start.cont_reading_from_srcdev_mode);
+					args->start.cont_reading_from_srcdev_mode,
+					suspended);
 	args->result = ret;
 	/* don't warn if EINPROGRESS, someone else might be running scrub */
 	if (ret == BTRFS_IOCTL_DEV_REPLACE_RESULT_SCRUB_INPROGRESS ||
@@ -875,7 +877,7 @@ static void btrfs_dev_replace_set_suspended(struct btrfs_fs_info *fs_info)
 }
 
 static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
-				       int scrub_ret)
+				       int scrub_ret, bool *suspended)
 {
 	struct btrfs_dev_replace *dev_replace = &fs_info->dev_replace;
 	struct btrfs_fs_devices *fs_devices = fs_info->fs_devices;
@@ -885,6 +887,8 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
 	u8 uuid_tmp[BTRFS_UUID_SIZE];
 	struct btrfs_trans_handle *trans;
 	int ret = 0;
+
+	*suspended = false;
 
 	/* don't allow cancel or unmount to disturb the finishing procedure */
 	mutex_lock(&dev_replace->lock_finishing_cancel_unmount);
@@ -909,6 +913,7 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
 	ret = btrfs_start_delalloc_roots(fs_info, LONG_MAX, false);
 	if (ret) {
 		btrfs_dev_replace_set_suspended(fs_info);
+		*suspended = true;
 		mutex_unlock(&dev_replace->lock_finishing_cancel_unmount);
 		return ret;
 	}
@@ -923,6 +928,7 @@ static int btrfs_dev_replace_finishing(struct btrfs_fs_info *fs_info,
 		trans = btrfs_start_transaction(root, 0);
 		if (IS_ERR(trans)) {
 			btrfs_dev_replace_set_suspended(fs_info);
+			*suspended = true;
 			mutex_unlock(&dev_replace->lock_finishing_cancel_unmount);
 			return PTR_ERR(trans);
 		}
@@ -1158,11 +1164,11 @@ int btrfs_dev_replace_cancel(struct btrfs_fs_info *fs_info)
 
 		trans = btrfs_start_transaction(root, 0);
 		if (IS_ERR(trans)) {
-			mutex_unlock(&dev_replace->lock_finishing_cancel_unmount);
-			return PTR_ERR(trans);
+			result = PTR_ERR(trans);
+		} else {
+			ret = btrfs_commit_transaction(trans);
+			WARN_ON(ret);
 		}
-		ret = btrfs_commit_transaction(trans);
-		WARN_ON(ret);
 
 		btrfs_info(fs_info,
 		"suspended dev_replace from %s (devid %llu) to %s canceled",
@@ -1174,6 +1180,9 @@ int btrfs_dev_replace_cancel(struct btrfs_fs_info *fs_info)
 		if (tgt_device)
 			btrfs_destroy_dev_replace_tgtdev(tgt_device);
 		btrfs_rm_dev_replace_unblocked(fs_info);
+
+		/* Release the exclusive op if this replace still holds it. */
+		btrfs_exclop_finish_if(fs_info, BTRFS_EXCLOP_DEV_REPLACE);
 		break;
 	default:
 		up_write(&dev_replace->rwsem);
@@ -1267,6 +1276,7 @@ static int btrfs_dev_replace_kthread(void *data)
 	struct btrfs_fs_info *fs_info = data;
 	struct btrfs_dev_replace *dev_replace = &fs_info->dev_replace;
 	u64 progress;
+	bool suspended = false;
 	int ret;
 
 	progress = btrfs_dev_replace_progress(fs_info);
@@ -1282,10 +1292,12 @@ static int btrfs_dev_replace_kthread(void *data)
 			      dev_replace->committed_cursor_left,
 			      btrfs_device_get_total_bytes(dev_replace->srcdev),
 			      &dev_replace->scrub_progress, false, true);
-	ret = btrfs_dev_replace_finishing(fs_info, ret);
+	ret = btrfs_dev_replace_finishing(fs_info, ret, &suspended);
 	WARN_ON(ret && ret != -ECANCELED);
 
-	btrfs_exclop_finish(fs_info);
+	/* A suspended replace keeps the exclusive op; see the finishing path. */
+	if (!suspended)
+		btrfs_exclop_finish_if(fs_info, BTRFS_EXCLOP_DEV_REPLACE);
 	return 0;
 }
 
