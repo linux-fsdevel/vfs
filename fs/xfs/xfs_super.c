@@ -546,6 +546,29 @@ xfs_open_devices(
 }
 
 /*
+ * When using a RT device some or all data I/O is using the RT device, but
+ * the BDI is inherited from the main data device.  When the underlying block
+ * device for the RT device has larger I/O sizes, the BDI settings might be
+ * incorrect, which is especially bad if the main device is a SSD and the
+ * RT device is a HDD, as the io_opt fixup in blk_apply_bdi_limits is missing
+ * for this case.
+ *
+ * Update the BDI values to the max of the data and RT device to cover our
+ * bases.
+ */
+static void
+xfs_update_bdi_rahead(
+	struct xfs_mount	*mp)
+{
+	struct backing_dev_info	*rt_bdi =
+		mp->m_rtdev_targp->bt_bdev->bd_disk->bdi;
+	struct backing_dev_info	*sb_bdi = mp->m_super->s_bdi;
+
+	sb_bdi->ra_pages = max(sb_bdi->ra_pages, rt_bdi->ra_pages);
+	sb_bdi->io_pages = max(sb_bdi->io_pages, rt_bdi->io_pages);
+}
+
+/*
  * Setup xfs_mount buffer target pointers based on superblock
  */
 STATIC int
@@ -582,6 +605,7 @@ xfs_setup_devices(
 				mp->m_sb.sb_sectsize, mp->m_sb.sb_rblocks);
 		if (error)
 			return error;
+		xfs_update_bdi_rahead(mp);
 	}
 
 	return 0;
