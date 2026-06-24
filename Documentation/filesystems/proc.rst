@@ -39,16 +39,17 @@ fixes/update part 1.1  Stefani Seibold <stefani@seibold.net>    June 9 2009
   3.2	/proc/<pid>/oom_score - Display current oom-killer score
   3.3	/proc/<pid>/io - Display the IO accounting fields
   3.4	/proc/<pid>/coredump_filter - Core dump filtering settings
-  3.5	/proc/<pid>/mountinfo - Information about mounts
-  3.6	/proc/<pid>/comm  & /proc/<pid>/task/<tid>/comm
-  3.7   /proc/<pid>/task/<tid>/children - Information about task children
-  3.8   /proc/<pid>/fdinfo/<fd> - Information about opened file
-  3.9   /proc/<pid>/map_files - Information about memory mapped files
-  3.10  /proc/<pid>/timerslack_ns - Task timerslack value
-  3.11	/proc/<pid>/patch_state - Livepatch patch operation state
-  3.12	/proc/<pid>/arch_status - Task architecture specific information
-  3.13  /proc/<pid>/fd - List of symlinks to open files
-  3.14  /proc/<pid>/ksm_stat - Information about the process's ksm status.
+  3.5  /proc/<pid>/coredump_pre_exit - Core dump pre-exit settings
+  3.6	/proc/<pid>/mountinfo - Information about mounts
+  3.7	/proc/<pid>/comm  & /proc/<pid>/task/<tid>/comm
+  3.8   /proc/<pid>/task/<tid>/children - Information about task children
+  3.9   /proc/<pid>/fdinfo/<fd> - Information about opened file
+  3.10   /proc/<pid>/map_files - Information about memory mapped files
+  3.11  /proc/<pid>/timerslack_ns - Task timerslack value
+  3.12	/proc/<pid>/patch_state - Livepatch patch operation state
+  3.13	/proc/<pid>/arch_status - Task architecture specific information
+  3.14  /proc/<pid>/fd - List of symlinks to open files
+  3.15  /proc/<pid>/ksm_stat - Information about the process's ksm status.
 
   4	Configuring procfs
   4.1	Mount options
@@ -1961,7 +1962,24 @@ For example::
   $ echo 0x7 > /proc/self/coredump_filter
   $ ./some_program
 
-3.5	/proc/<pid>/mountinfo - Information about mounts
+3.5 /proc/<pid>/coredump_pre_exit - Core dump pre-exit settings
+---------------------------------------------------------------
+A coredump typically takes some time to complete. If we happen to hold a write
+lock with flock just before triggering the coredump, that write lock will not
+be released during the entire coredump process. As a result, other processes
+attempting to acquire the same write lock may experience significant delays.
+Another typical scenario is that shared memory, such as dma-buf, remains
+occupied and is not released for a long time due to core dumps.
+
+/proc/<pid>/coredump_pre_exit allows you to pre-exit some resources before
+dumping core.
+
+The following two types are supported:
+
+  - (bit 0) flock files
+  - (bit 1) file-backed shared memory
+
+3.6	/proc/<pid>/mountinfo - Information about mounts
 --------------------------------------------------------
 
 This file contains lines of the form::
@@ -2001,7 +2019,7 @@ For more information on mount propagation see:
   Documentation/filesystems/sharedsubtree.rst
 
 
-3.6	/proc/<pid>/comm  & /proc/<pid>/task/<tid>/comm
+3.7	/proc/<pid>/comm  & /proc/<pid>/task/<tid>/comm
 --------------------------------------------------------
 These files provide a method to access a task's comm value. It also allows for
 a task to set its own or one of its thread siblings comm value. The comm value
@@ -2010,7 +2028,7 @@ then the kernel's TASK_COMM_LEN (currently 16 chars, including the NUL
 terminator) will result in a truncated comm value.
 
 
-3.7	/proc/<pid>/task/<tid>/children - Information about task children
+3.8	/proc/<pid>/task/<tid>/children - Information about task children
 -------------------------------------------------------------------------
 This file provides a fast way to retrieve first level children pids
 of a task pointed by <pid>/<tid> pair. The format is a space separated
@@ -2027,7 +2045,7 @@ pids, so one needs to either stop or freeze processes being inspected
 if precise results are needed.
 
 
-3.8	/proc/<pid>/fdinfo/<fd> - Information about opened file
+3.9	/proc/<pid>/fdinfo/<fd> - Information about opened file
 ---------------------------------------------------------------
 This file provides information associated with an opened file. The regular
 files have at least four fields -- 'pos', 'flags', 'mnt_id' and 'ino'.
@@ -2198,7 +2216,7 @@ VFIO Device files
 where 'vfio-device-syspath' is the sysfs path corresponding to the VFIO device
 file.
 
-3.9	/proc/<pid>/map_files - Information about memory mapped files
+3.10	/proc/<pid>/map_files - Information about memory mapped files
 ---------------------------------------------------------------------
 This directory contains symbolic links which represent memory mapped files
 the process is maintaining.  Example output::
@@ -2220,7 +2238,7 @@ time one can open(2) mappings from the listings of two processes and
 comparing their inode numbers to figure out which anonymous memory areas
 are actually shared.
 
-3.10	/proc/<pid>/timerslack_ns - Task timerslack value
+3.11	/proc/<pid>/timerslack_ns - Task timerslack value
 ---------------------------------------------------------
 This file provides the value of the task's timerslack value in nanoseconds.
 This value specifies an amount of time that normal timers may be deferred
@@ -2236,7 +2254,7 @@ Valid values are from 0 - ULLONG_MAX
 An application setting the value must have PTRACE_MODE_ATTACH_FSCREDS level
 permissions on the task specified to change its timerslack_ns value.
 
-3.11	/proc/<pid>/patch_state - Livepatch patch operation state
+3.12	/proc/<pid>/patch_state - Livepatch patch operation state
 -----------------------------------------------------------------
 When CONFIG_LIVEPATCH is enabled, this file displays the value of the
 patch state for the task.
@@ -2253,7 +2271,7 @@ patched.  If the patch is being enabled, then the task has already been
 patched.  If the patch is being disabled, then the task hasn't been
 unpatched yet.
 
-3.12 /proc/<pid>/arch_status - task architecture specific status
+3.13 /proc/<pid>/arch_status - task architecture specific status
 -------------------------------------------------------------------
 When CONFIG_PROC_PID_ARCH_STATUS is enabled, this file displays the
 architecture specific status of the task.
@@ -2298,7 +2316,7 @@ AVX512_elapsed_ms
   the task is unlikely an AVX512 user, but depends on the workload and the
   scheduling scenario, it also could be a false negative mentioned above.
 
-3.13 /proc/<pid>/fd - List of symlinks to open files
+3.14 /proc/<pid>/fd - List of symlinks to open files
 -------------------------------------------------------
 This directory contains symbolic links which represent open files
 the process is maintaining.  Example output::
@@ -2313,7 +2331,7 @@ The number of open files for the process is stored in 'size' member
 of stat() output for /proc/<pid>/fd for fast access.
 -------------------------------------------------------
 
-3.14 /proc/<pid>/ksm_stat - Information about the process's ksm status
+3.15 /proc/<pid>/ksm_stat - Information about the process's ksm status
 ----------------------------------------------------------------------
 When CONFIG_KSM is enabled, each process has this file which displays
 the information of ksm merging status.

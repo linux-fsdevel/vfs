@@ -1326,6 +1326,27 @@ destroy:
 	vm_unacct_memory(nr_accounted);
 }
 
+void exit_mmap_mapped_shared(struct mm_struct *mm)
+{
+	struct vm_area_struct *vma;
+	VMA_ITERATOR(vmi, mm, 0);
+
+	mmap_write_lock(mm);
+	lru_add_drain();
+
+	for_each_vma(vmi, vma) {
+		if (vma->vm_flags & VM_HUGETLB)
+			continue;
+		if (!(vma->vm_flags & VM_SHARED) || !file_inode(vma->vm_file)->i_nlink)
+			continue;
+		vma->vm_file->f_flags |= O_TMPCLOS;
+		do_munmap(mm, vma->vm_start, vma->vm_end - vma->vm_start, NULL);
+		cond_resched();
+	}
+
+	mmap_write_unlock(mm);
+}
+
 /*
  * Return true if the calling process may expand its vm space by the passed
  * number of pages

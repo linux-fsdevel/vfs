@@ -1024,6 +1024,11 @@ Kernel parameters
 			/proc/<pid>/coredump_filter.
 			See also Documentation/filesystems/proc.rst.
 
+	coredump_pre_exit=
+			[KNL] Change the default value for
+			/proc/<pid>/coredump_pre_exit.
+			See also Documentation/filesystems/proc.rst.
+
 	coresight_cpu_debug.enable
 			[ARM,ARM64]
 			Format: <bool>

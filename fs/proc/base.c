@@ -3026,6 +3026,83 @@ static const struct file_operations proc_coredump_filter_operations = {
 	.write		= proc_coredump_filter_write,
 	.llseek		= generic_file_llseek,
 };
+
+static ssize_t proc_coredump_pre_exit_read(struct file *file, char __user *buf,
+					   size_t count, loff_t *ppos)
+{
+	struct task_struct *task = get_proc_task(file_inode(file));
+	struct mm_struct *mm;
+	char buffer[PROC_NUMBUF];
+	size_t len;
+	int ret;
+
+	if (!task)
+		return -ESRCH;
+
+	ret = 0;
+	mm = get_task_mm(task);
+	if (mm) {
+		unsigned long flags = __mm_flags_get_dumpable(mm);
+
+		len = snprintf(buffer, sizeof(buffer), "%08lx\n",
+			       ((flags & MMF_DUMP_PRE_EXIT_MASK) >>
+				MMF_DUMP_PRE_EXIT_SHIFT));
+		mmput(mm);
+		ret = simple_read_from_buffer(buf, count, ppos, buffer, len);
+	}
+
+	put_task_struct(task);
+
+	return ret;
+}
+
+static ssize_t proc_coredump_pre_exit_write(struct file *file,
+					    const char __user *buf,
+					    size_t count,
+					    loff_t *ppos)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	unsigned int val;
+	int ret;
+	int i;
+	unsigned long mask;
+
+	ret = kstrtouint_from_user(buf, count, 0, &val);
+	if (ret < 0)
+		return ret;
+
+	ret = -ESRCH;
+	task = get_proc_task(file_inode(file));
+	if (!task)
+		goto out_no_task;
+
+	mm = get_task_mm(task);
+	if (!mm)
+		goto out_no_mm;
+	ret = 0;
+
+	for (i = 0, mask = 1; i < MMF_DUMP_PRE_EXIT_BITS; i++, mask <<= 1) {
+		if (val & mask)
+			mm_flags_set(i + MMF_DUMP_PRE_EXIT_SHIFT, mm);
+		else
+			mm_flags_clear(i + MMF_DUMP_PRE_EXIT_SHIFT, mm);
+	}
+
+	mmput(mm);
+ out_no_mm:
+	put_task_struct(task);
+ out_no_task:
+	if (ret < 0)
+		return ret;
+	return count;
+}
+
+static const struct file_operations proc_coredump_pre_exit_operations = {
+	.read		= proc_coredump_pre_exit_read,
+	.write		= proc_coredump_pre_exit_write,
+	.llseek		= generic_file_llseek,
+};
 #endif
 
 #ifdef CONFIG_TASK_IO_ACCOUNTING
@@ -3391,6 +3468,7 @@ static const struct pid_entry tgid_base_stuff[] = {
 #endif
 #ifdef CONFIG_ELF_CORE
 	REG("coredump_filter", S_IRUGO|S_IWUSR, proc_coredump_filter_operations),
+	REG("coredump_pre_exit", S_IRUGO|S_IWUSR, proc_coredump_pre_exit_operations),
 #endif
 #ifdef CONFIG_TASK_IO_ACCOUNTING
 	ONE("io",	S_IRUSR, proc_tgid_io_accounting),

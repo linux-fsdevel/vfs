@@ -1029,6 +1029,18 @@ static int __init coredump_filter_setup(char *s)
 
 __setup("coredump_filter=", coredump_filter_setup);
 
+static unsigned long default_dump_pre_exit;
+
+static int __init coredump_pre_exit_setup(char *s)
+{
+	default_dump_pre_exit =
+		(simple_strtoul(s, NULL, 0) << MMF_DUMP_PRE_EXIT_SHIFT) &
+		MMF_DUMP_PRE_EXIT_MASK;
+	return 1;
+}
+
+__setup("coredump_pre_exit=", coredump_pre_exit_setup);
+
 #include <linux/init_task.h>
 
 static void mm_init_aio(struct mm_struct *mm)

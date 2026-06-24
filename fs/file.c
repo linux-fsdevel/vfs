@@ -23,6 +23,7 @@
 #include <linux/file_ref.h>
 #include <net/sock.h>
 #include <linux/init_task.h>
+#include <linux/filelock.h>
 
 #include "internal.h"
 
@@ -524,6 +525,51 @@ void exit_files(struct task_struct *tsk)
 		tsk->files = NULL;
 		task_unlock(tsk);
 		put_files_struct(files);
+	}
+}
+
+void exit_files_pre_exit(struct task_struct *tsk, bool checkflock)
+{
+	struct files_struct *files = tsk->files;
+	struct fdtable *fdt;
+	struct file *file;
+	unsigned int i, j = 0;
+
+	if (!files)
+		return;
+
+	fdt = rcu_dereference_raw(files->fdt);
+	for (;;) {
+		unsigned long set;
+
+		i = j * BITS_PER_LONG;
+		if (i >= fdt->max_fds)
+			break;
+		set = fdt->open_fds[j++];
+		while (set) {
+			if (!(set & 1))
+				goto next_fd;
+			file = fdt->fd[i];
+			if (!file)
+				goto next_fd;
+			if (file->f_flags & O_TMPCLOS) {
+				file->f_flags &= ~O_TMPCLOS;
+				goto close_fd;
+			}
+			if (!checkflock)
+				goto next_fd;
+			if (!vfs_inode_has_locks(file_inode(file)))
+				goto next_fd;
+
+close_fd:
+			fdt->fd[i] = NULL;
+			filp_close(file, files);
+			cond_resched();
+
+next_fd:
+			i++;
+			set >>= 1;
+		}
 	}
 }
 

@@ -521,6 +521,27 @@ static int zap_threads(struct task_struct *tsk,
 	return nr;
 }
 
+static void coredump_pre_exit(void)
+{
+	struct task_struct *tsk = current;
+	unsigned long flags = __mm_flags_get_dumpable(tsk->mm);
+
+	if (!likely(flags & MMF_DUMP_PRE_EXIT_MASK))
+		return;
+
+	/*
+	 * Set O_TMPCLOS of file f_flags if file needs to be closed.
+	 */
+	if (test_bit(MMF_DUMP_PRE_EXIT_FILE_BACKED_SHARED, &flags) &&
+	    !test_bit(MMF_DUMP_MAPPED_SHARED, &flags))
+		exit_mmap_mapped_shared(tsk->mm);
+
+	/*
+	 * Check O_TMPCLOS of file f_flags to close file and clear it.
+	 */
+	exit_files_pre_exit(tsk, mm_flags_test(MMF_DUMP_PRE_EXIT_FLOCK, tsk->mm));
+}
+
 static int coredump_wait(int exit_code, struct core_state *core_state)
 {
 	struct task_struct *tsk = current;
@@ -1099,6 +1120,8 @@ static void do_coredump(struct core_name *cn, struct coredump_params *cprm,
 		coredump_report_failure("format_corename failed, aborting core");
 		return;
 	}
+
+	coredump_pre_exit();
 
 	switch (cn->core_type) {
 	case COREDUMP_FILE:
