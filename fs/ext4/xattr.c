@@ -1152,11 +1152,41 @@ static int ext4_xattr_restart_fn(handle_t *handle, struct inode *inode,
 	return 0;
 }
 
+/* Check if an EA inode number is already in the processed llist. */
+static bool ext4_ea_ino_in_llist(unsigned int ea_ino,
+				 struct llist_head *processed)
+{
+	struct ext4_inode_info *ei;
+
+	llist_for_each_entry(ei, processed->first, i_ea_iput_node) {
+		if (ei->vfs_inode.i_ino == ea_ino)
+			return true;
+	}
+	return false;
+}
+
+/* Put all EA inodes on a processed llist via ext4_put_ea_inode. */
+static void ext4_put_ea_inode_llist(struct super_block *sb,
+				    struct llist_head *processed)
+{
+	struct llist_node *node = llist_del_all(processed);
+	struct llist_node *next;
+
+	while (node) {
+		struct ext4_inode_info *ei = container_of(node,
+				struct ext4_inode_info, i_ea_iput_node);
+		next = node->next;
+		ext4_put_ea_inode(sb, &ei->vfs_inode);
+		node = next;
+	}
+}
+
 static void
 ext4_xattr_inode_dec_ref_all(handle_t *handle, struct inode *parent,
 			     struct buffer_head *bh,
 			     struct ext4_xattr_entry *first, bool block_csum,
-			     int extra_credits, bool skip_quota)
+			     int extra_credits, bool skip_quota,
+			     struct llist_head *processed)
 {
 	struct inode *ea_inode;
 	struct ext4_xattr_entry *entry;
@@ -1186,6 +1216,11 @@ ext4_xattr_inode_dec_ref_all(handle_t *handle, struct inode *parent,
 		if (!entry->e_value_inum)
 			continue;
 		ea_ino = le32_to_cpu(entry->e_value_inum);
+
+		/* Skip if already processed (duplicate on corrupted fs) */
+		if (ext4_ea_ino_in_llist(ea_ino, processed))
+			continue;
+
 		err = ext4_xattr_inode_iget(parent, ea_ino,
 					    le32_to_cpu(entry->e_hash),
 					    &ea_inode);
@@ -1235,7 +1270,12 @@ ext4_xattr_inode_dec_ref_all(handle_t *handle, struct inode *parent,
 		entry->e_value_inum = 0;
 		entry->e_value_size = 0;
 
-		ext4_put_ea_inode(parent->i_sb, ea_inode);
+		/*
+		 * Collect processed EA inodes for dedup and deferred iput.
+		 * ext4_put_ea_inode_llist() handles the actual release
+		 * after the loop, preventing iget deadlocks on duplicates.
+		 */
+		llist_add(&EXT4_I(ea_inode)->i_ea_iput_node, processed);
 		dirty = true;
 	}
 
@@ -1262,7 +1302,8 @@ ext4_xattr_inode_dec_ref_all(handle_t *handle, struct inode *parent,
 static void
 ext4_xattr_release_block(handle_t *handle, struct inode *inode,
 			 struct buffer_head *bh,
-			 int extra_credits)
+			 int extra_credits,
+			 struct llist_head *processed)
 {
 	struct mb_cache *ea_block_cache = EA_BLOCK_CACHE(inode);
 	u32 hash, ref;
@@ -1304,7 +1345,8 @@ retry_ref:
 						     BFIRST(bh),
 						     true /* block_csum */,
 						     extra_credits,
-						     true /* skip_quota */);
+						     true /* skip_quota */,
+						     processed);
 		ext4_free_blocks(handle, inode, bh, 0, 1,
 				 EXT4_FREE_BLOCKS_METADATA |
 				 EXT4_FREE_BLOCKS_FORGET);
@@ -2171,8 +2213,12 @@ getblk_failed:
 
 	/* Drop the previous xattr block. */
 	if (bs->bh && bs->bh != new_bh) {
+		LLIST_HEAD(processed);
+
 		ext4_xattr_release_block(handle, inode, bs->bh,
-					 0 /* extra_credits */);
+					 0 /* extra_credits */,
+					 &processed);
+		ext4_put_ea_inode_llist(inode->i_sb, &processed);
 	}
 	error = 0;
 
@@ -2866,6 +2912,7 @@ int ext4_xattr_delete_inode(handle_t *handle, struct inode *inode,
 	struct ext4_xattr_entry *entry;
 	struct inode *ea_inode;
 	int error;
+	LLIST_HEAD(processed);
 
 	error = ext4_journal_ensure_credits(handle, extra_credits,
 			ext4_free_metadata_revoke_credits(inode->i_sb, 1));
@@ -2897,7 +2944,8 @@ int ext4_xattr_delete_inode(handle_t *handle, struct inode *inode,
 						     IFIRST(header),
 						     false /* block_csum */,
 						     extra_credits,
-						     false /* skip_quota */);
+						     false /* skip_quota */,
+						     &processed);
 	}
 
 	if (EXT4_I(inode)->i_file_acl) {
@@ -2921,6 +2969,11 @@ int ext4_xattr_delete_inode(handle_t *handle, struct inode *inode,
 			     entry = EXT4_XATTR_NEXT(entry)) {
 				if (!entry->e_value_inum)
 					continue;
+				/* Skip EA inodes already dec_ref'd from ibody */
+				if (ext4_ea_ino_in_llist(
+					    le32_to_cpu(entry->e_value_inum),
+					    &processed))
+					continue;
 				error = ext4_xattr_inode_iget(inode,
 					      le32_to_cpu(entry->e_value_inum),
 					      le32_to_cpu(entry->e_hash),
@@ -2935,7 +2988,7 @@ int ext4_xattr_delete_inode(handle_t *handle, struct inode *inode,
 		}
 
 		ext4_xattr_release_block(handle, inode, bh,
-					 extra_credits);
+					 extra_credits, &processed);
 		/*
 		 * Update i_file_acl value in the same transaction that releases
 		 * block.
@@ -2951,6 +3004,7 @@ int ext4_xattr_delete_inode(handle_t *handle, struct inode *inode,
 	}
 	error = 0;
 cleanup:
+	ext4_put_ea_inode_llist(inode->i_sb, &processed);
 	brelse(iloc.bh);
 	brelse(bh);
 	return error;
