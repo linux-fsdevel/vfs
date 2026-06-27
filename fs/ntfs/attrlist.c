@@ -220,14 +220,18 @@ int ntfs_attrlist_entry_add(struct ntfs_inode *ni, struct attr_record *attr)
 			entry_offset, ni->attr_list_size - entry_offset);
 
 	/* Set new runlist. */
+	down_write(&ni->attr_list_lock);
 	old_al = ni->attr_list;
 	ni->attr_list = new_al;
 	ni->attr_list_size = ni->attr_list_size + entry_len;
+	up_write(&ni->attr_list_lock);
 
 	err = ntfs_attrlist_update(ni);
 	if (err) {
+		down_write(&ni->attr_list_lock);
 		ni->attr_list = old_al;
 		ni->attr_list_size -= entry_len;
+		up_write(&ni->attr_list_lock);
 		goto err_out;
 	}
 	kvfree(old_al);
@@ -251,6 +255,7 @@ int ntfs_attrlist_entry_rm(struct ntfs_attr_search_ctx *ctx)
 	int new_al_len;
 	struct ntfs_inode *base_ni;
 	struct attr_list_entry *ale;
+	u8 *old_al;
 
 	if (!ctx || !ctx->ntfs_ino || !ctx->al_entry) {
 		ntfs_debug("Invalid arguments.\n");
@@ -285,9 +290,12 @@ int ntfs_attrlist_entry_rm(struct ntfs_attr_search_ctx *ctx)
 				ale->length), new_al_len - ((u8 *)ale - base_ni->attr_list));
 
 	/* Set new runlist. */
-	kvfree(base_ni->attr_list);
+	down_write(&base_ni->attr_list_lock);
+	old_al = base_ni->attr_list;
 	base_ni->attr_list = new_al;
 	base_ni->attr_list_size = new_al_len;
+	up_write(&base_ni->attr_list_lock);
+	kvfree(old_al);
 
 	return ntfs_attrlist_update(base_ni);
 }

@@ -1565,6 +1565,7 @@ int ntfs_attr_lookup(const __le32 type, const __le16 *name,
 		struct ntfs_attr_search_ctx *ctx)
 {
 	struct ntfs_inode *base_ni;
+	int err;
 
 	ntfs_debug("Entering.");
 	if (ctx->base_ntfs_ino)
@@ -1572,11 +1573,18 @@ int ntfs_attr_lookup(const __le32 type, const __le16 *name,
 	else
 		base_ni = ctx->ntfs_ino;
 	/* Sanity check, just for debugging really. */
-	if (!base_ni || !NInoAttrList(base_ni) || type == AT_ATTRIBUTE_LIST)
+	if (!base_ni)
 		return ntfs_attr_find(type, name, name_len, ic, val, val_len,
 				ctx);
-	return ntfs_external_attr_find(type, name, name_len, ic, lowest_vcn,
-			val, val_len, ctx);
+
+	down_read(&base_ni->attr_list_lock);
+	if (!NInoAttrList(base_ni) || type == AT_ATTRIBUTE_LIST)
+		err = ntfs_attr_find(type, name, name_len, ic, val, val_len, ctx);
+	else
+		err = ntfs_external_attr_find(type, name, name_len, ic,
+					      lowest_vcn, val, val_len, ctx);
+	up_read(&base_ni->attr_list_lock);
+	return err;
 }
 
 /**
@@ -2622,6 +2630,7 @@ put_err_out:
 int ntfs_attr_record_rm(struct ntfs_attr_search_ctx *ctx)
 {
 	struct ntfs_inode *base_ni, *ni;
+	u8 *old_al = NULL;
 	__le32 type;
 	int err;
 
@@ -2659,10 +2668,14 @@ int ntfs_attr_record_rm(struct ntfs_attr_search_ctx *ctx)
 
 	/* Post $ATTRIBUTE_LIST delete setup. */
 	if (type == AT_ATTRIBUTE_LIST) {
+		down_write(&base_ni->attr_list_lock);
 		if (NInoAttrList(base_ni) && base_ni->attr_list)
-			kvfree(base_ni->attr_list);
+			old_al = base_ni->attr_list;
 		base_ni->attr_list = NULL;
+		base_ni->attr_list_size = 0;
 		NInoClearAttrList(base_ni);
+		up_write(&base_ni->attr_list_lock);
+		kvfree(old_al);
 	}
 
 	/* Free MFT record, if it doesn't contain attributes. */
