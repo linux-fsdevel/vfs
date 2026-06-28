@@ -57,7 +57,7 @@ int minix_new_block(struct inode *inode);
 void minix_free_block(struct inode *inode, unsigned long block);
 unsigned long minix_count_free_blocks(struct super_block *sb);
 int minix_getattr(struct mnt_idmap *, const struct path *,
-		struct kstat *, u32, unsigned int);
+		struct kstat *, u32, unsigned);
 int minix_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	struct iattr *attr);
 int minix_prepare_chunk(struct folio *folio, loff_t pos, unsigned len);
@@ -82,6 +82,9 @@ int minix_make_empty(struct inode*, struct inode*);
 int minix_empty_dir(struct inode*);
 int minix_set_link(struct minix_dir_entry *de, struct folio *folio,
 		struct inode *inode);
+extern const char *minix_get_link(struct dentry *dentry, struct inode *inode,
+		struct delayed_call *callback);
+
 struct minix_dir_entry *minix_dotdot(struct inode*, struct folio **);
 ino_t minix_inode_by_name(struct dentry*);
 

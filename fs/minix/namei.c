@@ -6,6 +6,8 @@
  */
 
 #include "minix.h"
+#include <linux/buffer_head.h>
+#include <linux/namei.h>
 
 static int add_nondir(struct dentry *dentry, struct inode *inode)
 {
@@ -69,6 +71,101 @@ static int minix_create(struct mnt_idmap *idmap, struct inode *dir,
 	return minix_mknod(&nop_mnt_idmap, dir, dentry, mode, 0);
 }
 
+static inline u16 *v1_i_data(struct inode *inode)
+{
+	return (u16 *)minix_i(inode)->u.i1_data;
+}
+
+static inline u32 *v2_i_data(struct inode *inode)
+{
+	return (u32 *)minix_i(inode)->u.i2_data;
+}
+
+static inline u16 cpu_to_v1_block(sector_t n)
+{
+	return n;
+}
+
+static inline u32 cpu_to_v2_block(sector_t n)
+{
+	return n;
+}
+
+static inline sector_t v1_block_to_cpu(u16 n)
+{
+	return n;
+}
+
+static inline sector_t v2_block_to_cpu(u32 n)
+{
+	return n;
+}
+
+/* Reimplement page_symlink's general logic while avoiding using buffer head
+ * based aops operations like aops->write_begin so things behave better with
+ * the new regime of iomap based aops operations. Cribbing from page_symlink in
+ * fs/namei.c and ext4's ext4_init_symlink_block.
+ */
+static int __page_symlink(struct inode *inode, const char *symname, int len)
+{
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head *bh;
+	char *kaddr;
+	int err = 0;
+	u16 *p16; /* v1 16 bit block */
+	u32 *p32; /* v2/3 32 bit block */
+
+	sector_t phys;
+
+	phys = minix_new_block(inode);
+	if (!phys) {
+		err = -ENOSPC;
+		goto ps_out;
+	}
+
+	if (INODE_VERSION(inode) == MINIX_V1) {
+		p16 = v1_i_data(inode);
+		*p16 = cpu_to_v1_block(phys);
+	} else {
+		p32 = v2_i_data(inode);
+		*p32 = cpu_to_v2_block(phys);
+	}
+
+	bh = sb_getblk(sb, phys);
+	if (!bh) {
+		err = -ENOMEM;
+		goto ps_fail;
+	}
+
+	lock_buffer(bh);
+	kaddr = (char *)bh->b_data;
+	memset(kaddr, 0, sb->s_blocksize);
+	memcpy(kaddr, symname, len);
+	inode->i_size = len - 1;
+	set_buffer_uptodate(bh);
+	unlock_buffer(bh);
+
+	mmb_mark_buffer_dirty(bh, &minix_i(inode)->i_metadata_bhs);
+	if (inode_needs_sync(inode)) {
+		sync_dirty_buffer(bh);
+		if (buffer_req(bh) && !buffer_uptodate(bh)) {
+			pr_err("i/o error syncing itable block");
+			err = -EIO;
+		}
+
+	}
+
+	mark_inode_dirty(inode);
+	brelse(bh);
+
+ps_out:
+	return err;
+
+ps_fail:
+	minix_free_block(inode, phys);
+	goto ps_out;
+}
+
 static int minix_symlink(struct mnt_idmap *idmap, struct inode *dir,
 			 struct dentry *dentry, const char *symname)
 {
@@ -84,7 +181,7 @@ static int minix_symlink(struct mnt_idmap *idmap, struct inode *dir,
 		return PTR_ERR(inode);
 
 	minix_set_inode(inode, 0);
-	err = page_symlink(inode, symname, i);
+	err = __page_symlink(inode, symname, i);
 	if (unlikely(err)) {
 		inode_dec_link_count(inode);
 		iput(inode);
@@ -271,6 +368,44 @@ out_old:
 	folio_release_kmap(old_folio, old_de);
 out:
 	return err;
+}
+
+/* straight up thievery here; stolen verbatim from ext4_get_link */
+static void minix_free_link(void *bh)
+{
+	brelse(bh);
+}
+
+/* Borrowing from ext4_get_link to a degree; since minix inodes and symlinks
+ * are significantly simpler, we don't need to do nearly as much as ext4
+ * requires for old-timey ext4 slow links.
+ */
+const char *minix_get_link(struct dentry *dentry, struct inode *inode,
+		struct delayed_call *callback)
+{
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head *bh;
+	sector_t blk;
+
+	/* Get yon block, depending on what version of the minix fs this is. */
+	if (INODE_VERSION(inode) == MINIX_V1)
+		blk = v1_block_to_cpu(*(v1_i_data(inode)));
+	else
+		blk = v2_block_to_cpu(*(v2_i_data(inode)));
+
+	bh = sb_bread(sb, blk);
+	if (IS_ERR(bh))
+		return ERR_CAST(bh);
+	if (!bh) {
+		pr_err("bad symlink on inode %llu", inode->i_ino);
+		return ERR_PTR(-EFSCORRUPTED);
+	}
+
+	set_delayed_call(callback, minix_free_link, bh);
+	nd_terminate_link(bh->b_data, inode->i_size,
+			inode->i_sb->s_blocksize - 1);
+
+	return bh->b_data;
 }
 
 /*

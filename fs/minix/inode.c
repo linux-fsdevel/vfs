@@ -573,8 +573,9 @@ static const struct address_space_operations minix_dir_aops = {
 };
 
 static const struct inode_operations minix_symlink_inode_operations = {
-	.get_link	= page_get_link,
+	.get_link	= minix_get_link,
 	.getattr	= minix_getattr,
+	.setattr	= minix_setattr,
 };
 
 void minix_set_inode(struct inode *inode, dev_t rdev)
@@ -838,4 +839,3 @@ module_init(init_minix_fs)
 module_exit(exit_minix_fs)
 MODULE_DESCRIPTION("Minix file system");
 MODULE_LICENSE("GPL");
-
