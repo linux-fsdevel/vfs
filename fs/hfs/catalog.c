@@ -182,6 +182,47 @@ int hfs_cat_keycmp(const btree_key *key1, const btree_key *key2)
 			  key2->cat.CName.name, key2->cat.CName.len);
 }
 
+static int hfs_cat_validate_found_cnid(struct hfs_find_data *fd, u32 cnid)
+{
+	hfs_cat_rec rec;
+	u32 found_cnid;
+	unsigned int rec_len;
+	size_t cnid_off;
+
+	if (fd->entrylength <= 0)
+		return -EIO;
+
+	if ((unsigned int)fd->entrylength > sizeof(rec))
+		rec_len = sizeof(rec);
+	else
+		rec_len = fd->entrylength;
+
+	memset(&rec, 0, sizeof(rec));
+	hfs_bnode_read(fd->bnode, &rec, fd->entryoffset, rec_len);
+
+	switch (rec.type) {
+	case HFS_CDR_FIL:
+		cnid_off = offsetof(struct hfs_cat_file, FlNum);
+		if ((size_t)rec_len < cnid_off + sizeof(rec.file.FlNum))
+			return -EIO;
+		found_cnid = be32_to_cpu(rec.file.FlNum);
+		break;
+	case HFS_CDR_DIR:
+		cnid_off = offsetof(struct hfs_cat_dir, DirID);
+		if ((size_t)rec_len < cnid_off + sizeof(rec.dir.DirID))
+			return -EIO;
+		found_cnid = be32_to_cpu(rec.dir.DirID);
+		break;
+	default:
+		return -EIO;
+	}
+
+	if (!hfs_is_valid_cnid(found_cnid, rec.type) || found_cnid != cnid)
+		return -EIO;
+
+	return 0;
+}
+
 /* Try to get a catalog entry for given catalog id */
 // move to read_super???
 int hfs_cat_find_brec(struct super_block *sb, u32 cnid,
@@ -208,7 +249,12 @@ int hfs_cat_find_brec(struct super_block *sb, u32 cnid,
 		return -EIO;
 	}
 	memcpy(fd->search_key->cat.CName.name, rec.thread.CName.name, len);
-	return hfs_brec_find(fd);
+
+	res = hfs_brec_find(fd);
+	if (res)
+		return res;
+
+	return hfs_cat_validate_found_cnid(fd, cnid);
 }
 
 static inline

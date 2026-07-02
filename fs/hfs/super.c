@@ -361,7 +361,8 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 			goto bail_hfs_find;
 		}
 		hfs_bnode_read(fd.bnode, &rec, fd.entryoffset, fd.entrylength);
-		if (rec.type != HFS_CDR_DIR)
+		if (rec.type != HFS_CDR_DIR ||
+		    be32_to_cpu(rec.dir.DirID) != HFS_ROOT_CNID)
 			res = -EIO;
 	}
 	if (res)
@@ -371,6 +372,11 @@ static int hfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	hfs_find_exit(&fd);
 	if (!root_inode)
 		goto bail_no_root;
+
+	if (is_bad_inode(root_inode)) {
+		iput(root_inode);
+		goto bail_no_root;
+	}
 
 	set_default_d_op(sb, &hfs_dentry_operations);
 	res = -ENOMEM;
