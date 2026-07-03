@@ -15,6 +15,7 @@
 #if IS_ENABLED(CONFIG_UNIX)
 struct unix_sock *unix_get_socket(struct file *filp);
 struct sock *unix_lookup_bsd_path(const struct path *path, int type);
+int kernel_unix_connect_direct(struct sock *other, struct socket *sock, int flags);
 #else
 static inline struct unix_sock *unix_get_socket(struct file *filp)
 {

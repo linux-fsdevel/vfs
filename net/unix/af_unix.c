@@ -1649,44 +1649,60 @@ static long unix_wait_for_peer(struct sock *other, long timeo)
 	return timeo;
 }
 
-static int unix_stream_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
-			       int addr_len, int flags)
+/*
+ * The state a stream connect() builds up before it has a peer: the new
+ * sock and the connection-request skb handed to the listener, the
+ * connecting side's credentials and its send timeout.
+ *
+ * - Built once by unix_stream_connect_setup()
+ * - Used to finish connecting by unix_stream_connect_commit()
+ * - Cleaned up in the failure case by unix_stream_connect_cleanup()
+ */
+struct unix_connect_state {
+	struct sock		*newsk;
+	struct sk_buff		*skb;
+	struct unix_peercred	peercred;
+	long			timeo;
+};
+
+/* Free a connect state that no connection consumed (i.e. on failure). */
+static void unix_stream_connect_cleanup(struct unix_connect_state *st)
 {
-	struct sockaddr_un *sunaddr = (struct sockaddr_un *)uaddr;
-	struct sock *sk = sock->sk, *newsk = NULL, *other = NULL;
-	struct unix_sock *u = unix_sk(sk), *newu, *otheru;
-	struct unix_peercred peercred = {};
-	struct net *net = sock_net(sk);
-	struct sk_buff *skb = NULL;
-	unsigned char state;
-	long timeo;
+	consume_skb(st->skb);
+	unix_release_sock(st->newsk, 0);
+	drop_peercred(&st->peercred);
+}
+
+/*
+ * Build the state a stream connect needs before it looks for a peer:
+ * autobind if required, snapshot the send timeout, and allocate the new
+ * sock, the request skb and the peer credentials.  On failure nothing is
+ * left allocated in @st.
+ */
+static int unix_stream_connect_setup(struct socket *sock, int flags,
+				     struct unix_connect_state *st)
+{
+	struct sock *sk = sock->sk, *newsk;
+	struct sk_buff *skb;
 	int err;
 
-	err = unix_validate_addr(sunaddr, addr_len);
-	if (err)
-		goto out;
-
-	err = BPF_CGROUP_RUN_PROG_UNIX_CONNECT_LOCK(sk, uaddr, &addr_len);
-	if (err)
-		goto out;
-
-	if (unix_may_passcred(sk) && !READ_ONCE(u->addr)) {
+	if (unix_may_passcred(sk) && !READ_ONCE(unix_sk(sk)->addr)) {
 		err = unix_autobind(sk);
 		if (err)
-			goto out;
+			return err;
 	}
 
-	timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
+	st->timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
 
-	err = prepare_peercred(&peercred);
+	err = prepare_peercred(&st->peercred);
 	if (err)
-		goto out;
+		return err;
 
 	/* create new sock for complete connection */
-	newsk = unix_create1(net, NULL, 0, sock->type);
+	newsk = unix_create1(sock_net(sk), NULL, 0, sock->type);
 	if (IS_ERR(newsk)) {
 		err = PTR_ERR(newsk);
-		goto out;
+		goto out_drop;
 	}
 
 	/* Allocate skb for sending to listening sock */
@@ -1696,21 +1712,56 @@ static int unix_stream_connect(struct socket *sock, struct sockaddr_unsized *uad
 		goto out_free_sk;
 	}
 
-restart:
-	/*  Find listening sock. */
-	other = unix_find_other(net, sunaddr, addr_len, sk->sk_type, flags);
-	if (IS_ERR(other)) {
-		err = PTR_ERR(other);
-		goto out_free_skb;
-	}
+	st->newsk = newsk;
+	st->skb = skb;
+	return 0;
+
+out_free_sk:
+	unix_release_sock(newsk, 0);
+out_drop:
+	drop_peercred(&st->peercred);
+	return err;
+}
+
+/*
+ * Positive returns from unix_stream_connect_commit() ask the caller to
+ * try again.  They are distinct only for a caller with a fixed peer
+ * (kernel_unix_connect_direct()): a full backlog can be retried on the
+ * same peer, but a peer found dead cannot -- the by-name path must
+ * re-resolve it, and a fixed peer has no such recourse and fails.
+ */
+#define UNIX_CONNECT_STALE 1	/* peer was found dead */
+#define UNIX_CONNECT_FULL  2	/* backlog was full and we slept */
+
+/*
+ * Try to connect @sk to the listening peer @other, using the connect
+ * state @st built by unix_stream_connect_setup().  Takes and releases
+ * unix_state_lock(@other) itself.
+ *
+ * Returns 0 on success (@st->skb queued to @other, @st->newsk linked to
+ * @sk and @st->peercred consumed), a negative errno on terminal failure,
+ * or a positive value (UNIX_CONNECT_STALE / UNIX_CONNECT_FULL) asking the
+ * caller to re-obtain @other and call again -- because @other was found
+ * dead, or its backlog was full and we slept (updating @st->timeo)
+ * waiting for room.
+ */
+static int unix_stream_connect_commit(struct sock *sk, struct sock *other,
+				      struct unix_connect_state *st)
+{
+	struct sock *newsk = st->newsk;
+	struct sk_buff *skb = st->skb;
+	struct unix_peercred *peercred = &st->peercred;
+	long *timeo = &st->timeo;
+	struct unix_sock *newu, *otheru;
+	unsigned char state;
+	int err;
 
 	unix_state_lock(other);
 
-	/* Apparently VFS overslept socket death. Retry. */
+	/* Apparently VFS overslept socket death; ask the caller to retry. */
 	if (sock_flag(other, SOCK_DEAD)) {
 		unix_state_unlock(other);
-		sock_put(other);
-		goto restart;
+		return UNIX_CONNECT_STALE;
 	}
 
 	if (other->sk_state != TCP_LISTEN ||
@@ -1720,19 +1771,19 @@ restart:
 	}
 
 	if (unix_recvq_full_lockless(other)) {
-		if (!timeo) {
+		if (!*timeo) {
 			err = -EAGAIN;
 			goto out_unlock;
 		}
 
-		timeo = unix_wait_for_peer(other, timeo);
-		sock_put(other);
+		/* unix_wait_for_peer() drops unix_state_lock(other). */
+		*timeo = unix_wait_for_peer(other, *timeo);
 
-		err = sock_intr_errno(timeo);
+		err = sock_intr_errno(*timeo);
 		if (signal_pending(current))
-			goto out_free_skb;
+			return err;
 
-		goto restart;
+		return UNIX_CONNECT_FULL;
 	}
 
 	/* self connect and simultaneous connect are eliminated
@@ -1765,7 +1816,7 @@ restart:
 	newsk->sk_state = TCP_ESTABLISHED;
 	newsk->sk_type = sk->sk_type;
 	newsk->sk_scm_recv_flags = other->sk_scm_recv_flags;
-	init_peercred(newsk, &peercred);
+	init_peercred(newsk, peercred);
 
 	newu = unix_sk(newsk);
 	newu->listener = other;
@@ -1813,20 +1864,118 @@ restart:
 	spin_unlock(&other->sk_receive_queue.lock);
 	unix_state_unlock(other);
 	READ_ONCE(other->sk_data_ready)(other);
-	sock_put(other);
 	return 0;
 
 out_unlock:
 	unix_state_unlock(other);
-	sock_put(other);
-out_free_skb:
-	consume_skb(skb);
-out_free_sk:
-	unix_release_sock(newsk, 0);
-out:
-	drop_peercred(&peercred);
 	return err;
 }
+
+static int unix_stream_connect(struct socket *sock, struct sockaddr_unsized *uaddr,
+			       int addr_len, int flags)
+{
+	struct sockaddr_un *sunaddr = (struct sockaddr_un *)uaddr;
+	struct sock *sk = sock->sk, *other;
+	struct unix_connect_state st = {};
+	struct net *net = sock_net(sk);
+	int err;
+
+	err = unix_validate_addr(sunaddr, addr_len);
+	if (err)
+		return err;
+
+	err = BPF_CGROUP_RUN_PROG_UNIX_CONNECT_LOCK(sk, uaddr, &addr_len);
+	if (err)
+		return err;
+
+	err = unix_stream_connect_setup(sock, flags, &st);
+	if (err)
+		return err;
+
+restart:
+	/* Find the listening sock.  A positive return from
+	 * unix_stream_connect_commit() means "retry": the peer had died,
+	 * or its backlog was full and we slept -- so re-resolve the name.
+	 */
+	other = unix_find_other(net, sunaddr, addr_len, sk->sk_type, flags);
+	if (IS_ERR(other)) {
+		err = PTR_ERR(other);
+		goto out_free;
+	}
+
+	err = unix_stream_connect_commit(sk, other, &st);
+	sock_put(other);
+	switch (err) {
+	case 0:
+		return 0;
+	case UNIX_CONNECT_FULL:
+		goto restart;
+	case UNIX_CONNECT_STALE:
+		/* A full backlog or a dead peer: re-resolve and try again. */
+		goto restart;
+	case INT_MIN ... -1:
+		/* terminal errno, propagate as-is */
+		break;
+	default:
+		/* commit() only returns 0, a retry code, or an errno */
+		WARN_ONCE(1, "unix_stream_connect_commit() returned %d\n", err);
+		err = -EINVAL;
+		break;
+	}
+out_free:
+	unix_stream_connect_cleanup(&st);
+	return err;
+}
+
+/**
+ * kernel_unix_connect_direct - connect a socket to a specific AF_UNIX sock
+ * @other: a held listening sock to connect to (e.g. from
+ *         unix_lookup_bsd_path())
+ * @sock: the connecting socket, created with sock_create_kern()
+ * @flags: connect flags; without O_NONBLOCK a full listen backlog on
+ *         @other is waited on, as for connect(2)
+ *
+ * Connects @sock to @other without any name lookup, address validation
+ * or path-based permission check.  For in-kernel callers that have
+ * already located the target under their own policy.  The caller
+ * retains its reference on @other.
+ */
+int kernel_unix_connect_direct(struct sock *other, struct socket *sock, int flags)
+{
+	struct sock *sk = sock->sk;
+	struct unix_connect_state st = {};
+	int err;
+
+	err = unix_stream_connect_setup(sock, flags, &st);
+	if (err)
+		return err;
+
+restart:
+	sock_hold(other);
+	err = unix_stream_connect_commit(sk, other, &st);
+	sock_put(other);
+	switch (err) {
+	case 0:
+		return 0;
+	case UNIX_CONNECT_FULL:
+		goto restart;
+	case UNIX_CONNECT_STALE:
+		/* The peer is fixed, so a dead one cannot be re-found. */
+		err = -ECONNREFUSED;
+		break;
+	case INT_MIN ... -1:
+		/* terminal errno, propagate as-is */
+		break;
+	default:
+		/* commit() only returns 0, a retry code, or an errno */
+		WARN_ONCE(1, "unix_stream_connect_commit() returned %d\n", err);
+		err = -EINVAL;
+		break;
+	}
+	unix_stream_connect_cleanup(&st);
+	return err;
+}
+EXPORT_SYMBOL_GPL(kernel_unix_connect_direct);
 
 static int unix_socketpair(struct socket *socka, struct socket *sockb)
 {
