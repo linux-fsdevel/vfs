@@ -1957,10 +1957,10 @@ static inline int security_mptcp_add_subflow(struct sock *sk, struct sock *ssk)
 
 #if defined(CONFIG_SECURITY_NETWORK) && defined(CONFIG_SECURITY_PATH)
 
-int security_unix_find(const struct path *path, struct sock *other, int flags);
+int security_unix_find(const struct path *path, struct sock *other);
 
 #else /* CONFIG_SECURITY_NETWORK && CONFIG_SECURITY_PATH */
-static inline int security_unix_find(const struct path *path, struct sock *other, int flags)
+static inline int security_unix_find(const struct path *path, struct sock *other)
 {
 	return 0;
 }

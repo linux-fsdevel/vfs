@@ -1641,8 +1641,7 @@ static void unmask_scoped_access(const struct landlock_ruleset *const client,
 	}
 }
 
-static int hook_unix_find(const struct path *const path, struct sock *other,
-			  int flags)
+static int hook_unix_find(const struct path *const path, struct sock *other)
 {
 	const struct landlock_ruleset *dom_other;
 	const struct landlock_cred_security *subject;
@@ -1651,10 +1650,6 @@ static int hook_unix_find(const struct path *const path, struct sock *other,
 	static const struct access_masks fs_resolve_unix = {
 		.fs = LANDLOCK_ACCESS_FS_RESOLVE_UNIX,
 	};
-
-	/* Lookup for the purpose of saving coredumps is OK. */
-	if (unlikely(flags & SOCK_COREDUMP))
-		return 0;
 
 	subject = landlock_get_applicable_subject(current_cred(),
 						  fs_resolve_unix, NULL);

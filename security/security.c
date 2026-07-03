@@ -4839,16 +4839,15 @@ int security_mptcp_add_subflow(struct sock *sk, struct sock *ssk)
  * security_unix_find() - Check if a named AF_UNIX socket can connect
  * @path: path of the socket being connected to
  * @other: peer sock
- * @flags: flags associated with the socket
  *
  * This hook is called to check permissions before connecting to a named
  * AF_UNIX socket. The caller does not hold any locks on @other.
  *
  * Return: Returns 0 if permission is granted.
  */
-int security_unix_find(const struct path *path, struct sock *other, int flags)
+int security_unix_find(const struct path *path, struct sock *other)
 {
-	return call_int_hook(unix_find, path, other, flags);
+	return call_int_hook(unix_find, path, other);
 }
 EXPORT_SYMBOL(security_unix_find);
 
