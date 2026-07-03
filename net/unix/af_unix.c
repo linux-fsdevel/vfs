@@ -1185,10 +1185,43 @@ static int unix_release(struct socket *sock)
 	return 0;
 }
 
+/**
+ * unix_lookup_bsd_path - find the AF_UNIX socket bound at a resolved path
+ * @path: a path the caller has already resolved under its own policy
+ * @type: required socket type (SOCK_STREAM/SOCK_SEQPACKET/SOCK_DGRAM)
+ *
+ * Unlike the connect(2) lookup, this performs no path resolution and no
+ * DAC or LSM check of its own: the caller is responsible for having
+ * resolved @path with whatever policy is appropriate.  Used by kernel
+ * callers (e.g. coredump-to-socket) that must resolve the path under
+ * their own root and credentials rather than the current task's.
+ *
+ * Returns a held sock, or an ERR_PTR.
+ */
+struct sock *unix_lookup_bsd_path(const struct path *path, int type)
+{
+	struct inode *inode = d_backing_inode(path->dentry);
+	struct sock *sk;
+
+	if (!S_ISSOCK(inode->i_mode))
+		return ERR_PTR(-ECONNREFUSED);
+
+	sk = unix_find_socket_byinode(inode);
+	if (!sk)
+		return ERR_PTR(-ECONNREFUSED);
+
+	if (sk->sk_type != type) {
+		sock_put(sk);
+		return ERR_PTR(-EPROTOTYPE);
+	}
+
+	return sk;
+}
+EXPORT_SYMBOL_GPL(unix_lookup_bsd_path);
+
 static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
 				  int type, int flags)
 {
-	struct inode *inode;
 	struct path path;
 	struct sock *sk;
 	int err;
@@ -1219,18 +1252,11 @@ static struct sock *unix_find_bsd(struct sockaddr_un *sunaddr, int addr_len,
 			goto path_put;
 	}
 
-	err = -ECONNREFUSED;
-	inode = d_backing_inode(path.dentry);
-	if (!S_ISSOCK(inode->i_mode))
+	sk = unix_lookup_bsd_path(&path, type);
+	if (IS_ERR(sk)) {
+		err = PTR_ERR(sk);
 		goto path_put;
-
-	sk = unix_find_socket_byinode(inode);
-	if (!sk)
-		goto path_put;
-
-	err = -EPROTOTYPE;
-	if (sk->sk_type != type)
-		goto sock_put;
+	}
 
 	err = security_unix_find(&path, sk, flags);
 	if (err)
