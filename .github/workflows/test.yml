@@ -1,0 +1,46 @@
+name: fsdevel-selftests
+
+on:
+  pull_request:
+  push:
+    branches:
+      - '**'
+      - '!vfs.all'
+      - '!vfs.base'
+      - '!vfs.fixes'
+      - '!pw/**'
+
+concurrency:
+  group: ci-test-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  set-matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/scripts
+
+      - name: Generate matrix
+        id: matrix
+        run: python3 .github/scripts/matrix.py
+
+  build-and-test:
+    name: ${{ matrix.arch }} (${{ matrix.toolchain }}, ${{ matrix.distro }}, ${{ matrix.test_suite }})
+    if: ${{ github.repository != 'linux-fsdevel/vfs-test' }}
+    needs: set-matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.set-matrix.outputs.matrix) }}
+    uses: ./.github/workflows/kernel-build-test.yml
+    with:
+      arch: ${{ matrix.arch }}
+      toolchain: ${{ matrix.toolchain }}
+      distro: ${{ matrix.distro }}
+      runs_on: ${{ matrix.runs_on }}
+      timeout_minutes: ${{ matrix.timeout_minutes }}
+      test_suite: ${{ matrix.test_suite }}
