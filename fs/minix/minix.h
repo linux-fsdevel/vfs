@@ -67,39 +67,44 @@ struct minix_sb_info {
 void __minix_error_inode(struct inode *inode, const char *function,
 			 unsigned int line, const char *fmt, ...);
 
-struct inode *minix_iget(struct super_block *, unsigned long);
-struct minix_inode *minix_V1_raw_inode(struct super_block *, ino_t, struct buffer_head **);
-struct minix2_inode *minix_V2_raw_inode(struct super_block *, ino_t, struct buffer_head **);
-struct inode *minix_new_inode(const struct inode *, umode_t);
+struct inode *minix_iget(struct super_block *sb, unsigned long ino);
+struct minix_inode *minix_V1_raw_inode(struct super_block *sb, ino_t ino,
+		struct buffer_head **bh);
+struct minix2_inode *minix_V2_raw_inode(struct super_block *sb, ino_t ino,
+		struct buffer_head **bh);
+struct inode *minix_new_inode(const struct inode *dir, umode_t mode);
 void minix_free_inode(struct inode *inode);
 unsigned long minix_count_free_inodes(struct super_block *sb);
 int minix_new_block(struct inode *inode);
 void minix_free_block(struct inode *inode, unsigned long block);
 unsigned long minix_count_free_blocks(struct super_block *sb);
-int minix_getattr(struct mnt_idmap *, const struct path *,
-		struct kstat *, u32, unsigned int);
+int minix_getattr(struct mnt_idmap *idmap, const struct path *path,
+		struct kstat *stat, u32 request_mask, unsigned int flags);
 int minix_prepare_chunk(struct folio *folio, loff_t pos, unsigned len);
 struct mapping_metadata_bhs *minix_get_metadata_bhs(struct inode *inode);
 int minix_fsync(struct file *file, loff_t start, loff_t end, int datasync);
 
-extern void V1_minix_truncate(struct inode *);
-extern void V2_minix_truncate(struct inode *);
-extern void minix_truncate(struct inode *);
-extern void minix_set_inode(struct inode *, dev_t);
-extern int V1_minix_get_block(struct inode *, long, struct buffer_head *, int);
-extern int V2_minix_get_block(struct inode *, long, struct buffer_head *, int);
-extern unsigned V1_minix_blocks(loff_t, struct super_block *);
-extern unsigned V2_minix_blocks(loff_t, struct super_block *);
+void V1_minix_truncate(struct inode *inode);
+void V2_minix_truncate(struct inode *inode);
+void minix_truncate(struct inode *inode);
+void minix_set_inode(struct inode *inode, dev_t rdev);
+int V1_minix_get_block(struct inode *inode, long block,
+		struct buffer_head *bh, int create);
+int V2_minix_get_block(struct inode *inode, long block,
+		struct buffer_head *bh, int create);
+unsigned int V1_minix_blocks(loff_t size, struct super_block *sb);
+unsigned int V2_minix_blocks(loff_t size, struct super_block *sb);
 
-struct minix_dir_entry *minix_find_entry(struct dentry *, struct folio **);
-int minix_add_link(struct dentry*, struct inode*);
-int minix_delete_entry(struct minix_dir_entry *, struct folio *);
-int minix_make_empty(struct inode*, struct inode*);
-int minix_empty_dir(struct inode*);
+struct minix_dir_entry *minix_find_entry(struct dentry *dentry,
+	struct folio **foliop);
+int minix_add_link(struct dentry *dentry, struct inode *inode);
+int minix_delete_entry(struct minix_dir_entry *de, struct folio *folio);
+int minix_make_empty(struct inode *inode, struct inode *dir);
+int minix_empty_dir(struct inode *inode);
 int minix_set_link(struct minix_dir_entry *de, struct folio *folio,
 		struct inode *inode);
-struct minix_dir_entry *minix_dotdot(struct inode*, struct folio **);
-ino_t minix_inode_by_name(struct dentry*);
+struct minix_dir_entry *minix_dotdot(struct inode *dir, struct folio **foliop);
+ino_t minix_inode_by_name(struct dentry *dentry);
 
 extern const struct inode_operations minix_file_inode_operations;
 extern const struct inode_operations minix_dir_inode_operations;
@@ -116,7 +121,8 @@ static inline struct minix_inode_info *minix_i(struct inode *inode)
 	return container_of(inode, struct minix_inode_info, vfs_inode);
 }
 
-static inline unsigned minix_blocks_needed(unsigned bits, unsigned blocksize)
+static inline unsigned int minix_blocks_needed(unsigned int bits,
+		unsigned int blocksize)
 {
 	return DIV_ROUND_UP(bits, blocksize * 8);
 }
@@ -150,7 +156,8 @@ static inline unsigned minix_blocks_needed(unsigned bits, unsigned blocksize)
  * big-endian 16bit indexed bitmaps
  */
 
-static inline int minix_find_first_zero_bit(const void *vaddr, unsigned size)
+static inline int minix_find_first_zero_bit(const void *vaddr,
+		unsigned int size)
 {
 	const unsigned short *p = vaddr, *addr = vaddr;
 	unsigned short num;
