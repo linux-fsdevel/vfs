@@ -258,25 +258,25 @@ static int minix_fill_super(struct super_block *s, struct fs_context *fc)
 	s->s_magic = ms->s_magic;
 	if (s->s_magic == MINIX_SUPER_MAGIC) {
 		sbi->s_version = MINIX_V1;
-		sbi->s_dirsize = 16;
-		sbi->s_namelen = 14;
+		sbi->s_dirsize = MINIX_V1_DIRSIZE;
+		sbi->s_namelen = MINIX_V1_NAMELEN;
 		s->s_max_links = MINIX_LINK_MAX;
 	} else if (s->s_magic == MINIX_SUPER_MAGIC2) {
 		sbi->s_version = MINIX_V1;
-		sbi->s_dirsize = 32;
-		sbi->s_namelen = 30;
+		sbi->s_dirsize = MINIX_V1_DIRSIZE2;
+		sbi->s_namelen = MINIX_V1_NAMELEN2;
 		s->s_max_links = MINIX_LINK_MAX;
 	} else if (s->s_magic == MINIX2_SUPER_MAGIC) {
 		sbi->s_version = MINIX_V2;
 		sbi->s_nzones = ms->s_zones;
-		sbi->s_dirsize = 16;
-		sbi->s_namelen = 14;
+		sbi->s_dirsize = MINIX_V2_DIRSIZE;
+		sbi->s_namelen = MINIX_V2_NAMELEN;
 		s->s_max_links = MINIX2_LINK_MAX;
 	} else if (s->s_magic == MINIX2_SUPER_MAGIC2) {
 		sbi->s_version = MINIX_V2;
 		sbi->s_nzones = ms->s_zones;
-		sbi->s_dirsize = 32;
-		sbi->s_namelen = 30;
+		sbi->s_dirsize = MINIX_V2_DIRSIZE2;
+		sbi->s_namelen = MINIX_V2_NAMELEN2;
 		s->s_max_links = MINIX2_LINK_MAX;
 	} else if ( *(__u16 *)(bh->b_data + 24) == MINIX3_SUPER_MAGIC) {
 		m3s = (struct minix3_super_block *) bh->b_data;
@@ -288,8 +288,8 @@ static int minix_fill_super(struct super_block *s, struct fs_context *fc)
 		s->s_maxbytes = m3s->s_max_size;
 		sbi->s_ninodes = m3s->s_ninodes;
 		sbi->s_nzones = m3s->s_zones;
-		sbi->s_dirsize = 64;
-		sbi->s_namelen = 60;
+		sbi->s_dirsize = MINIX_V3_DIRSIZE;
+		sbi->s_namelen = MINIX_V3_NAMELEN;
 		sbi->s_version = MINIX_V3;
 		sbi->s_mount_state = MINIX_VALID_FS;
 		if (!sb_set_blocksize(s, m3s->s_blocksize))

@@ -11,6 +11,27 @@
 #define MINIX_V2		0x0002		/* minix V2 fs */
 #define MINIX_V3		0x0003		/* minix V3 fs */
 
+/* Define version and sub-version specific values for dirsize and name length.
+ * These are not as clear-cut as having different values for versions 1, 2, and
+ * 3, unfortunately, but rather there two possible values for each for versions
+ * 1 and 2 and one possible set of values for version 3.
+ *
+ * These have separate defines for each subversion value for versions 1 and 2,
+ * though; even though they duplicate each other, it will be more clear to have
+ * them separate than trying to come up with a name that encompasses both
+ * versions yet not be totally confusing.
+ */
+#define MINIX_V1_DIRSIZE	16
+#define MINIX_V1_NAMELEN	14
+#define MINIX_V1_DIRSIZE2	32
+#define MINIX_V1_NAMELEN2	30
+#define MINIX_V2_DIRSIZE	16
+#define MINIX_V2_NAMELEN	14
+#define MINIX_V2_DIRSIZE2	32
+#define MINIX_V2_NAMELEN2	30
+#define MINIX_V3_DIRSIZE	64
+#define MINIX_V3_NAMELEN	60
+
 /*
  * minix fs inode data in memory
  */
