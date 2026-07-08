@@ -295,6 +295,9 @@ static bool capable_wrt_mount(struct mount *mount)
 	 */
 	guard(rcu)();
 	mnt_ns = READ_ONCE(mount->mnt_ns);
+	if (!mnt_ns)
+		return false;
+
 	return ns_capable(mnt_ns->user_ns, CAP_SYS_ADMIN);
 }
 
