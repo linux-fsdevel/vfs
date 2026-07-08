@@ -6,6 +6,8 @@
  */
 #include "xattr.h"
 #include <linux/compat.h>
+#include <linux/file.h>
+#include <uapi/linux/erofs.h>
 #include <trace/events/erofs.h>
 
 static int erofs_fill_symlink(struct inode *inode, void *bptr, unsigned int ofs)
@@ -356,6 +358,27 @@ static int erofs_ioctl_get_volume_label(struct inode *inode, void __user *arg)
 	return ret ? -EFAULT : 0;
 }
 
+static int erofs_ioctl_get_source_fd(struct file *filp)
+{
+	struct erofs_sb_info *sbi = EROFS_I_SB(file_inode(filp));
+	struct file *f;
+	int fd;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+
+	if (!erofs_is_fileio_mode(sbi))
+		return -ENOENT;
+
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0)
+		return fd;
+
+	f = get_file(sbi->dif0.file);
+	fd_install(fd, f);
+	return fd;
+}
+
 long erofs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 {
 	struct inode *inode = file_inode(filp);
@@ -364,6 +387,8 @@ long erofs_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
 	switch (cmd) {
 	case FS_IOC_GETFSLABEL:
 		return erofs_ioctl_get_volume_label(inode, argp);
+	case EROFS_IOC_GET_SOURCE_FD:
+		return erofs_ioctl_get_source_fd(filp);
 	default:
 		return -ENOTTY;
 	}
