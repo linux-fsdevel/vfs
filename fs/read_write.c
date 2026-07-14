@@ -1472,6 +1472,41 @@ COMPAT_SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd,
 }
 #endif
 
+enum {
+	FS_COPY_SPLICE = 0,
+	FS_COPY_SAME_SB = 1,
+	FS_COPY_SAME_FS = 2,
+	FS_COPY_CROSS_FS = 3,
+	FS_COPY_FROM_OTHER_FS = 4,
+	FS_COPY_TO_OTHER_FS = 5,
+};
+
+/*
+ * Check if src and dst file are on the same filesystem.
+ * nfs and cifs define several different file_system_type structures
+ * and several different sets of file_operations, but they all end up
+ * using the same ->copy_file_range() function pointer.
+ * COPY_FILE_SPLICE is an opt-in flag for cross-fs copy (e.g. from nfsd),
+ * so do not compare src<->dst filesystems in this case.
+ */
+static int copy_file_fs_cmp(struct file *f_in, struct file *f_out,
+			    unsigned int flags)
+{
+	if (flags & COPY_FILE_SPLICE)
+		return FS_COPY_SPLICE;
+	else if (f_out->f_op->copy_file_range &&
+		 f_out->f_op->copy_file_range == f_in->f_op->copy_file_range)
+		return FS_COPY_SAME_FS;
+	else if (f_out->f_op->fop_flags & FOP_CROSS_FS_COPY)
+		return FS_COPY_FROM_OTHER_FS;
+	else if (f_in->f_op->fop_flags & FOP_CROSS_FS_COPY)
+		return FS_COPY_TO_OTHER_FS;
+	else if (file_inode(f_in)->i_sb == file_inode(f_out)->i_sb)
+		return FS_COPY_SAME_SB;
+	else
+		return FS_COPY_CROSS_FS;
+}
+
 /*
  * Performs necessary checks before doing a file copy
  *
@@ -1481,7 +1516,7 @@ COMPAT_SYSCALL_DEFINE4(sendfile64, int, out_fd, int, in_fd,
  */
 static int generic_copy_file_checks(struct file *file_in, loff_t pos_in,
 				    struct file *file_out, loff_t pos_out,
-				    size_t *req_count, unsigned int flags)
+				    size_t *req_count, int fscmp)
 {
 	struct inode *inode_in = file_inode(file_in);
 	struct inode *inode_out = file_inode(file_out);
@@ -1497,19 +1532,18 @@ static int generic_copy_file_checks(struct file *file_in, loff_t pos_in,
 	 * We allow some filesystems to handle cross sb copy, but passing
 	 * a file of the wrong filesystem type to filesystem driver can result
 	 * in an attempt to dereference the wrong type of ->private_data, so
-	 * avoid doing that until we really have a good reason.
-	 *
-	 * nfs and cifs define several different file_system_type structures
-	 * and several different sets of file_operations, but they all end up
-	 * using the same ->copy_file_range() function pointer.
+	 * avoid doing that unless at least one of the filesystems declares
+	 * cross fstype copy support with the FOP_CROSS_FS_COPY flag.
 	 */
-	if (flags & COPY_FILE_SPLICE) {
+	if (fscmp == FS_COPY_SPLICE) {
 		/* cross sb splice is allowed */
+	} else if (fscmp == FS_COPY_FROM_OTHER_FS ||
+		   fscmp == FS_COPY_TO_OTHER_FS) {
+		/* Copy from/to other fs is allowed */
 	} else if (file_out->f_op->copy_file_range) {
-		if (file_in->f_op->copy_file_range !=
-		    file_out->f_op->copy_file_range)
+		if (fscmp != FS_COPY_SAME_FS)
 			return -EXDEV;
-	} else if (file_inode(file_in)->i_sb != file_inode(file_out)->i_sb) {
+	} else if (fscmp != FS_COPY_SAME_SB) {
 		return -EXDEV;
 	}
 
@@ -1556,13 +1590,15 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 {
 	ssize_t ret;
 	bool splice = flags & COPY_FILE_SPLICE;
-	bool samesb = file_inode(file_in)->i_sb == file_inode(file_out)->i_sb;
+	int fscmp = copy_file_fs_cmp(file_in, file_out, flags);
+	const struct file_operations *fop =
+		(fscmp == FS_COPY_TO_OTHER_FS) ? file_in->f_op : file_out->f_op;
 
 	if (flags & ~COPY_FILE_SPLICE)
 		return -EINVAL;
 
 	ret = generic_copy_file_checks(file_in, pos_in, file_out, pos_out, &len,
-				       flags);
+				       fscmp);
 	if (unlikely(ret))
 		return ret;
 
@@ -1581,32 +1617,45 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	 * Make sure return value doesn't overflow in 32bit compat mode.  Also
 	 * limit the size for all cases except when calling ->copy_file_range().
 	 */
-	if (splice || !file_out->f_op->copy_file_range || in_compat_syscall())
+	if (splice || !fop->copy_file_range || in_compat_syscall())
 		len = min_t(size_t, MAX_RW_COUNT, len);
 
-	file_start_write(file_out);
+	if (fscmp != FS_COPY_TO_OTHER_FS)
+		file_start_write(file_out);
 
 	/*
 	 * Cloning is supported by more file systems, so we implement copy on
 	 * same sb using clone, but for filesystems where both clone and copy
 	 * are supported (e.g. nfs,cifs), we only call the copy method.
+	 * Cross-fs copy (FROM_OTHER_FS / TO_OTHER_FS) is handled by whichever
+	 * side declared FOP_CROSS_FS_COPY.
 	 */
-	if (!splice && file_out->f_op->copy_file_range) {
-		ret = file_out->f_op->copy_file_range(file_in, pos_in,
-						      file_out, pos_out,
-						      len, flags);
-	} else if (!splice && file_in->f_op->remap_file_range && samesb) {
-		ret = file_in->f_op->remap_file_range(file_in, pos_in,
-				file_out, pos_out, len, REMAP_FILE_CAN_SHORTEN);
-		/* fallback to splice */
+	switch (fscmp) {
+	case FS_COPY_SPLICE:
+		break;
+	case FS_COPY_SAME_FS:
+	case FS_COPY_TO_OTHER_FS:
+	case FS_COPY_FROM_OTHER_FS:
+		ret = fop->copy_file_range(file_in, pos_in, file_out, pos_out,
+					   len, flags);
+		break;
+	case FS_COPY_SAME_SB:
+		if (fop->remap_file_range)
+			ret = fop->remap_file_range(file_in, pos_in,
+						    file_out, pos_out, len,
+						    REMAP_FILE_CAN_SHORTEN);
+		/* Fallback to splice for same sb copy for backward compat */
 		if (ret <= 0)
 			splice = true;
-	} else if (samesb) {
-		/* Fallback to splice for same sb copy for backward compat */
-		splice = true;
+		break;
+	case FS_COPY_CROSS_FS:
+		/* This should have failed in generic_copy_file_checks() */
+		ret = -EXDEV;
+		break;
 	}
 
-	file_end_write(file_out);
+	if (fscmp != FS_COPY_TO_OTHER_FS)
+		file_end_write(file_out);
 
 	if (!splice)
 		goto done;
@@ -1633,14 +1682,20 @@ ssize_t vfs_copy_file_range(struct file *file_in, loff_t pos_in,
 	ret = do_splice_direct(file_in, &pos_in, file_out, &pos_out, len, 0);
 done:
 	if (ret > 0) {
-		fsnotify_access(file_in);
-		add_rchar(current, ret);
-		fsnotify_modify(file_out);
-		add_wchar(current, ret);
+		if (fscmp != FS_COPY_FROM_OTHER_FS) {
+			fsnotify_access(file_in);
+			add_rchar(current, ret);
+		}
+		if (fscmp != FS_COPY_TO_OTHER_FS) {
+			fsnotify_modify(file_out);
+			add_wchar(current, ret);
+		}
 	}
 
-	inc_syscr(current);
-	inc_syscw(current);
+	if (fscmp != FS_COPY_FROM_OTHER_FS)
+		inc_syscr(current);
+	if (fscmp != FS_COPY_TO_OTHER_FS)
+		inc_syscw(current);
 
 	return ret;
 }

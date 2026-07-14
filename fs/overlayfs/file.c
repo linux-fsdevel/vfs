@@ -528,9 +528,30 @@ static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
 			    struct file *file_out, loff_t pos_out,
 			    loff_t len, unsigned int flags, enum ovl_copyop op)
 {
+	struct inode *inode_in = file_inode(file_in);
 	struct inode *inode_out = file_inode(file_out);
 	struct file *realfile_in, *realfile_out;
 	loff_t ret;
+
+	/*
+	 * Overlayfs may be able to copy to a non overlayfs dst which is on the
+	 * same sb or same fs type as real file_in fs, but we must avoid taking
+	 * the locks on the foreign fs.
+	 */
+	if (unlikely(!is_ovl_fs(inode_out->i_sb))) {
+		if (WARN_ON_ONCE(op != OVL_COPY) ||
+		    WARN_ON_ONCE(!is_ovl_fs(file_inode(file_in)->i_sb)))
+			return -EXDEV;
+
+		realfile_in = ovl_real_file(file_in);
+		if (IS_ERR(realfile_in))
+			return PTR_ERR(realfile_in);
+
+		with_ovl_creds(file_inode(file_in)->i_sb)
+			return vfs_copy_file_range(realfile_in, pos_in,
+						   file_out, pos_out, len,
+						   flags);
+	}
 
 	inode_lock(inode_out);
 	if (op != OVL_DEDUPE) {
@@ -546,12 +567,39 @@ static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
 	if (IS_ERR(realfile_out))
 		goto out_unlock;
 
+	/*
+	 * Overlayfs may be able to copy from a non overlayfs src which is on
+	 * the same sb or same fs type as upper fs.
+	 */
+	if (unlikely(!is_ovl_fs(inode_in->i_sb))) {
+		if (WARN_ON_ONCE(op != OVL_COPY)) {
+			ret = -EXDEV;
+			goto out_unlock;
+		}
+		realfile_in = file_in;
+		goto do_copy;
+	}
+
 	realfile_in = ovl_real_file(file_in);
 	ret = PTR_ERR(realfile_in);
 	if (IS_ERR(realfile_in))
 		goto out_unlock;
 
-	with_ovl_creds(file_inode(file_out)->i_sb) {
+	/*
+	 * For cross-sb copy, vfs_copy_file_range() will verify read access with
+	 * the mounter creds of the dest fs mounter, so we need to explicitly
+	 * verify read access with the source mounter creds.
+	 */
+	if (unlikely(inode_in->i_sb != inode_out->i_sb)) {
+		with_ovl_creds(inode_in->i_sb) {
+			ret = rw_verify_area(READ, realfile_in, &pos_in, len);
+			if (unlikely(ret))
+				goto out_unlock;
+		}
+	}
+
+do_copy:
+	with_ovl_creds(inode_out->i_sb) {
 		switch (op) {
 		case OVL_COPY:
 			ret = vfs_copy_file_range(realfile_in, pos_in,
@@ -646,6 +694,7 @@ const struct file_operations ovl_file_operations = {
 	.splice_read    = ovl_splice_read,
 	.splice_write   = ovl_splice_write,
 
+	.fop_flags		= FOP_CROSS_FS_COPY,
 	.copy_file_range	= ovl_copy_file_range,
 	.remap_file_range	= ovl_remap_file_range,
 	.setlease		= generic_setlease,
