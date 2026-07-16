@@ -1077,10 +1077,9 @@ int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
 
 	fat_truncate_time(dir, NULL, FAT_UPDATE_ATIME | FAT_UPDATE_CMTIME);
 	err = 0;
+	mark_inode_dirty(dir);
 	if (IS_DIRSYNC(dir))
-		err = fat_sync_inode(dir);
-	else
-		mark_inode_dirty(dir);
+		err = sync_inode_metadata(dir, 1);
 
 	return err;
 }
