@@ -122,13 +122,51 @@ __setup("rootflags=", root_data_setup);
 __setup("rootfstype=", fs_names_setup);
 __setup("rootdelay=", root_delay_setup);
 
+/*
+ * rootimage= mounts the actual root filesystem from an image file located
+ * on the filesystem specified by root= instead of using that filesystem
+ * as the root directly.
+ */
+static char * __initdata root_image;
+static int __init root_image_setup(char *str)
+{
+	root_image = str;
+	return 1;
+}
+
+static char * __initdata root_image_fs_names;
+static int __init root_image_fs_names_setup(char *str)
+{
+	root_image_fs_names = str;
+	return 1;
+}
+
+static char * __initdata root_image_mount_data;
+static int __init root_image_data_setup(char *str)
+{
+	root_image_mount_data = str;
+	return 1;
+}
+
+static char * __initdata root_image_srcdir;
+static int __init root_image_srcdir_setup(char *str)
+{
+	root_image_srcdir = str;
+	return 1;
+}
+
+__setup("rootimage=", root_image_setup);
+__setup("rootimagefstype=", root_image_fs_names_setup);
+__setup("rootimageflags=", root_image_data_setup);
+__setup("rootimagesrcdir=", root_image_srcdir_setup);
+
 /* This can return zero length strings. Caller should check */
-static int __init split_fs_names(char *page, size_t size)
+static int __init split_fs_names(char *page, size_t size, char *names)
 {
 	int count = 1;
 	char *p = page;
 
-	strscpy(p, root_fs_names, size);
+	strscpy(p, names, size);
 	while (*p++) {
 		if (p[-1] == ',') {
 			p[-1] = '\0';
@@ -139,8 +177,9 @@ static int __init split_fs_names(char *page, size_t size)
 	return count;
 }
 
-static int __init do_mount_root(const char *name, const char *fs,
-				 const int flags, const void *data)
+static int __init do_mount_root(const char *name, const char *dir,
+				 const char *fs, const int flags,
+				 const void *data)
 {
 	struct super_block *s;
 	char *data_page = NULL;
@@ -154,11 +193,11 @@ static int __init do_mount_root(const char *name, const char *fs,
 		strscpy_pad(data_page, data, PAGE_SIZE);
 	}
 
-	ret = init_mount(name, "/root", fs, flags, data_page);
+	ret = init_mount(name, dir, fs, flags, data_page);
 	if (ret)
 		goto out;
 
-	init_chdir("/root");
+	init_chdir(dir);
 	s = current->fs->pwd.dentry->d_sb;
 	ROOT_DEV = s->s_dev;
 	printk(KERN_INFO
@@ -185,7 +224,7 @@ void __init mount_root_generic(char *name, char *pretty_name, int flags)
 	scnprintf(b, BDEVNAME_SIZE, "unknown-block(%u,%u)",
 		  MAJOR(ROOT_DEV), MINOR(ROOT_DEV));
 	if (root_fs_names)
-		num_fs = split_fs_names(fs_names, PAGE_SIZE);
+		num_fs = split_fs_names(fs_names, PAGE_SIZE, root_fs_names);
 	else
 		num_fs = list_bdev_fs_names(fs_names, PAGE_SIZE);
 retry:
@@ -194,7 +233,7 @@ retry:
 
 		if (!*p)
 			continue;
-		err = do_mount_root(name, p, flags, root_mount_data);
+		err = do_mount_root(name, "/root", p, flags, root_mount_data);
 		switch (err) {
 			case 0:
 				goto out;
@@ -266,7 +305,8 @@ static void __init mount_nfs_root(void)
 	 */
 	timeout = NFSROOT_TIMEOUT_MIN;
 	for (try = 1; ; try++) {
-		if (!do_mount_root(root_dev, "nfs", root_mountflags, root_data))
+		if (!do_mount_root(root_dev, "/root", "nfs", root_mountflags,
+				   root_data))
 			return;
 		if (try > NFSROOT_RETRY_MAX)
 			break;
@@ -303,7 +343,7 @@ static void __init mount_cifs_root(void)
 
 	timeout = CIFSROOT_TIMEOUT_MIN;
 	for (try = 1; ; try++) {
-		if (!do_mount_root(root_dev, "cifs", root_mountflags,
+		if (!do_mount_root(root_dev, "/root", "cifs", root_mountflags,
 				   root_data))
 			return;
 		if (try > CIFSROOT_RETRY_MAX)
@@ -345,7 +385,7 @@ static int __init mount_nodev_root(char *root_device_name)
 	fs_names = kmalloc(PAGE_SIZE, GFP_KERNEL);
 	if (!fs_names)
 		return -EINVAL;
-	num_fs = split_fs_names(fs_names, PAGE_SIZE);
+	num_fs = split_fs_names(fs_names, PAGE_SIZE, root_fs_names);
 
 	for (i = 0, fstype = fs_names; i < num_fs;
 	     i++, fstype += strlen(fstype) + 1) {
@@ -353,8 +393,8 @@ static int __init mount_nodev_root(char *root_device_name)
 			continue;
 		if (!fs_is_nodev(fstype))
 			continue;
-		err = do_mount_root(root_device_name, fstype, root_mountflags,
-				    root_mount_data);
+		err = do_mount_root(root_device_name, "/root", fstype,
+				    root_mountflags, root_mount_data);
 		if (!err)
 			break;
 	}
@@ -400,6 +440,96 @@ void __init mount_root(char *root_device_name)
 		mount_block_root(root_device_name);
 		break;
 	}
+}
+
+/*
+ * Mount the actual root filesystem from the image file rootimage= on the
+ * filesystem that was just mounted from root= (the "carrier"), so that
+ * image-based systems can boot without an initramfs.
+ *
+ * Called with the carrier mounted at /root and the cwd there.  The image
+ * is always mounted read-only; "ro"/"rw"/rootflags= keep applying to the
+ * carrier.  On success the cwd is the image's root, ready for the pivot
+ * in prepare_namespace().  The carrier mount is moved to rootimagesrcdir=
+ * inside the image if set, and detached otherwise; either way the image
+ * mount keeps the carrier superblock pinned.
+ */
+static void __init mount_root_image(void)
+{
+	unsigned long flags = MS_RDONLY | MS_SILENT;
+	char *path, *fs_names, *p;
+	struct file *file;
+	int num_fs, i, err;
+
+	if (root_image[0] != '/')
+		panic("VFS: rootimage= must be an absolute path");
+
+	path = kmalloc(PATH_MAX, GFP_KERNEL);
+	fs_names = kmalloc(PAGE_SIZE, GFP_KERNEL);
+	if (!path || !fs_names)
+		panic("VFS: unable to mount root image: not enough memory");
+
+	if (snprintf(path, PATH_MAX, "/root%s", root_image) >= PATH_MAX)
+		panic("VFS: rootimage= path too long");
+
+	/*
+	 * Nothing that could modify the carrier runs yet, so the image
+	 * cannot change between this open and the mount below.
+	 */
+	file = filp_open(path, O_RDONLY | O_LARGEFILE, 0);
+	if (IS_ERR(file))
+		panic("VFS: unable to open root image %s: error %ld",
+		      root_image, PTR_ERR(file));
+
+	err = init_mkdir("/image", 0700);
+	if (err < 0 && err != -EEXIST)
+		panic("VFS: unable to create /image: error %d", err);
+
+	if (root_image_fs_names)
+		num_fs = split_fs_names(fs_names, PAGE_SIZE,
+					root_image_fs_names);
+	else
+		num_fs = list_bdev_fs_names(fs_names, PAGE_SIZE);
+
+	for (i = 0, p = fs_names; i < num_fs; i++, p += strlen(p) + 1) {
+		if (!*p)
+			continue;
+		err = do_mount_root(path, "/image", p, flags,
+				    root_image_mount_data);
+		switch (err) {
+		case 0:
+			goto mounted;
+		case -EACCES:
+		case -EINVAL:
+		case -ENOTBLK:
+			continue;
+		}
+		panic("VFS: unable to mount root image %s: error %d",
+		      root_image, err);
+	}
+	panic("VFS: no filesystem could mount root image %s", root_image);
+
+mounted:
+	fput(file);
+
+	if (root_image_srcdir) {
+		if (root_image_srcdir[0] != '/')
+			panic("VFS: rootimagesrcdir= must be an absolute path");
+		if (snprintf(path, PATH_MAX, ".%s", root_image_srcdir) >=
+		    PATH_MAX)
+			panic("VFS: rootimagesrcdir= path too long");
+		err = init_mount("/root", path, NULL, MS_MOVE, NULL);
+		if (err)
+			pr_err("VFS: failed to move the root image's carrier filesystem to %s: error %d\n",
+			       root_image_srcdir, err);
+	} else {
+		err = -EINVAL;
+	}
+	if (err)
+		init_umount("/root", MNT_DETACH);
+
+	kfree(path);
+	kfree(fs_names);
 }
 
 /* wait for any asynchronous scanning to complete */
@@ -481,6 +611,8 @@ void __init prepare_namespace(void)
 	if (root_wait)
 		wait_for_root(saved_root_name);
 	mount_root(saved_root_name);
+	if (root_image)
+		mount_root_image();
 	devtmpfs_mount();
 
 	if (init_pivot_root(".", ".")) {
