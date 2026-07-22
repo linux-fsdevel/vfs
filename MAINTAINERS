@@ -10008,6 +10008,7 @@ F:	rust/kernel/sync/poll.rs
 F:	Documentation/driver-api/early-userspace/buffer-format.rst
 F:	init/do_mounts*
 F:	init/*initramfs*
+F:	tools/testing/selftests/filesystems/file_range/
 
 FILESYSTEMS [EXPORTFS]
 M:	Chuck Lever <cel@kernel.org>
