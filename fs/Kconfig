@@ -22,6 +22,16 @@ config FS_IOMAP
 config FS_STACK
 	bool
 
+config FILE_RANGE_KUNIT_TEST
+	bool "KUnit tests for file range routing" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && FS_STACK
+	default KUNIT_ALL_TESTS
+	help
+	  Build tests for copy routing through paired file layers.  The
+	  tests cover method selection, credential domains, resolver reference
+	  ownership, revalidation, prepare failure unwind, and terminal dispatch
+	  behavior.
+
 config BUFFER_HEAD
 	bool
 
