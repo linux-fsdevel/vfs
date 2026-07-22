@@ -1038,6 +1038,7 @@ This describes how the VFS can manipulate an open file.  As of kernel
 	#endif
 		ssize_t (*copy_file_range)(struct file *, loff_t, struct file *,
 				loff_t, size_t, unsigned int);
+		const struct file_range_layer_operations *file_range_layer_ops;
 		loff_t (*remap_file_range)(struct file *file_in, loff_t pos_in,
 					   struct file *file_out, loff_t pos_out,
 					   loff_t len, unsigned int remap_flags);
@@ -1147,6 +1148,122 @@ otherwise noted.
 
 ``copy_file_range``
 	called by the copy_file_range(2) system call.
+
+``file_range_layer_ops``
+	describes how one stackable filesystem layer participates in
+	``copy_file_range`` operations.  ``supported_operations``
+	explicitly selects the operations which may traverse the layer.  A file
+	without this operations table is a terminal endpoint.  Resolution may
+	traverse multiple layers synchronously, and the
+	same ``resolve`` method is used for source and destination endpoints.  The
+	``operation`` argument identifies copy and ``role`` identifies
+	whether the returned backing file will be read or written.
+
+	On success, ``resolve`` must return a referenced, already-open regular file
+	with ``FMODE_BACKING`` set.  The VFS consumes that reference and eventually
+	calls ``fput()``; returning a borrowed pointer or ``NULL`` is invalid.
+	Failures are returned with ``ERR_PTR()``.  A source file must have
+	``FMODE_READ`` and a destination file must have ``FMODE_WRITE``.  Every
+	transition must reduce ``s_stack_depth`` and must not return a file already
+	present in the endpoint chain.
+
+	The backing file must use identity offset mapping: byte offset N in the
+	wrapper denotes byte offset N in the returned file.  Source size and EOF
+	must be coherent at every layer for any range admitted through the
+	interface.  A destination result must be the stable data file which will
+	receive the write; it must not require a later copy-up or substitution.
+
+	``FILE_RANGE_RESOLVE_CACHED`` is a side-effect-free query.  It may
+	inspect already-published state and take a file reference, but it must not
+	perform a lazy lookup or open, do I/O, copy up data, synchronize file flags,
+	change data, metadata, or the namespace, or generate permission or
+	notification events.  It may return ``-EAGAIN`` only when
+	``FILE_RANGE_RESOLVE_MAY_OPEN`` could establish the endpoint.
+
+	``FILE_RANGE_RESOLVE_MAY_OPEN`` is used after the logical files have passed
+	authorization, and copy uses it only for a nonempty request.  It is called
+	without a write freeze or inode lock held.  It may establish
+	transient per-open or cached state, including opening an existing backing
+	object, but must not copy up data or change file data, ``i_size``, the
+	namespace, or persistent metadata.  Backing-file range authorization has not
+	yet run when this method is called.
+
+	The first resolver is called with the caller's credentials.  A nested
+	resolver is called with the pinned ``f_cred`` of its current backing file.
+	The VFS also uses each returned file's ``f_cred`` for that file's backing
+	``rw_verify_area`` or ``remap_verify_area`` check.  Destination execution
+	changes credentials at each edge, so the terminal operation runs with the
+	innermost destination file's ``f_cred``; a request with no destination
+	translation runs with the caller's credentials.  Implementations must
+	therefore return files whose open credentials remain valid for these
+	operations.
+
+	After all logical and backing checks, the VFS probes each destination edge
+	again and requires it to return the same file.  The retained source file is
+	the selected backing object; source resolution is not repeated because it
+	would not prevent a later source copy-up.  For a destination layer,
+	``prepare_write`` is then called with write access to the wrapper filesystem
+	held.  It must revalidate that ``next`` is still the exact writable data
+	file before making changes.  It may lock the wrapper inode, synchronize
+	attributes, and remove privileges.  On failure it must release all state it
+	acquired.  On success it must retain the state needed by ``finish_write``.
+
+	Destination layers are prepared from the outermost wrapper towards the
+	terminal file.  ``finish_write`` is called exactly once for every successful
+	``prepare_write``, including when a deeper prepare or the terminal operation
+	fails.  It receives the original output position and that result, and must
+	synchronize wrapper state and release the retained lock or other state.
+	Layers are finished from the inside out.
+
+	The VFS, rather than a wrapper range method, owns this recursion so each
+	wrapper destination write freeze is acquired once and no destination freeze
+	is recursively reacquired.  A recursive call from a source wrapper could
+	otherwise reacquire the terminal destination freeze while the outer operation
+	already holds it.
+
+	Paired dispatch uses the layer operations-table pointer as the protocol
+	identity, even when the files have different complete ``file_operations``
+	tables.  Layers form a pair only when they share the same non-NULL
+	``file_range_layer_ops`` table, that table supports the requested operation,
+	and no authoritative method exists at that layer.  An identical non-NULL
+	``copy_file_range`` method is authoritative.  Matching layers are resolved
+	in pairs.  Each endpoint is
+	resolved through the table installed on its own current file; the VFS never
+	selects one endpoint's layer table to operate on the other.  Sharing a table
+	is therefore an explicit declaration that it is valid for both file types.
+
+	Before applying the terminal compatibility rules, the VFS preserves the
+	first identical non-NULL ``copy_file_range`` method reachable through paired
+	layers.  An identical method on the original logical files is selected before
+	resolution, so translation cannot bypass an existing filesystem or server
+	copy protocol.  The destination method is called only after its pointer is
+	known to equal the source method pointer.  This preserves the longstanding
+	safety rule which prevents a filesystem method from interpreting unrelated
+	``private_data``.  Paired resolution stops at the selected method, so an
+	operation or error below it cannot preempt that protocol.  The method owns
+	any deeper endpoints, including endpoints without a resolver, and must not
+	recurse into the public VFS operation.  The VFS rejects aliases in the
+	resolved prefix.  Two opens of the same logical inode retain the ordinary
+	non-overlap rule even when their per-open chains differ.
+
+	Installing the layer table on file operations without a copy method asserts
+	that paired resolution preserves the layer's copy semantics, including
+	ordinary terminal dispatch on every backing pair it may return.  A
+	non-paired logical route which is otherwise compatible executes on the
+	original files; an incompatible non-paired route remains rejected.
+
+	The VFS owns access and modify notification for the whole operation,
+	including translated files, and owns task I/O accounting for copy.  After
+	execution, hidden notifications are emitted terminal-first and paired source
+	then destination
+	towards the logical files.  If terminal splice attempts to read a translated
+	source, the optional ``sync_source_access`` callback is called inner-to-outer
+	for each nonterminal source, even if a later write fails.  Destination locks,
+	write freezes, and credential scopes have unwound, so it runs with the
+	caller's credentials.  It may synchronize source access state but must not
+	emit fsnotify events or task accounting.  Task I/O is accounted once.
+	Resolver and transaction callbacks must not recursively invoke the public
+	copy operation or duplicate those notifications or accounting updates.
 
 ``remap_file_range``
 	called by the ioctl(2) system call for FICLONERANGE and FICLONE

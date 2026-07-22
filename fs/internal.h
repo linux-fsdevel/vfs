@@ -7,6 +7,7 @@
 
 struct super_block;
 struct file_system_type;
+struct file;
 struct iomap;
 struct iomap_ops;
 struct linux_binprm;
@@ -18,6 +19,11 @@ struct pipe_inode_info;
 struct iov_iter;
 struct mnt_idmap;
 struct ns_common;
+
+#ifdef CONFIG_KUNIT
+int copy_file_range_verify_backing_area(int read_write, struct file *file,
+					const loff_t *ppos, size_t count);
+#endif
 
 /*
  * block/bdev.c

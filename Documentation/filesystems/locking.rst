@@ -485,6 +485,7 @@ prototypes::
 	unsigned (*mmap_capabilities)(struct file *);
 	ssize_t (*copy_file_range)(struct file *, loff_t, struct file *,
 			loff_t, size_t, unsigned int);
+	const struct file_range_layer_operations *file_range_layer_ops;
 	loff_t (*remap_file_range)(struct file *file_in, loff_t pos_in,
 			struct file *file_out, loff_t pos_out,
 			loff_t len, unsigned int remap_flags);
@@ -540,6 +541,24 @@ blocking changes through write(2) and similar operations inode->i_rwsem can be
 used. To block changes to file contents via a memory mapping during the
 operation, the filesystem must take mapping->invalidate_lock to coordinate
 with ->page_mkwrite.
+
+The VFS calls ``file_range_layer_ops->resolve`` without a write freeze or
+inode lock held.  ``FILE_RANGE_RESOLVE_CACHED`` may not do I/O, open a
+file, or mutate state; ``FILE_RANGE_RESOLVE_MAY_OPEN`` may establish
+transient open or cache state, but may not copy up data or mutate persistent
+state.  Both modes return a referenced file which the VFS will put.
+
+All logical and backing permission checks complete before destination write
+freezes and inode locks are taken, because permission hooks may mutate an
+endpoint.  At each destination layer the VFS freezes the wrapper, calls
+``prepare_write``, and recurses.  It then calls ``finish_write`` and unfreezes
+the wrapper.  ``prepare_write`` must revalidate its exact backing file.  If it
+succeeds, ``finish_write`` will be called exactly once, even if a nested
+prepare or the terminal operation fails.  It receives the original output
+position and the result from the remainder of the destination chain.  Source
+layers are never prepared or write-frozen by this interface.  The optional
+``sync_source_access`` callback is called without a source inode lock or write
+freeze after the destination transaction has unwound.
 
 dquot_operations
 ================

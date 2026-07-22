@@ -12,6 +12,36 @@
 #include <linux/uio.h>
 #include <linux/fs.h>
 
+enum file_range_operation {
+	FILE_RANGE_OPERATION_COPY,
+};
+
+enum file_range_role {
+	FILE_RANGE_SOURCE,
+	FILE_RANGE_DESTINATION,
+};
+
+enum file_range_resolve_mode {
+	FILE_RANGE_RESOLVE_CACHED,
+	FILE_RANGE_RESOLVE_MAY_OPEN,
+};
+
+/* Files with the same table may form a paired layer for a supported operation. */
+struct file_range_layer_operations {
+	unsigned long supported_operations;
+	struct file *(*resolve)(struct file *file,
+				enum file_range_operation operation,
+				enum file_range_role role,
+				enum file_range_resolve_mode mode);
+	int (*prepare_write)(struct file *file, struct file *next,
+			     enum file_range_operation operation);
+	void (*finish_write)(struct file *file, struct file *next,
+			     enum file_range_operation operation,
+			     loff_t pos_out, s64 ret);
+	/* Synchronize source state after a backing splice attempt. */
+	void (*sync_source_access)(struct file *file);
+};
+
 struct backing_file_ctx {
 	const struct cred *cred;
 	void (*accessed)(struct file *file);
