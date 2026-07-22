@@ -195,6 +195,27 @@ static struct file *ovl_real_file(const struct file *file)
 	return ovl_real_file_path(file, &realpath);
 }
 
+static struct file *ovl_cached_real_file(const struct file *file)
+{
+	struct ovl_file *of = file->private_data;
+	struct inode *realinode = ovl_inode_realdata(file_inode(file));
+	struct file *realfile;
+
+	if (!realinode)
+		return NULL;
+
+	realfile = of->realfile;
+	if (file_inode(realfile) != realinode) {
+		realfile = READ_ONCE(of->upperfile);
+		if (!realfile || file_inode(realfile) != realinode)
+			return NULL;
+	}
+	if ((file->f_flags ^ realfile->f_flags) & ~OVL_OPEN_FLAGS)
+		return NULL;
+
+	return realfile;
+}
+
 static int ovl_open(struct inode *inode, struct file *file)
 {
 	struct dentry *dentry = file_dentry(file);
@@ -518,101 +539,128 @@ static int ovl_fadvise(struct file *file, loff_t offset, loff_t len, int advice)
 		return vfs_fadvise(realfile, offset, len, advice);
 }
 
-enum ovl_copyop {
-	OVL_COPY,
-	OVL_CLONE,
-	OVL_DEDUPE,
-};
-
-static loff_t ovl_copyfile(struct file *file_in, loff_t pos_in,
-			    struct file *file_out, loff_t pos_out,
-			    loff_t len, unsigned int flags, enum ovl_copyop op)
+static struct file *
+ovl_file_range_resolve(struct file *file,
+		       enum file_range_operation operation,
+		       enum file_range_role role,
+		       enum file_range_resolve_mode mode)
 {
-	struct inode *inode_out = file_inode(file_out);
-	struct file *realfile_in, *realfile_out;
-	loff_t ret;
+	struct inode *inode = file_inode(file);
+	struct file *realfile;
 
-	inode_lock(inode_out);
-	if (op != OVL_DEDUPE) {
-		/* Update mode */
-		ovl_copyattr(inode_out);
-		ret = file_remove_privs(file_out);
-		if (ret)
-			goto out_unlock;
+	if (mode == FILE_RANGE_RESOLVE_CACHED) {
+		realfile = ovl_cached_real_file(file);
+		if (!realfile)
+			return ERR_PTR(-EAGAIN);
+	} else {
+		realfile = ovl_real_file(file);
+		if (IS_ERR(realfile))
+			return realfile;
 	}
 
-	realfile_out = ovl_real_file(file_out);
-	ret = PTR_ERR(realfile_out);
-	if (IS_ERR(realfile_out))
+	if (role == FILE_RANGE_DESTINATION &&
+	    (!ovl_has_upperdata(inode) ||
+	     file_inode(realfile) != ovl_inode_upper(inode)))
+		return ERR_PTR(-EXDEV);
+
+	return get_file(realfile);
+}
+
+static int ovl_file_range_prepare_write(struct file *file, struct file *next,
+					enum file_range_operation operation)
+{
+	struct inode *inode = file_inode(file);
+	int ret;
+
+	/* Recheck the stable per-open target without nesting backing locks. */
+	inode_lock(inode);
+	if (ovl_cached_real_file(file) != next || !ovl_has_upperdata(inode) ||
+	    file_inode(next) != ovl_inode_upper(inode)) {
+		ret = -EXDEV;
 		goto out_unlock;
-
-	realfile_in = ovl_real_file(file_in);
-	ret = PTR_ERR(realfile_in);
-	if (IS_ERR(realfile_in))
-		goto out_unlock;
-
-	with_ovl_creds(file_inode(file_out)->i_sb) {
-		switch (op) {
-		case OVL_COPY:
-			ret = vfs_copy_file_range(realfile_in, pos_in,
-						  realfile_out, pos_out, len, flags);
-			break;
-
-		case OVL_CLONE:
-			ret = vfs_clone_file_range(realfile_in, pos_in,
-						   realfile_out, pos_out, len, flags);
-			break;
-
-		case OVL_DEDUPE:
-			ret = vfs_dedupe_file_range_one(realfile_in, pos_in,
-							realfile_out, pos_out, len,
-							flags);
-			break;
-		}
 	}
 
-	/* Update size */
-	ovl_file_modified(file_out);
+	ovl_copyattr(inode);
+	ret = file_remove_privs(file);
+	if (ret)
+		goto out_unlock;
+	inode_unlock(inode);
+	return 0;
 
 out_unlock:
-	inode_unlock(inode_out);
-
+	inode_unlock(inode);
 	return ret;
 }
 
-static ssize_t ovl_copy_file_range(struct file *file_in, loff_t pos_in,
-				   struct file *file_out, loff_t pos_out,
-				   size_t len, unsigned int flags)
+static void ovl_file_range_finish_write(struct file *file, struct file *next,
+					enum file_range_operation operation,
+					loff_t pos_out, s64 ret)
 {
-	return ovl_copyfile(file_in, pos_in, file_out, pos_out, len, flags,
-			    OVL_COPY);
+	inode_lock(file_inode(file));
+	ovl_file_modified(file);
+	inode_unlock(file_inode(file));
 }
+
+static const struct file_range_layer_operations ovl_file_range_layer_ops = {
+	.supported_operations = BIT(FILE_RANGE_OPERATION_COPY),
+	.resolve	= ovl_file_range_resolve,
+	.prepare_write	= ovl_file_range_prepare_write,
+	.finish_write	= ovl_file_range_finish_write,
+	.sync_source_access = ovl_file_accessed,
+};
 
 static loff_t ovl_remap_file_range(struct file *file_in, loff_t pos_in,
 				   struct file *file_out, loff_t pos_out,
 				   loff_t len, unsigned int remap_flags)
 {
-	enum ovl_copyop op;
+	struct inode *inode_out = file_inode(file_out);
+	struct file *realfile_in, *realfile_out;
+	loff_t ret;
 
 	if (remap_flags & ~(REMAP_FILE_DEDUP | REMAP_FILE_ADVISORY))
 		return -EINVAL;
-
-	if (remap_flags & REMAP_FILE_DEDUP)
-		op = OVL_DEDUPE;
-	else
-		op = OVL_CLONE;
 
 	/*
 	 * Don't copy up because of a dedupe request, this wouldn't make sense
 	 * most of the time (data would be duplicated instead of deduplicated).
 	 */
-	if (op == OVL_DEDUPE &&
+	if ((remap_flags & REMAP_FILE_DEDUP) &&
 	    (!ovl_inode_upper(file_inode(file_in)) ||
-	     !ovl_inode_upper(file_inode(file_out))))
+	     !ovl_inode_upper(inode_out)))
 		return -EPERM;
 
-	return ovl_copyfile(file_in, pos_in, file_out, pos_out, len,
-			    remap_flags, op);
+	guard(rwsem_write)(&inode_out->i_rwsem);
+	if (!(remap_flags & REMAP_FILE_DEDUP)) {
+		/* Update mode */
+		ovl_copyattr(inode_out);
+		ret = file_remove_privs(file_out);
+		if (ret)
+			return ret;
+	}
+
+	realfile_out = ovl_real_file(file_out);
+	if (IS_ERR(realfile_out))
+		return PTR_ERR(realfile_out);
+
+	realfile_in = ovl_real_file(file_in);
+	if (IS_ERR(realfile_in))
+		return PTR_ERR(realfile_in);
+
+	with_ovl_creds(file_inode(file_out)->i_sb) {
+		if (remap_flags & REMAP_FILE_DEDUP)
+			ret = vfs_dedupe_file_range_one(realfile_in, pos_in,
+							realfile_out, pos_out,
+							len, remap_flags);
+		else
+			ret = vfs_clone_file_range(realfile_in, pos_in,
+						   realfile_out, pos_out, len,
+						   remap_flags);
+	}
+
+	/* Update size */
+	ovl_file_modified(file_out);
+
+	return ret;
 }
 
 static int ovl_flush(struct file *file, fl_owner_t id)
@@ -646,7 +694,7 @@ const struct file_operations ovl_file_operations = {
 	.splice_read    = ovl_splice_read,
 	.splice_write   = ovl_splice_write,
 
-	.copy_file_range	= ovl_copy_file_range,
+	.file_range_layer_ops	= &ovl_file_range_layer_ops,
 	.remap_file_range	= ovl_remap_file_range,
 	.setlease		= generic_setlease,
 };
