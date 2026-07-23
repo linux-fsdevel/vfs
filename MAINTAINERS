@@ -9996,6 +9996,7 @@ L:	linux-fsdevel@vger.kernel.org
 S:	Maintained
 T:	git https://git.kernel.org/pub/scm/linux/kernel/git/vfs/vfs.git
 F:	fs/*
+F:	fs/tests/file_range_kunit.c
 F:	include/linux/fs.h
 F:	include/linux/fs_types.h
 F:	include/uapi/linux/fs.h
@@ -10007,6 +10008,7 @@ F:	rust/kernel/sync/poll.rs
 F:	Documentation/driver-api/early-userspace/buffer-format.rst
 F:	init/do_mounts*
 F:	init/*initramfs*
+F:	tools/testing/selftests/filesystems/file_range/
 
 FILESYSTEMS [EXPORTFS]
 M:	Chuck Lever <cel@kernel.org>

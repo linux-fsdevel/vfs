@@ -7,7 +7,7 @@
 # 
 
 
-obj-y :=	open.o read_write.o file_table.o super.o \
+obj-y :=	open.o read_write.o file_range.o file_table.o super.o \
 		char_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
 		ioctl.o readdir.o select.o dcache.o inode.o \
 		attr.o bad_inode.o file.o filesystems.o namespace.o \
@@ -19,6 +19,7 @@ obj-y :=	open.o read_write.o file_table.o super.o \
 		file_attr.o fserror.o nullfs.o
 
 obj-$(CONFIG_BUFFER_HEAD)	+= buffer.o mpage.o
+obj-$(CONFIG_FILE_RANGE_KUNIT_TEST) += tests/file_range_kunit.o
 obj-$(CONFIG_PROC_FS)		+= proc_namespace.o
 obj-$(CONFIG_LEGACY_DIRECT_IO)	+= direct-io.o
 obj-y				+= notify/
