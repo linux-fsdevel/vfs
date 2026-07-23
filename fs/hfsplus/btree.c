@@ -12,6 +12,7 @@
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/log2.h>
+#include <linux/limits.h>
 
 #include "hfsplus_fs.h"
 #include "hfsplus_raw.h"
@@ -168,6 +169,8 @@ static struct page *hfs_bmap_get_map_page(struct hfs_bnode *node,
 	}
 
 	ctx->len = hfs_brec_lenoff(node, rec_idx, &off16);
+	if (ctx->len == U16_MAX)
+		return ERR_PTR(-EINVAL);
 	if (!ctx->len)
 		return ERR_PTR(-ENOENT);
 
@@ -622,6 +625,10 @@ void hfs_bmap_free(struct hfs_bnode *node)
 	if (IS_ERR(node))
 		return;
 	len = hfs_brec_lenoff(node, 2, &off);
+	if (!hfs_brec_len_valid(len)) {
+		hfs_bnode_put(node);
+		return;
+	}
 	while (nidx >= len * 8) {
 		u32 i;
 
@@ -648,6 +655,10 @@ void hfs_bmap_free(struct hfs_bnode *node)
 			return;
 		}
 		len = hfs_brec_lenoff(node, 0, &off);
+		if (!hfs_brec_len_valid(len)) {
+			hfs_bnode_put(node);
+			return;
+		}
 	}
 
 	res = hfs_bmap_clear_bit(node, nidx);

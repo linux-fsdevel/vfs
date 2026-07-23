@@ -16,6 +16,7 @@
 #include <linux/buffer_head.h>
 #include <linux/blkdev.h>
 #include <linux/fs_context.h>
+#include <linux/limits.h>
 #include "hfsplus_raw.h"
 
 /* Runtime config options */
@@ -585,6 +586,84 @@ bool is_bnode_offset_valid(struct hfs_bnode *node, u32 off)
 	}
 
 	return is_valid;
+}
+
+static inline
+bool hfs_bnode_num_recs_valid(struct hfs_bnode *node)
+{
+	u32 node_size;
+	u32 table_size;
+	u32 area_size;
+	u32 rec_size = sizeof(__be16);
+	u32 desc_size = sizeof(struct hfs_bnode_desc);
+
+	if (!node || !node->tree)
+		return false;
+
+	node_size = node->tree->node_size;
+	if (node_size < desc_size)
+		return false;
+
+	area_size = node_size - desc_size;
+	table_size = ((u32)node->num_recs + 1) * rec_size;
+
+	return table_size <= area_size;
+}
+
+static inline
+bool hfs_brec_record_valid(struct hfs_bnode *node, int record)
+{
+	if (!hfs_bnode_num_recs_valid(node))
+		return false;
+	if (record < 0)
+		return false;
+
+	return record < node->num_recs;
+}
+
+static inline
+bool hfs_brec_offpair_valid(struct hfs_bnode *node, u16 off, u16 next_off,
+							u16 rec_off)
+{
+	u32 table_size;
+	u32 table_start;
+	u32 rec_size = sizeof(__be16);
+	u32 desc_size = sizeof(struct hfs_bnode_desc);
+
+	if (!node || !node->tree)
+		return false;
+
+	if (off < desc_size || (off & 1))
+		return false;
+
+	if (next_off <= off ||
+	    next_off > node->tree->node_size ||
+	    next_off > rec_off ||
+	    (next_off & 1))
+		return false;
+
+	table_size = ((u32)node->num_recs + 1) * rec_size;
+	table_start = node->tree->node_size - table_size;
+	if (next_off > table_start)
+		return false;
+
+	return true;
+}
+
+static inline
+bool hfs_brec_len_valid(u16 len)
+{
+	return len != U16_MAX && len != 0;
+}
+
+static inline
+void hfs_find_result_init(struct hfs_find_data *fd)
+{
+	fd->record = -1;
+	fd->keyoffset = -1;
+	fd->keylength = -1;
+	fd->entryoffset = -1;
+	fd->entrylength = -1;
 }
 
 static inline
