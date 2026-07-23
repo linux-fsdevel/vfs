@@ -105,18 +105,14 @@ static int __exfat_iomap_begin(struct inode *inode, loff_t offset, loff_t length
 		 * marks the exact boundary between valid data and
 		 * holes (or unwritten space).
 		 *
-		 * When IOMAP_REPORT is set (used by lseek(SEEK_HOLE)
-		 * and SEEK_DATA), we return IOMAP_HOLE. This allows
-		 * iomap_seek_hole_iter() to directly return the
-		 * precise byte position.
-		 *
-		 * For normal I/O paths (without IOMAP_REPORT) we
-		 * return IOMAP_UNWRITTEN so the write path can
-		 * distinguish it from a real hole.
+		 * Allocated space beyond valid_size is not a hole. Report it
+		 * as IOMAP_UNWRITTEN so iomap consumers that need physical
+		 * extent identity, such as swap activation, can still use it.
+		 * The iomap seek helpers already handle unwritten extents
+		 * appropriately for SEEK_HOLE and SEEK_DATA.
 		 */
 		if (offset >= ei->valid_size) {
-			iomap->type = flags & IOMAP_REPORT ?
-				IOMAP_HOLE : IOMAP_UNWRITTEN;
+			iomap->type = IOMAP_UNWRITTEN;
 		} else if (offset + iomap->length > ei->valid_size) {
 			if (flags & IOMAP_REPORT) {
 				/*
