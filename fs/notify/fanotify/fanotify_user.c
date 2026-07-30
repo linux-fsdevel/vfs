@@ -1316,18 +1316,20 @@ static bool fanotify_mark_update_flags(struct fsnotify_mark *fsn_mark,
 static bool fanotify_mark_add_to_mask(struct fsnotify_mark *fsn_mark,
 				      __u32 mask, unsigned int fan_flags)
 {
+	__u32 old_mask, new_mask;
 	bool recalc;
 
 	spin_lock(&fsn_mark->lock);
+	old_mask = fsnotify_calc_mask(fsn_mark);
 	if (!(fan_flags & FANOTIFY_MARK_IGNORE_BITS))
 		fsn_mark->mask |= mask;
 	else
 		fsn_mark->ignore_mask |= mask;
 
-	recalc = fsnotify_calc_mask(fsn_mark) &
-		~fsnotify_conn_mask(fsn_mark->connector);
-
-	recalc |= fanotify_mark_update_flags(fsn_mark, fan_flags);
+	recalc = fanotify_mark_update_flags(fsn_mark, fan_flags);
+	new_mask = fsnotify_calc_mask(fsn_mark);
+	recalc |= old_mask != new_mask;
+	recalc |= new_mask & ~fsnotify_conn_mask(fsn_mark->connector);
 	spin_unlock(&fsn_mark->lock);
 
 	return recalc;
