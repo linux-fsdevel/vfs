@@ -517,6 +517,17 @@ const struct address_space_operations ufs_aops = {
 	.bmap = ufs_bmap
 };
 
+// on-disk criterion is i_size < fs_maxsymlinklen, not i_blocks
+static bool ufs_is_fast_symlink(struct inode *inode)
+{
+	struct ufs_sb_private_info *uspi = UFS_SB(inode->i_sb)->s_uspi;
+
+	if (uspi->s_maxsymlinklen)
+		return inode->i_size < uspi->s_maxsymlinklen;
+
+	return inode->i_blocks == 0;
+}
+
 static void ufs_set_inode_ops(struct inode *inode)
 {
 	if (S_ISREG(inode->i_mode)) {
@@ -528,7 +539,7 @@ static void ufs_set_inode_ops(struct inode *inode)
 		inode->i_fop = &ufs_dir_operations;
 		inode->i_mapping->a_ops = &ufs_aops;
 	} else if (S_ISLNK(inode->i_mode)) {
-		if (!inode->i_blocks) {
+		if (ufs_is_fast_symlink(inode)) {
 			inode->i_link = (char *)UFS_I(inode)->i_u1.i_symlink;
 			inode->i_op = &simple_symlink_inode_operations;
 		} else {
@@ -578,13 +589,13 @@ static int ufs1_read_inode(struct inode *inode, struct ufs_inode *ufs_inode)
 	ufsi->i_oeftflag = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_oeftflag);
 
 
-	if (S_ISCHR(mode) || S_ISBLK(mode) || inode->i_blocks) {
-		memcpy(ufsi->i_u1.i_data, &ufs_inode->ui_u2.ui_addr,
-		       sizeof(ufs_inode->ui_u2.ui_addr));
-	} else {
+	if (S_ISLNK(mode) && ufs_is_fast_symlink(inode)) {
 		memcpy(ufsi->i_u1.i_symlink, ufs_inode->ui_u2.ui_symlink,
 		       sizeof(ufs_inode->ui_u2.ui_symlink) - 1);
 		ufsi->i_u1.i_symlink[sizeof(ufs_inode->ui_u2.ui_symlink) - 1] = 0;
+	} else {
+		memcpy(ufsi->i_u1.i_data, &ufs_inode->ui_u2.ui_addr,
+		       sizeof(ufs_inode->ui_u2.ui_addr));
 	}
 	return 0;
 }
@@ -625,13 +636,13 @@ static int ufs2_read_inode(struct inode *inode, struct ufs2_inode *ufs2_inode)
 	ufsi->i_oeftflag = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_oeftflag);
 	*/
 
-	if (S_ISCHR(mode) || S_ISBLK(mode) || inode->i_blocks) {
-		memcpy(ufsi->i_u1.u2_i_data, &ufs2_inode->ui_u2.ui_addr,
-		       sizeof(ufs2_inode->ui_u2.ui_addr));
-	} else {
+	if (S_ISLNK(mode) && ufs_is_fast_symlink(inode)) {
 		memcpy(ufsi->i_u1.i_symlink, ufs2_inode->ui_u2.ui_symlink,
 		       sizeof(ufs2_inode->ui_u2.ui_symlink) - 1);
 		ufsi->i_u1.i_symlink[sizeof(ufs2_inode->ui_u2.ui_symlink) - 1] = 0;
+	} else {
+		memcpy(ufsi->i_u1.u2_i_data, &ufs2_inode->ui_u2.ui_addr,
+		       sizeof(ufs2_inode->ui_u2.ui_addr));
 	}
 	return 0;
 }
@@ -731,13 +742,12 @@ static void ufs1_update_inode(struct inode *inode, struct ufs_inode *ufs_inode)
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
 		/* ufs_inode->ui_u2.ui_addr.ui_db[0] = cpu_to_fs32(sb, inode->i_rdev); */
 		ufs_inode->ui_u2.ui_addr.ui_db[0] = ufsi->i_u1.i_data[0];
-	} else if (inode->i_blocks) {
-		memcpy(&ufs_inode->ui_u2.ui_addr, ufsi->i_u1.i_data,
-		       sizeof(ufs_inode->ui_u2.ui_addr));
-	}
-	else {
+	} else if (S_ISLNK(inode->i_mode) && ufs_is_fast_symlink(inode)) {
 		memcpy(&ufs_inode->ui_u2.ui_symlink, ufsi->i_u1.i_symlink,
 		       sizeof(ufs_inode->ui_u2.ui_symlink));
+	} else {
+		memcpy(&ufs_inode->ui_u2.ui_addr, ufsi->i_u1.i_data,
+		       sizeof(ufs_inode->ui_u2.ui_addr));
 	}
 
 	if (!inode->i_nlink)
@@ -774,13 +784,13 @@ static void ufs2_update_inode(struct inode *inode, struct ufs2_inode *ufs_inode)
 	if (S_ISCHR(inode->i_mode) || S_ISBLK(inode->i_mode)) {
 		/* ufs_inode->ui_u2.ui_addr.ui_db[0] = cpu_to_fs32(sb, inode->i_rdev); */
 		ufs_inode->ui_u2.ui_addr.ui_db[0] = ufsi->i_u1.u2_i_data[0];
-	} else if (inode->i_blocks) {
-		memcpy(&ufs_inode->ui_u2.ui_addr, ufsi->i_u1.u2_i_data,
-		       sizeof(ufs_inode->ui_u2.ui_addr));
-	} else {
+	} else if (S_ISLNK(inode->i_mode) && ufs_is_fast_symlink(inode)) {
 		memcpy(&ufs_inode->ui_u2.ui_symlink, ufsi->i_u1.i_symlink,
 		       sizeof(ufs_inode->ui_u2.ui_symlink));
- 	}
+	} else {
+		memcpy(&ufs_inode->ui_u2.ui_addr, ufsi->i_u1.u2_i_data,
+		       sizeof(ufs_inode->ui_u2.ui_addr));
+	}
 
 	if (!inode->i_nlink)
 		memset (ufs_inode, 0, sizeof(struct ufs2_inode));
@@ -839,14 +849,18 @@ int ufs_sync_inode (struct inode *inode)
 void ufs_evict_inode(struct inode * inode)
 {
 	int want_delete = 0;
+	bool fast_symlink;
 
 	if (!inode->i_nlink && !is_bad_inode(inode))
 		want_delete = 1;
 
+	// must be evaluated before i_size is cleared below
+	fast_symlink = S_ISLNK(inode->i_mode) && ufs_is_fast_symlink(inode);
+
 	truncate_inode_pages_final(&inode->i_data);
 	if (want_delete) {
 		inode->i_size = 0;
-		if (inode->i_blocks &&
+		if (inode->i_blocks && !fast_symlink &&
 		    (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 		     S_ISLNK(inode->i_mode)))
 			ufs_truncate_blocks(inode);
