@@ -517,6 +517,22 @@ const struct address_space_operations ufs_aops = {
 	.bmap = ufs_bmap
 };
 
+// only 44BSD and UFS2 store BSD chflags in ui_flags
+static void ufs_set_inode_flags(struct inode *inode)
+{
+	unsigned int flavour = UFS_SB(inode->i_sb)->s_flavour;
+	unsigned int flags = UFS_I(inode)->i_flags;
+
+	if (flavour != UFS_MOUNT_UFSTYPE_44BSD &&
+	    flavour != UFS_MOUNT_UFSTYPE_UFS2)
+		return;
+
+	if (flags & (UFS_UF_IMMUTABLE | UFS_SF_IMMUTABLE))
+		inode->i_flags |= S_IMMUTABLE;
+	if (flags & (UFS_UF_APPEND | UFS_SF_APPEND))
+		inode->i_flags |= S_APPEND;
+}
+
 // on-disk criterion is i_size < fs_maxsymlinklen, not i_blocks
 static bool ufs_is_fast_symlink(struct inode *inode)
 {
@@ -704,6 +720,7 @@ struct inode *ufs_iget(struct super_block *sb, unsigned long ino)
 	ufsi->i_dir_start_lookup = 0;
 	ufsi->i_osync = 0;
 
+	ufs_set_inode_flags(inode);
 	ufs_set_inode_ops(inode);
 
 	UFSD("EXIT\n");
