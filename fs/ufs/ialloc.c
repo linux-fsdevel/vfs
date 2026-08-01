@@ -294,6 +294,8 @@ cg_found:
 	inode->i_generation = 0;
 	simple_inode_init_ts(inode);
 	ufsi->i_flags = UFS_I(dir)->i_flags;
+	ufsi->i_extsize = 0;
+	memset(ufsi->i_extb, 0, sizeof(ufsi->i_extb));
 	ufsi->i_lastfrag = 0;
 	ufsi->i_shadow = 0;
 	ufsi->i_osync = 0;

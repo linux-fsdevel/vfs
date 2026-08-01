@@ -40,6 +40,8 @@ struct ufs_inode_info {
 		__fs64	u2_i_data[15];
 	} i_u1;
 	__u32	i_flags;
+	__u32	i_extsize;		/* UFS2 external attribute area size */
+	__u64	i_extb[UFS_NXADDR];	/* UFS2 external attribute blocks */
 	__u32	i_shadow;
 	__u32	i_unused1;
 	__u32	i_unused2;

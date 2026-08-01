@@ -585,6 +585,8 @@ static int ufs1_read_inode(struct inode *inode, struct ufs_inode *ufs_inode)
 	inode->i_blocks = fs32_to_cpu(sb, ufs_inode->ui_blocks);
 	inode->i_generation = fs32_to_cpu(sb, ufs_inode->ui_gen);
 	ufsi->i_flags = fs32_to_cpu(sb, ufs_inode->ui_flags);
+	ufsi->i_extsize = 0;
+	memset(ufsi->i_extb, 0, sizeof(ufsi->i_extb));
 	ufsi->i_shadow = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_shadow);
 	ufsi->i_oeftflag = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_oeftflag);
 
@@ -605,6 +607,7 @@ static int ufs2_read_inode(struct inode *inode, struct ufs2_inode *ufs2_inode)
 	struct ufs_inode_info *ufsi = UFS_I(inode);
 	struct super_block *sb = inode->i_sb;
 	umode_t mode;
+	unsigned int i;
 
 	UFSD("Reading ufs2 inode, ino %llu\n", inode->i_ino);
 	/*
@@ -631,6 +634,9 @@ static int ufs2_read_inode(struct inode *inode, struct ufs2_inode *ufs2_inode)
 	inode->i_blocks = fs64_to_cpu(sb, ufs2_inode->ui_blocks);
 	inode->i_generation = fs32_to_cpu(sb, ufs2_inode->ui_gen);
 	ufsi->i_flags = fs32_to_cpu(sb, ufs2_inode->ui_flags);
+	ufsi->i_extsize = fs32_to_cpu(sb, ufs2_inode->ui_extsize);
+	for (i = 0; i < UFS_NXADDR; i++)
+		ufsi->i_extb[i] = fs64_to_cpu(sb, ufs2_inode->ui_extb[i]);
 	/*
 	ufsi->i_shadow = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_shadow);
 	ufsi->i_oeftflag = fs32_to_cpu(sb, ufs_inode->ui_u3.ui_sun.ui_oeftflag);
@@ -846,6 +852,54 @@ int ufs_sync_inode (struct inode *inode)
 	return ufs_update_inode (inode, 1);
 }
 
+/*
+ * UFS2 keeps extended attributes in up to UFS_NXADDR blocks of their own.
+ * They live outside the block tree of the file but are counted in di_blocks.
+ * Linux does not implement extended attributes, but it still has to release
+ * those blocks when the inode goes away: ufs_update_inode() clears the whole
+ * on-disk inode, taking di_extb[] with it, so nothing would ever free them.
+ */
+static void ufs_free_ext_blocks(struct inode *inode)
+{
+	struct super_block *sb = inode->i_sb;
+	struct ufs_sb_private_info *uspi = UFS_SB(sb)->s_uspi;
+	struct ufs_inode_info *ufsi = UFS_I(inode);
+	u64 size = ufsi->i_extsize;
+	unsigned int i;
+
+	if ((UFS_SB(sb)->s_flags & UFS_TYPE_MASK) != UFS_TYPE_UFS2 || !size)
+		return;
+
+	if (size > ((u64)UFS_NXADDR << uspi->s_bshift)) {
+		// leaking is better than freeing something we cannot locate
+		ufs_warning(sb, __func__,
+			    "inode %llu: bad external attribute size %llu\n",
+			    inode->i_ino, size);
+		return;
+	}
+
+	for (i = 0; i < UFS_NXADDR; i++) {
+		u64 off = (u64)i << uspi->s_bshift;
+		u64 block = ufsi->i_extb[i];
+		unsigned int frags;
+
+		if (!block || size <= off)
+			continue;
+
+		if (size - off >= uspi->s_bsize)
+			frags = uspi->s_fpb;
+		else
+			frags = (size - off + uspi->s_fsize - 1) >> uspi->s_fshift;
+
+		ufsi->i_extb[i] = 0;
+		if (frags == uspi->s_fpb)
+			ufs_free_blocks(inode, block, frags);
+		else
+			ufs_free_fragments(inode, block, frags);
+	}
+	ufsi->i_extsize = 0;
+}
+
 void ufs_evict_inode(struct inode * inode)
 {
 	int want_delete = 0;
@@ -864,6 +918,7 @@ void ufs_evict_inode(struct inode * inode)
 		    (S_ISREG(inode->i_mode) || S_ISDIR(inode->i_mode) ||
 		     S_ISLNK(inode->i_mode)))
 			ufs_truncate_blocks(inode);
+		ufs_free_ext_blocks(inode);
 		ufs_update_inode(inode, inode_needs_sync(inode));
 	}
 
