@@ -799,6 +799,11 @@ static bool ufs_features_allow_write(struct super_block *sb)
 			return false;
 		}
 	}
+	if ((fsflags & UFS_FS_METACKHASH) &&
+	    fs32_to_cpu(sb, usb3->fs_un2.fs_44.fs_metackhash)) {
+		pr_err("%s(): fs uses metadata check hashes\n", __func__);
+		return false;
+	}
 	return true;
 }
 
