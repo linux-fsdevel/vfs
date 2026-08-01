@@ -27655,6 +27655,12 @@ L:	linux-input@vger.kernel.org
 S:	Maintained
 F:	drivers/hid/hid-udraw-ps3.c
 
+UFS FILESYSTEM
+M:	Ali Ahmet Memis <ali@iusegentoo.com>
+L:	linux-fsdevel@vger.kernel.org
+S:	Maintained
+F:	fs/ufs/
+
 UHID USERSPACE HID IO DRIVER
 M:	David Rheinsberg <david@readahead.eu>
 L:	linux-input@vger.kernel.org
