@@ -767,6 +767,34 @@ static bool ufs_state_allows_write(struct super_block *sb)
 	}
 }
 
+/*
+ * Refuse to write to a filesystem using features we do not implement.
+ * Only UFS2 is examined: the 32 bit fs_flags lives in the modern part of
+ * the superblock, which older layouts leave as scratch space.
+ */
+static bool ufs_features_allow_write(struct super_block *sb)
+{
+	struct ufs_sb_private_info *uspi = UFS_SB(sb)->s_uspi;
+	struct ufs_super_block_third *usb3 = ubh_get_usb_third(uspi);
+	u32 fsflags;
+
+	if (uspi->fs_magic != UFS2_MAGIC)
+		return true;
+
+	fsflags = fs32_to_cpu(sb, usb3->fs_un2.fs_44.fs_flags);
+
+	if (fsflags & UFS_FS_NEEDSFSCK) {
+		pr_err("%s(): fs is marked as needing fsck\n", __func__);
+		return false;
+	}
+	if (fsflags & (UFS_FS_SUJ | UFS_FS_GJOURNAL)) {
+		pr_err("%s(): journalled fs, journal replay is not supported\n",
+		       __func__);
+		return false;
+	}
+	return true;
+}
+
 static int ufs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct ufs_fs_context *ctx = fc->fs_private;
@@ -1103,7 +1131,7 @@ magic_found:
 	 * Check, if file system was correctly unmounted.
 	 * If not, make it read only.
 	 */
-	if (!ufs_state_allows_write(sb))
+	if (!ufs_state_allows_write(sb) || !ufs_features_allow_write(sb))
 		sb->s_flags |= SB_RDONLY;
 
 	/*
@@ -1310,7 +1338,8 @@ static int ufs_reconfigure(struct fs_context *fc)
 			mutex_unlock(&UFS_SB(sb)->s_lock);
 			return -EINVAL;
 		}
-		if (!ufs_state_allows_write(sb)) {
+		if (!ufs_state_allows_write(sb) ||
+		    !ufs_features_allow_write(sb)) {
 			mutex_unlock(&UFS_SB(sb)->s_lock);
 			return -EROFS;
 		}
