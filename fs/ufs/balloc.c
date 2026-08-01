@@ -241,7 +241,7 @@ static void ufs_change_blocknr(struct inode *inode, sector_t beg,
 	const unsigned mask = blks_per_page - 1;
 	struct address_space * const mapping = inode->i_mapping;
 	pgoff_t index, cur_index, last_index;
-	unsigned pos, j, lblock;
+	unsigned int pos, j, lblock, first;
 	sector_t end, i;
 	struct buffer_head *head, *bh;
 
@@ -272,8 +272,8 @@ static void ufs_change_blocknr(struct inode *inode, sector_t beg,
 
 		head = folio_buffers(folio);
 		bh = head;
-		pos = i & mask;
-		for (j = 0; j < pos; ++j)
+		first = i & mask;
+		for (j = 0; j < first; ++j)
 			bh = bh->b_this_page;
 
 		if (unlikely(index == last_index))
@@ -284,7 +284,7 @@ static void ufs_change_blocknr(struct inode *inode, sector_t beg,
 		do {
 			if (j >= lblock)
 				break;
-			pos = (i - beg) + j;
+			pos = (i - beg) + (j - first);
 
 			if (!buffer_mapped(bh))
 					map_bh(bh, inode->i_sb, oldb + pos);
