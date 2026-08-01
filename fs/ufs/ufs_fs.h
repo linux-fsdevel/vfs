@@ -154,6 +154,26 @@ typedef __u16 __bitwise __fs16;
 #define UFS_FSLOG     ((__s8)0xfd)	/* logging fs */
 #define UFS_FSFIX     ((__s8)0xfc)	/* being repaired while mounted */
 
+/* maximum number of snapshots recorded in fs_snapinum */
+#define UFS_FSMAXSNAP 20
+
+/*
+ * Values for the 32 bit fs_flags of the modern (4.4BSD derived) superblock.
+ * Not to be confused with the historic 8 bit fs_old_flags.
+ */
+#define UFS_FS_UNCLEAN		0x00000001
+#define UFS_FS_DOSOFTDEP	0x00000002
+#define UFS_FS_NEEDSFSCK	0x00000004
+#define UFS_FS_SUJ		0x00000008
+#define UFS_FS_ACLS		0x00000010
+#define UFS_FS_MULTILABEL	0x00000020
+#define UFS_FS_GJOURNAL		0x00000040
+#define UFS_FS_FLAGS_UPDATED	0x00000080
+#define UFS_FS_NFS4ACLS		0x00000100
+#define UFS_FS_METACKHASH	0x00000200
+#define UFS_FS_TRIM		0x00000400
+#define UFS_FS_INDEXDIRS	0x01000000
+
 /* From here to next blank line, s_flags for ufs_sb_info */
 /* directory entry encoding */
 #define UFS_DE_MASK		0x00000010	/* mask for the following */
@@ -865,7 +885,7 @@ struct ufs_super_block_first {
 	__s8	fs_fmod;
 	__s8	fs_clean;
 	__s8	fs_ronly;
-	__s8	fs_flags;
+	__s8	fs_old_flags;
 	__s8	fs_fsmnt[UFS_MAXMNTLEN - 212];
 
 };
@@ -937,7 +957,16 @@ struct ufs_super_block_third {
 			__fs32	fs_qfmask[2];	/* ~usb_fmask */
 		} fs_sunx86;
 		struct {
-			__fs32	fs_sparecon[50];/* reserved for future constants */
+			__fs32	fs_snapinum[UFS_FSMAXSNAP];/* snapshot inode numbers */
+			__fs32	fs_avgfilesize;	/* expected average file size */
+			__fs32	fs_avgfpdir;	/* expected # of files per directory */
+			__fs32	fs_available_spare;/* old scratch space */
+			__fs32	fs_mtime[2];	/* last mount or fsck time */
+			__fs32	fs_sujfree;	/* SUJ free list */
+			__fs32	fs_sparecon[21];/* reserved for future constants */
+			__fs32	fs_ckhash;	/* if CK_SUPERBLOCK, its check-hash */
+			__fs32	fs_metackhash;	/* metadata check-hash, see CK_ */
+			__fs32	fs_flags;	/* see UFS_FS_* above */
 			__fs32	fs_contigsumsize;/* size of cluster summary array */
 			__fs32	fs_maxsymlinklen;/* max length of an internal symlink */
 			__fs32	fs_inodefmt;	/* format of on-disk inodes */
