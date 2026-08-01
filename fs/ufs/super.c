@@ -713,6 +713,60 @@ static u64 ufs_max_bytes(struct super_block *sb)
 	return res << uspi->s_bshift;
 }
 
+/*
+ * Does the recorded state of the filesystem allow us to write to it?
+ * Called both when mounting and when remounting read-write.
+ */
+static bool ufs_state_allows_write(struct super_block *sb)
+{
+	struct ufs_sb_private_info *uspi = UFS_SB(sb)->s_uspi;
+	struct ufs_super_block_first *usb1 = ubh_get_usb_first(uspi);
+	struct ufs_super_block_third *usb3 = ubh_get_usb_third(uspi);
+
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
+	case UFS_ST_44BSD:
+	case UFS_ST_OLD:
+		break;
+	case UFS_ST_SUN:
+	case UFS_ST_SUNOS:
+	case UFS_ST_SUNx86:
+		if (ufs_get_fs_state(sb, usb1, usb3) !=
+		    UFS_FSOK - fs32_to_cpu(sb, usb1->fs_time)) {
+			pr_err("%s(): fs needs fsck\n", __func__);
+			return false;
+		}
+		break;
+	default:
+		pr_err("%s(): fs needs fsck\n", __func__);
+		return false;
+	}
+
+	switch (usb1->fs_clean) {
+	case UFS_FSCLEAN:
+		UFSD("fs is clean\n");
+		return true;
+	case UFS_FSSTABLE:
+		UFSD("fs is stable\n");
+		return true;
+	case UFS_FSLOG:
+		UFSD("fs is logging fs\n");
+		return true;
+	case UFS_FSOSF1:
+		UFSD("fs is DEC OSF/1\n");
+		return true;
+	case UFS_FSACTIVE:
+		pr_err("%s(): fs is active\n", __func__);
+		return false;
+	case UFS_FSBAD:
+		pr_err("%s(): fs is bad\n", __func__);
+		return false;
+	default:
+		pr_err("%s(): can't grok fs_clean 0x%x\n",
+		       __func__, usb1->fs_clean);
+		return false;
+	}
+}
+
 static int ufs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct ufs_fs_context *ctx = fc->fs_private;
@@ -1049,43 +1103,8 @@ magic_found:
 	 * Check, if file system was correctly unmounted.
 	 * If not, make it read only.
 	 */
-	if (((flags & UFS_ST_MASK) == UFS_ST_44BSD) ||
-	  ((flags & UFS_ST_MASK) == UFS_ST_OLD) ||
-	  (((flags & UFS_ST_MASK) == UFS_ST_SUN ||
-	    (flags & UFS_ST_MASK) == UFS_ST_SUNOS ||
-	  (flags & UFS_ST_MASK) == UFS_ST_SUNx86) &&
-	  (ufs_get_fs_state(sb, usb1, usb3) == (UFS_FSOK - fs32_to_cpu(sb, usb1->fs_time))))) {
-		switch(usb1->fs_clean) {
-		case UFS_FSCLEAN:
-			UFSD("fs is clean\n");
-			break;
-		case UFS_FSSTABLE:
-			UFSD("fs is stable\n");
-			break;
-		case UFS_FSLOG:
-			UFSD("fs is logging fs\n");
-			break;
-		case UFS_FSOSF1:
-			UFSD("fs is DEC OSF/1\n");
-			break;
-		case UFS_FSACTIVE:
-			pr_err("%s(): fs is active\n", __func__);
-			sb->s_flags |= SB_RDONLY;
-			break;
-		case UFS_FSBAD:
-			pr_err("%s(): fs is bad\n", __func__);
-			sb->s_flags |= SB_RDONLY;
-			break;
-		default:
-			pr_err("%s(): can't grok fs_clean 0x%x\n",
-			       __func__, usb1->fs_clean);
-			sb->s_flags |= SB_RDONLY;
-			break;
-		}
-	} else {
-		pr_err("%s(): fs needs fsck\n", __func__);
+	if (!ufs_state_allows_write(sb))
 		sb->s_flags |= SB_RDONLY;
-	}
 
 	/*
 	 * Read ufs_super_block into internal data structures
@@ -1290,6 +1309,10 @@ static int ufs_reconfigure(struct fs_context *fc)
 			pr_err("this ufstype is read-only supported\n");
 			mutex_unlock(&UFS_SB(sb)->s_lock);
 			return -EINVAL;
+		}
+		if (!ufs_state_allows_write(sb)) {
+			mutex_unlock(&UFS_SB(sb)->s_lock);
+			return -EROFS;
 		}
 		if (!ufs_read_cylinder_structures(sb)) {
 			pr_err("failed during remounting\n");
