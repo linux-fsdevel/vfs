@@ -776,6 +776,7 @@ static bool ufs_features_allow_write(struct super_block *sb)
 {
 	struct ufs_sb_private_info *uspi = UFS_SB(sb)->s_uspi;
 	struct ufs_super_block_third *usb3 = ubh_get_usb_third(uspi);
+	unsigned int i;
 	u32 fsflags;
 
 	if (uspi->fs_magic != UFS2_MAGIC)
@@ -791,6 +792,12 @@ static bool ufs_features_allow_write(struct super_block *sb)
 		pr_err("%s(): journalled fs, journal replay is not supported\n",
 		       __func__);
 		return false;
+	}
+	for (i = 0; i < UFS_FSMAXSNAP; i++) {
+		if (usb3->fs_un2.fs_44.fs_snapinum[i]) {
+			pr_err("%s(): fs has active snapshots\n", __func__);
+			return false;
+		}
 	}
 	return true;
 }
