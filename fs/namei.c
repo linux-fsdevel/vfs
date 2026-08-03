@@ -4652,6 +4652,7 @@ finish_lookup:
 static int do_open(struct nameidata *nd,
 		   struct file *file, const struct open_flags *op)
 {
+	struct vfsmount *mnt;
 	struct mnt_idmap *idmap;
 	int open_flag = op->open_flag;
 	bool do_truncate;
@@ -4690,14 +4691,20 @@ static int do_open(struct nameidata *nd,
 		open_flag &= ~O_TRUNC;
 		acc_mode = 0;
 	} else if (d_is_reg(nd->path.dentry) && open_flag & O_TRUNC) {
-		error = mnt_want_write(nd->path.mnt);
+		/*
+		 * Stash the mount point before vfs_open_consume() whacks nd->path.
+		 * It is safely accessible because the file obj using it is guaranteed
+		 * to not disappear while we execute.
+		 */
+		mnt = nd->path.mnt;
+		error = mnt_want_write(mnt);
 		if (error)
 			return error;
 		do_truncate = true;
 	}
 	error = may_open(idmap, &nd->path, acc_mode, open_flag);
 	if (!error && !(file->f_mode & FMODE_OPENED))
-		error = vfs_open(&nd->path, file);
+		error = vfs_open_consume(&nd->path, file);
 	if (!error)
 		error = security_file_post_open(file, op->acc_mode);
 	if (!error && do_truncate)
@@ -4707,7 +4714,7 @@ static int do_open(struct nameidata *nd,
 		error = -EINVAL;
 	}
 	if (do_truncate)
-		mnt_drop_write(nd->path.mnt);
+		mnt_drop_write(mnt);
 	return error;
 }
 
