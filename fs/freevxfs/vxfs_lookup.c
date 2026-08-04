@@ -78,6 +78,7 @@ vxfs_find_entry(struct inode *ip, struct dentry *dp, struct page **ppp)
 
 		while (pg_ofs < PAGE_SIZE && pos < limit) {
 			struct vxfs_direct *de;
+			int reclen, nlen;
 
 			if ((pos & (bsize - 1)) < 4) {
 				struct vxfs_dirblk *dbp =
@@ -87,6 +88,14 @@ vxfs_find_entry(struct inode *ip, struct dentry *dp, struct page **ppp)
 
 				pos += overhead;
 				pg_ofs += overhead;
+				if (pg_ofs >= PAGE_SIZE)
+					break;
+			}
+
+			/* the entry header must fit in the page */
+			if (pg_ofs + VXFS_NAMEMIN > PAGE_SIZE) {
+				pos += PAGE_SIZE - pg_ofs;
+				break;
 			}
 			de = (struct vxfs_direct *)(kaddr + pg_ofs);
 
@@ -96,12 +105,25 @@ vxfs_find_entry(struct inode *ip, struct dentry *dp, struct page **ppp)
 				break;
 			}
 
-			pg_ofs += fs16_to_cpu(sbi, de->d_reclen);
-			pos += fs16_to_cpu(sbi, de->d_reclen);
+			/* and so must the whole record, header included */
+			reclen = fs16_to_cpu(sbi, de->d_reclen);
+			if (reclen < VXFS_NAMEMIN ||
+			    pg_ofs + reclen > PAGE_SIZE) {
+				pos += PAGE_SIZE - pg_ofs;
+				break;
+			}
+
+			pg_ofs += reclen;
+			pos += reclen;
 			if (!de->d_ino)
 				continue;
 
-			if (namelen != fs16_to_cpu(sbi, de->d_namelen))
+			/* the name must fit in the record */
+			nlen = fs16_to_cpu(sbi, de->d_namelen);
+			if (VXFS_NAMEMIN + nlen > reclen)
+				continue;
+
+			if (namelen != nlen)
 				continue;
 			if (!memcmp(name, de->d_name, namelen)) {
 				*ppp = pp;
@@ -218,7 +240,7 @@ vxfs_readdir(struct file *fp, struct dir_context *ctx)
 		struct page *pp;
 		char *kaddr;
 		int pg_ofs = pos & ~PAGE_MASK;
-		int rc = 0;
+		bool full = false;
 
 		pp = vxfs_get_page(ip->i_mapping, pos >> PAGE_SHIFT);
 		if (IS_ERR(pp))
@@ -228,6 +250,7 @@ vxfs_readdir(struct file *fp, struct dir_context *ctx)
 
 		while (pg_ofs < PAGE_SIZE && pos < limit) {
 			struct vxfs_direct *de;
+			int reclen, nlen;
 
 			if ((pos & (bsize - 1)) < 4) {
 				struct vxfs_dirblk *dbp =
@@ -237,6 +260,14 @@ vxfs_readdir(struct file *fp, struct dir_context *ctx)
 
 				pos += overhead;
 				pg_ofs += overhead;
+				if (pg_ofs >= PAGE_SIZE)
+					break;
+			}
+
+			/* the entry header must fit in the page */
+			if (pg_ofs + VXFS_NAMEMIN > PAGE_SIZE) {
+				pos += PAGE_SIZE - pg_ofs;
+				break;
 			}
 			de = (struct vxfs_direct *)(kaddr + pg_ofs);
 
@@ -246,23 +277,35 @@ vxfs_readdir(struct file *fp, struct dir_context *ctx)
 				break;
 			}
 
-			pg_ofs += fs16_to_cpu(sbi, de->d_reclen);
-			pos += fs16_to_cpu(sbi, de->d_reclen);
+			/* and so must the whole record, header included */
+			reclen = fs16_to_cpu(sbi, de->d_reclen);
+			if (reclen < VXFS_NAMEMIN ||
+			    pg_ofs + reclen > PAGE_SIZE) {
+				pos += PAGE_SIZE - pg_ofs;
+				break;
+			}
+
+			pg_ofs += reclen;
+			pos += reclen;
 			if (!de->d_ino)
 				continue;
 
-			rc = dir_emit(ctx, de->d_name,
-					fs16_to_cpu(sbi, de->d_namelen),
-					fs32_to_cpu(sbi, de->d_ino),
-					DT_UNKNOWN);
-			if (!rc) {
+			/* the name must fit in the record */
+			nlen = fs16_to_cpu(sbi, de->d_namelen);
+			if (VXFS_NAMEMIN + nlen > reclen)
+				continue;
+
+			if (!dir_emit(ctx, de->d_name, nlen,
+				      fs32_to_cpu(sbi, de->d_ino),
+				      DT_UNKNOWN)) {
 				/* the dir entry was not read, fix pos. */
-				pos -= fs16_to_cpu(sbi, de->d_reclen);
+				pos -= reclen;
+				full = true;
 				break;
 			}
 		}
 		vxfs_put_page(pp);
-		if (!rc)
+		if (full)
 			break;
 	}
 
