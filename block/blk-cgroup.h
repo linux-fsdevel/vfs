@@ -126,7 +126,7 @@ static inline struct blkcg *css_to_blkcg(struct cgroup_subsys_state *css)
 
 static inline struct blkcg *bio_blkcg(struct bio *bio)
 {
-	return bio_blkg(bio)->blkcg;
+	return bio->bi_blkcg;
 }
 
 /*
@@ -281,6 +281,9 @@ static inline struct blkcg_gq *blkg_lookup(struct blkcg *blkcg,
 	return blkg;
 }
 
+struct blkcg_gq *bio_blkg_lookup(struct bio *bio);
+struct blkcg_gq *bio_blkg(struct bio *bio);
+
 /**
  * blkg_to_pd - get policy private data
  * @blkg: blkg of interest
@@ -348,13 +351,15 @@ static inline void blkg_put(struct blkcg_gq *blkg)
 	percpu_ref_put(&blkg->refcnt);
 }
 
-static inline void bio_clear_blkg(struct bio *bio)
+static inline void bio_clear_blkcg(struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio_blkg(bio);
+	struct blkcg *blkcg = bio_blkcg(bio);
 
-	if (blkg) {
-		blkg_put(blkg);
-		bio->bi_blkg = NULL;
+	bio_put_blkg_ref(bio);
+
+	if (blkcg) {
+		css_put(&blkcg->css);
+		bio->bi_blkcg = NULL;
 	}
 }
 
@@ -470,7 +475,7 @@ static inline void blkcg_clear_delay(struct blkcg_gq *blkg)
  */
 static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio)
 {
-	return bio_blkg(rq->bio) == bio_blkg(bio) &&
+	return bio_blkcg(rq->bio) == bio_blkcg(bio) &&
 		bio_issue_as_root_blkg(rq->bio) == bio_issue_as_root_blkg(bio);
 }
 
@@ -497,6 +502,8 @@ struct blkcg {
 };
 
 static inline struct blkcg *bio_blkcg(struct bio *bio) { return NULL; }
+static inline struct blkcg_gq *bio_blkg_lookup(struct bio *bio) { return NULL; }
+static inline struct blkcg_gq *bio_blkg(struct bio *bio) { return NULL; }
 static inline struct blkcg_gq *blkg_lookup(struct blkcg *blkcg, void *key) { return NULL; }
 static inline void blkg_init_queue(struct request_queue *q) { }
 static inline int blkcg_init_disk(struct gendisk *disk) { return 0; }
@@ -513,7 +520,7 @@ static inline struct blkg_policy_data *blkg_to_pd(struct blkcg_gq *blkg,
 static inline struct blkcg_gq *pd_to_blkg(struct blkg_policy_data *pd) { return NULL; }
 static inline void blkg_get(struct blkcg_gq *blkg) { }
 static inline void blkg_put(struct blkcg_gq *blkg) { }
-static inline void bio_clear_blkg(struct bio *bio) { }
+static inline void bio_clear_blkcg(struct bio *bio) { }
 static inline void blk_cgroup_bio_start(struct bio *bio) { }
 static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio) { return true; }
 

@@ -3231,7 +3231,7 @@ the configuration, the bio may be executed at a lower priority and if
 the writeback session is holding shared resources, e.g. a journal
 entry, may lead to priority inversion.  There is no one easy solution
 for the problem.  Filesystems can try to work around specific problem
-cases by skipping wbc_init_bio() and using bio_associate_blkg()
+cases by skipping wbc_init_bio() and using bio_associate_blkcg()
 directly.
 
 

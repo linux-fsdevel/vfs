@@ -590,8 +590,11 @@ static void blkcg_iolatency_done_bio(struct rq_qos *rqos, struct bio *bio)
 	bool issue_as_root = bio_issue_as_root_blkg(bio);
 	int inflight = 0;
 
-	blkg = bio_blkg(bio);
-	if (!blkg || !bio_flagged(bio, BIO_QOS_THROTTLED))
+	if (!bio_flagged(bio, BIO_QOS_THROTTLED))
+		return;
+
+	blkg = bio_blkg_lookup(bio);
+	if (!blkg)
 		return;
 
 	iolat = blkg_to_lat(blkg);

@@ -316,7 +316,7 @@ static inline void count_swpout_vm_event(struct folio *folio)
 }
 
 #if defined(CONFIG_MEMCG) && defined(CONFIG_BLK_CGROUP)
-static void bio_associate_blkg_from_page(struct bio *bio, struct folio *folio)
+static void bio_associate_blkcg_from_page(struct bio *bio, struct folio *folio)
 {
 	struct cgroup_subsys_state *css;
 	struct mem_cgroup *memcg;
@@ -331,12 +331,12 @@ static void bio_associate_blkg_from_page(struct bio *bio, struct folio *folio)
 		css = NULL;
 	rcu_read_unlock();
 
-	bio_associate_blkg_from_css(bio, css);
+	bio_associate_blkcg_from_css(bio, css);
 	if (css)
 		css_put(css);
 }
 #else
-#define bio_associate_blkg_from_page(bio, folio)		do { } while (0)
+#define bio_associate_blkcg_from_page(bio, folio)	do { } while (0)
 #endif /* CONFIG_MEMCG && CONFIG_BLK_CGROUP */
 
 struct swap_iocb {
@@ -436,7 +436,7 @@ static void swap_writepage_bdev_sync(struct folio *folio,
 	bio.bi_iter.bi_sector = swap_folio_sector(folio);
 	bio_add_folio_nofail(&bio, folio, folio_size(folio), 0);
 
-	bio_associate_blkg_from_page(&bio, folio);
+	bio_associate_blkcg_from_page(&bio, folio);
 	count_swpout_vm_event(folio);
 
 	folio_start_writeback(folio);
@@ -456,7 +456,7 @@ static void swap_writepage_bdev_async(struct folio *folio,
 	bio->bi_end_io = end_swap_bio_write;
 	bio_add_folio_nofail(bio, folio, folio_size(folio), 0);
 
-	bio_associate_blkg_from_page(bio, folio);
+	bio_associate_blkcg_from_page(bio, folio);
 	count_swpout_vm_event(folio);
 	folio_start_writeback(folio);
 	folio_unlock(folio);

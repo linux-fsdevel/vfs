@@ -363,11 +363,13 @@ void bfqg_and_blkg_put(struct bfq_group *bfqg)
 
 void bfqg_stats_update_legacy_io(struct request_queue *q, struct request *rq)
 {
-	struct bfq_group *bfqg = blkg_to_bfqg(bio_blkg(rq->bio));
+	struct blkcg_gq *blkg = bio_blkg_lookup(rq->bio);
+	struct bfq_group *bfqg;
 
-	if (!bfqg)
+	if (!blkg)
 		return;
 
+	bfqg = blkg_to_bfqg(blkg);
 	blkg_rwstat_add(&bfqg->stats.bytes, rq->cmd_flags, blk_rq_bytes(rq));
 	blkg_rwstat_add(&bfqg->stats.ios, rq->cmd_flags, 1);
 }
@@ -606,7 +608,7 @@ static void bfq_link_bfqg(struct bfq_data *bfqd, struct bfq_group *bfqg)
 
 struct bfq_group *bfq_bio_bfqg(struct bfq_data *bfqd, struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio_blkg(bio);
+	struct blkcg_gq *blkg = bio_blkg_lookup(bio);
 	struct bfq_group *bfqg;
 
 	while (blkg) {
@@ -614,14 +616,16 @@ struct bfq_group *bfq_bio_bfqg(struct bfq_data *bfqd, struct bio *bio)
 			blkg = blkg->parent;
 			continue;
 		}
+
 		bfqg = blkg_to_bfqg(blkg);
 		if (bfqg->pd.online) {
-			bio_associate_blkg_from_css(bio, &blkg->blkcg->css);
+			bio_associate_blkcg_from_css(bio, &blkg->blkcg->css);
 			return bfqg;
 		}
 		blkg = blkg->parent;
 	}
-	bio_associate_blkg_from_css(bio,
+
+	bio_associate_blkcg_from_css(bio,
 				&bfqg_to_blkg(bfqd->root_group)->blkcg->css);
 	return bfqd->root_group;
 }

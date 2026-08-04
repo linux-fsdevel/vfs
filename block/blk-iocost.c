@@ -2775,7 +2775,7 @@ retry_lock:
 static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
-	struct ioc_gq *iocg = blkg_to_iocg(bio_blkg(bio));
+	struct ioc_gq *iocg = blkg_to_iocg(bio_blkg_lookup(bio));
 	struct ioc *ioc = rqos_to_ioc(rqos);
 	sector_t bio_end = bio_end_sector(bio);
 	struct ioc_now now;
@@ -2833,9 +2833,13 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 
 static void ioc_rqos_done_bio(struct rq_qos *rqos, struct bio *bio)
 {
-	struct ioc_gq *iocg = blkg_to_iocg(bio_blkg(bio));
+	struct ioc_gq *iocg;
 
-	if (iocg && bio->bi_iocost_cost)
+	if (!bio->bi_iocost_cost)
+		return;
+
+	iocg = blkg_to_iocg(bio_blkg_lookup(bio));
+	if (iocg)
 		atomic64_add(bio->bi_iocost_cost, &iocg->done_vtime);
 }
 

@@ -246,12 +246,10 @@ struct bio {
 	void			*bi_private;
 #ifdef CONFIG_BLK_CGROUP
 	/*
-	 * Represents the association of the css and request_queue for the bio.
-	 * If a bio goes direct to device, it will not have a blkg as it will
-	 * not have a request_queue associated with it.  The reference is put
-	 * on release of the bio.
+	 * Represents the blkcg css association for the bio.  The reference is
+	 * put on release of the bio.
 	 */
-	struct blkcg_gq		*bi_blkg;
+	struct blkcg		*bi_blkcg;
 	/* Time that this bio was issued. */
 	u64			issue_time_ns;
 #ifdef CONFIG_BLK_CGROUP_IOCOST
@@ -309,6 +307,7 @@ enum {
 	BIO_TRACE_COMPLETION,	/* bio_endio() should trace the final completion
 				 * of this bio. */
 	BIO_CGROUP_ACCT,	/* has been accounted to a cgroup */
+	BIO_BLKG_REF,		/* bio pins the associated blkg */
 	BIO_QOS_THROTTLED,	/* bio went through rq_qos throttle path */
 	/*
 	 * This bio has completed bps throttling at the single tg granularity,

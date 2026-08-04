@@ -179,7 +179,7 @@ static inline gfp_t try_alloc_gfp(gfp_t gfp)
 
 void bio_uninit(struct bio *bio)
 {
-	bio_clear_blkg(bio);
+	bio_clear_blkcg(bio);
 	if (bio_integrity(bio))
 		bio_integrity_free(bio);
 
@@ -228,10 +228,10 @@ void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	bio->bi_end_io = NULL;
 	bio->bi_private = NULL;
 #ifdef CONFIG_BLK_CGROUP
-	bio->bi_blkg = NULL;
+	bio->bi_blkcg = NULL;
 	bio->issue_time_ns = 0;
 	if (bdev)
-		bio_associate_blkg(bio);
+		bio_associate_blkcg(bio);
 #ifdef CONFIG_BLK_CGROUP_IOCOST
 	bio->bi_iocost_cost = 0;
 #endif
@@ -276,7 +276,7 @@ void bio_reset(struct bio *bio, struct block_device *bdev, blk_opf_t opf)
 	bio->bi_io_vec = bv;
 	bio->bi_bdev = bdev;
 	if (bio->bi_bdev)
-		bio_associate_blkg(bio);
+		bio_associate_blkcg(bio);
 	bio->bi_opf = opf;
 }
 EXPORT_SYMBOL(bio_reset);
@@ -852,7 +852,7 @@ static int __bio_clone(struct bio *bio, struct bio *bio_src, gfp_t gfp)
 		if (bio->bi_bdev == bio_src->bi_bdev &&
 		    bio_flagged(bio_src, BIO_REMAPPED))
 			bio_set_flag(bio, BIO_REMAPPED);
-		bio_clone_blkg_association(bio, bio_src);
+		bio_clone_blkcg_association(bio, bio_src);
 	}
 
 	if (bio_crypt_clone(bio, bio_src, gfp) < 0)
@@ -1789,7 +1789,7 @@ again:
 	 * a few callers of bio_init fail to call bio_uninit, so we cover up
 	 * for that here at least for now.
 	 */
-	bio_clear_blkg(bio);
+	bio_clear_blkcg(bio);
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio);

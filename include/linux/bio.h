@@ -503,28 +503,20 @@ static inline void bio_release_pages(struct bio *bio, bool mark_dirty)
 	disk_devt((bio)->bi_bdev->bd_disk)
 
 #ifdef CONFIG_BLK_CGROUP
-static inline struct blkcg_gq *bio_blkg(struct bio *bio)
-{
-	return bio->bi_blkg;
-}
-
-void bio_associate_blkg(struct bio *bio);
-void bio_associate_blkg_from_css(struct bio *bio,
+void bio_associate_blkcg(struct bio *bio);
+void bio_associate_blkcg_from_css(struct bio *bio,
 				 struct cgroup_subsys_state *css);
-void bio_clone_blkg_association(struct bio *dst, struct bio *src);
+void bio_clone_blkcg_association(struct bio *dst, struct bio *src);
+void bio_put_blkg_ref(struct bio *bio);
 void blkcg_punt_bio_submit(struct bio *bio);
 #else	/* CONFIG_BLK_CGROUP */
-static inline struct blkcg_gq *bio_blkg(struct bio *bio)
-{
-	return NULL;
-}
-
-static inline void bio_associate_blkg(struct bio *bio) { }
-static inline void bio_associate_blkg_from_css(struct bio *bio,
+static inline void bio_associate_blkcg(struct bio *bio) { }
+static inline void bio_associate_blkcg_from_css(struct bio *bio,
 					       struct cgroup_subsys_state *css)
 { }
-static inline void bio_clone_blkg_association(struct bio *dst,
+static inline void bio_clone_blkcg_association(struct bio *dst,
 					      struct bio *src) { }
+static inline void bio_put_blkg_ref(struct bio *bio) { }
 static inline void blkcg_punt_bio_submit(struct bio *bio)
 {
 	submit_bio(bio);
@@ -534,10 +526,12 @@ static inline void blkcg_punt_bio_submit(struct bio *bio)
 static inline void bio_set_dev(struct bio *bio, struct block_device *bdev)
 {
 	bio_clear_flag(bio, BIO_REMAPPED);
-	if (bio->bi_bdev != bdev)
+	if (bio->bi_bdev != bdev) {
+		bio_put_blkg_ref(bio);
 		bio_clear_flag(bio, BIO_BPS_THROTTLED);
+	}
 	bio->bi_bdev = bdev;
-	bio_associate_blkg(bio);
+	bio_associate_blkcg(bio);
 }
 
 /*

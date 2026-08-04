@@ -128,6 +128,7 @@
 
 #include "elevator.h"
 #include "blk.h"
+#include "blk-cgroup.h"
 #include "blk-mq.h"
 #include "blk-mq-sched.h"
 #include "bfq-iosched.h"
@@ -2452,15 +2453,15 @@ static bool bfq_bio_merge(struct request_queue *q, struct bio *bio,
 	struct request *free = NULL;
 	bool ret;
 
+#ifdef CONFIG_BFQ_GROUP_IOSCHED
+	if (bic && bio_blkg_lookup(bio) == NULL)
+		return false;
+#endif
+
 	spin_lock_irq(&bfqd->lock);
 
 	if (bic) {
-		/*
-		 * Make sure cgroup info is uptodate for current process before
-		 * considering the merge.
-		 */
 		bfq_bic_update_cgroup(bic, bio);
-
 		bfqd->bio_bfqq = bic_to_bfqq(bic, op_is_sync(bio->bi_opf),
 					     bfq_actuator_index(bfqd, bio));
 	} else {
@@ -6245,6 +6246,13 @@ static void bfq_insert_request(struct blk_mq_hw_ctx *hctx, struct request *rq,
 	LIST_HEAD(free);
 
 #ifdef CONFIG_BFQ_GROUP_IOSCHED
+	/*
+	 * Pin the blkg used to look up bfqg.  If this is the first IO for
+	 * the blkcg on this queue, create the bfqg before holding bfqd->lock.
+	 */
+	if (rq->bio && !bio_flagged(rq->bio, BIO_BLKG_REF))
+		bio_blkg(rq->bio);
+
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys) && rq->bio)
 		bfqg_stats_update_legacy_io(q, rq);
 #endif

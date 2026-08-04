@@ -121,7 +121,7 @@ int async_pmem_flush(struct nd_region *nd_region, struct bio *bio)
 
 		if (!child)
 			return -ENOMEM;
-		bio_clone_blkg_association(child, bio);
+		bio_clone_blkcg_association(child, bio);
 		child->bi_iter.bi_sector = -1;
 		bio_chain(child, bio);
 		submit_bio(child);
