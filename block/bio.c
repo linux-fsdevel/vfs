@@ -179,12 +179,7 @@ static inline gfp_t try_alloc_gfp(gfp_t gfp)
 
 void bio_uninit(struct bio *bio)
 {
-#ifdef CONFIG_BLK_CGROUP
-	if (bio->bi_blkg) {
-		blkg_put(bio->bi_blkg);
-		bio->bi_blkg = NULL;
-	}
-#endif
+	bio_clear_blkg(bio);
 	if (bio_integrity(bio))
 		bio_integrity_free(bio);
 
@@ -1789,17 +1784,12 @@ again:
 		goto again;
 	}
 
-#ifdef CONFIG_BLK_CGROUP
 	/*
 	 * Release cgroup info.  We shouldn't have to do this here, but quite
 	 * a few callers of bio_init fail to call bio_uninit, so we cover up
 	 * for that here at least for now.
 	 */
-	if (bio->bi_blkg) {
-		blkg_put(bio->bi_blkg);
-		bio->bi_blkg = NULL;
-	}
-#endif
+	bio_clear_blkg(bio);
 
 	if (bio->bi_end_io)
 		bio->bi_end_io(bio);

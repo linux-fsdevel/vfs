@@ -124,6 +124,11 @@ static inline struct blkcg *css_to_blkcg(struct cgroup_subsys_state *css)
 	return css ? container_of(css, struct blkcg, css) : NULL;
 }
 
+static inline struct blkcg *bio_blkcg(struct bio *bio)
+{
+	return bio_blkg(bio)->blkcg;
+}
+
 /*
  * A blkcg_gq (blkg) is association between a block cgroup (blkcg) and a
  * request_queue (q).  This is used by blkcg policies which need to track
@@ -343,6 +348,16 @@ static inline void blkg_put(struct blkcg_gq *blkg)
 	percpu_ref_put(&blkg->refcnt);
 }
 
+static inline void bio_clear_blkg(struct bio *bio)
+{
+	struct blkcg_gq *blkg = bio_blkg(bio);
+
+	if (blkg) {
+		blkg_put(blkg);
+		bio->bi_blkg = NULL;
+	}
+}
+
 /**
  * blkg_for_each_descendant_pre - pre-order walk of a blkg's descendants
  * @d_blkg: loop cursor pointing to the current descendant
@@ -455,7 +470,7 @@ static inline void blkcg_clear_delay(struct blkcg_gq *blkg)
  */
 static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio)
 {
-	return rq->bio->bi_blkg == bio->bi_blkg &&
+	return bio_blkg(rq->bio) == bio_blkg(bio) &&
 		bio_issue_as_root_blkg(rq->bio) == bio_issue_as_root_blkg(bio);
 }
 
@@ -481,6 +496,7 @@ struct blkcg_policy {
 struct blkcg {
 };
 
+static inline struct blkcg *bio_blkcg(struct bio *bio) { return NULL; }
 static inline struct blkcg_gq *blkg_lookup(struct blkcg *blkcg, void *key) { return NULL; }
 static inline void blkg_init_queue(struct request_queue *q) { }
 static inline int blkcg_init_disk(struct gendisk *disk) { return 0; }
@@ -497,6 +513,7 @@ static inline struct blkg_policy_data *blkg_to_pd(struct blkcg_gq *blkg,
 static inline struct blkcg_gq *pd_to_blkg(struct blkg_policy_data *pd) { return NULL; }
 static inline void blkg_get(struct blkcg_gq *blkg) { }
 static inline void blkg_put(struct blkcg_gq *blkg) { }
+static inline void bio_clear_blkg(struct bio *bio) { }
 static inline void blk_cgroup_bio_start(struct bio *bio) { }
 static inline bool blk_cgroup_mergeable(struct request *rq, struct bio *bio) { return true; }
 

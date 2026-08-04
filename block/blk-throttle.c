@@ -1792,7 +1792,7 @@ static bool tg_within_limit(struct throtl_grp *tg, struct bio *bio, bool rw)
 bool __blk_throtl_bio(struct bio *bio)
 {
 	struct request_queue *q = bdev_get_queue(bio->bi_bdev);
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
 	struct throtl_qnode *qn = NULL;
 	struct throtl_grp *tg = blkg_to_tg(blkg);
 	struct throtl_service_queue *sq;

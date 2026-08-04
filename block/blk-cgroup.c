@@ -239,7 +239,7 @@ static void blkg_async_bio_workfn(struct work_struct *work)
  */
 void blkcg_punt_bio_submit(struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
 
 	if (blkg->parent) {
 		spin_lock(&blkg->async_bio_lock);
@@ -275,9 +275,9 @@ subsys_initcall(blkcg_punt_bio_init);
  */
 struct cgroup_subsys_state *bio_blkcg_css(struct bio *bio)
 {
-	if (!bio || !bio->bi_blkg)
+	if (!bio || !bio_blkg(bio))
 		return NULL;
-	return &bio->bi_blkg->blkcg->css;
+	return &bio_blkcg(bio)->css;
 }
 EXPORT_SYMBOL_GPL(bio_blkcg_css);
 
@@ -2113,8 +2113,8 @@ static inline struct blkcg_gq *blkg_tryget_closest(struct bio *bio,
 void bio_associate_blkg_from_css(struct bio *bio,
 				 struct cgroup_subsys_state *css)
 {
-	if (bio->bi_blkg)
-		blkg_put(bio->bi_blkg);
+	if (bio_blkg(bio))
+		blkg_put(bio_blkg(bio));
 
 	if (css && css->parent) {
 		bio->bi_blkg = blkg_tryget_closest(bio, css);
@@ -2141,7 +2141,7 @@ void bio_associate_blkg(struct bio *bio)
 	if (blk_op_is_passthrough(bio->bi_opf))
 		return;
 
-	if (bio->bi_blkg) {
+	if (bio_blkg(bio)) {
 		css = bio_blkcg_css(bio);
 		bio_associate_blkg_from_css(bio, css);
 	} else {
@@ -2165,7 +2165,7 @@ EXPORT_SYMBOL_GPL(bio_associate_blkg);
  */
 void bio_clone_blkg_association(struct bio *dst, struct bio *src)
 {
-	if (src->bi_blkg)
+	if (bio_blkg(src))
 		bio_associate_blkg_from_css(dst, bio_blkcg_css(src));
 }
 EXPORT_SYMBOL_GPL(bio_clone_blkg_association);
@@ -2181,7 +2181,8 @@ static int blk_cgroup_io_type(struct bio *bio)
 
 void blk_cgroup_bio_start(struct bio *bio)
 {
-	struct blkcg *blkcg = bio->bi_blkg->blkcg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
+	struct blkcg *blkcg = bio_blkcg(bio);
 	int rwd = blk_cgroup_io_type(bio), cpu;
 	struct blkg_iostat_set *bis;
 	unsigned long flags;
@@ -2194,7 +2195,7 @@ void blk_cgroup_bio_start(struct bio *bio)
 		return;
 
 	cpu = get_cpu();
-	bis = per_cpu_ptr(bio->bi_blkg->iostat_cpu, cpu);
+	bis = per_cpu_ptr(blkg->iostat_cpu, cpu);
 	flags = u64_stats_update_begin_irqsave(&bis->sync);
 
 	/*

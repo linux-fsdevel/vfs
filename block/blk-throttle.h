@@ -173,7 +173,7 @@ static inline bool blk_should_throtl(struct bio *bio)
 	if (!blk_throtl_activated(bio->bi_bdev->bd_queue))
 		return false;
 
-	tg = blkg_to_tg(bio->bi_blkg);
+	tg = blkg_to_tg(bio_blkg(bio));
 	if (!cgroup_subsys_on_dfl(io_cgrp_subsys)) {
 		if (!bio_flagged(bio, BIO_CGROUP_ACCT)) {
 			bio_set_flag(bio, BIO_CGROUP_ACCT);

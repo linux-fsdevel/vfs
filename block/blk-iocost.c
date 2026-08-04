@@ -2686,7 +2686,7 @@ iocg_handle_over_budget(struct rq_qos *rqos, struct ioc_gq *iocg,
 
 static void ioc_rqos_throttle(struct rq_qos *rqos, struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
 	struct ioc *ioc = rqos_to_ioc(rqos);
 	struct ioc_gq *iocg = blkg_to_iocg(blkg);
 	struct ioc_now now;
@@ -2775,7 +2775,7 @@ retry_lock:
 static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 			   struct bio *bio)
 {
-	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
+	struct ioc_gq *iocg = blkg_to_iocg(bio_blkg(bio));
 	struct ioc *ioc = rqos_to_ioc(rqos);
 	sector_t bio_end = bio_end_sector(bio);
 	struct ioc_now now;
@@ -2833,7 +2833,7 @@ static void ioc_rqos_merge(struct rq_qos *rqos, struct request *rq,
 
 static void ioc_rqos_done_bio(struct rq_qos *rqos, struct bio *bio)
 {
-	struct ioc_gq *iocg = blkg_to_iocg(bio->bi_blkg);
+	struct ioc_gq *iocg = blkg_to_iocg(bio_blkg(bio));
 
 	if (iocg && bio->bi_iocost_cost)
 		atomic64_add(bio->bi_iocost_cost, &iocg->done_vtime);

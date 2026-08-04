@@ -463,7 +463,7 @@ static void check_scale_change(struct iolatency_grp *iolat)
 static void blkcg_iolatency_throttle(struct rq_qos *rqos, struct bio *bio)
 {
 	struct blk_iolatency *blkiolat = BLKIOLATENCY(rqos);
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
 	bool issue_as_root = bio_issue_as_root_blkg(bio);
 
 	if (!blkiolat->enabled)
@@ -590,11 +590,11 @@ static void blkcg_iolatency_done_bio(struct rq_qos *rqos, struct bio *bio)
 	bool issue_as_root = bio_issue_as_root_blkg(bio);
 	int inflight = 0;
 
-	blkg = bio->bi_blkg;
+	blkg = bio_blkg(bio);
 	if (!blkg || !bio_flagged(bio, BIO_QOS_THROTTLED))
 		return;
 
-	iolat = blkg_to_lat(bio->bi_blkg);
+	iolat = blkg_to_lat(blkg);
 	if (!iolat)
 		return;
 

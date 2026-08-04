@@ -50,8 +50,15 @@ EXPORT_SYMBOL_GPL(blkcg_set_fc_appid);
  */
 char *blkcg_get_fc_appid(struct bio *bio)
 {
-	if (!bio->bi_blkg || bio->bi_blkg->blkcg->fc_app_id[0] == '\0')
+	struct blkcg *blkcg;
+
+	if (!bio_blkg(bio))
 		return NULL;
-	return bio->bi_blkg->blkcg->fc_app_id;
+
+	blkcg = bio_blkcg(bio);
+	if (blkcg->fc_app_id[0] == '\0')
+		return NULL;
+
+	return blkcg->fc_app_id;
 }
 EXPORT_SYMBOL_GPL(blkcg_get_fc_appid);

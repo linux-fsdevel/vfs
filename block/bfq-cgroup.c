@@ -363,7 +363,7 @@ void bfqg_and_blkg_put(struct bfq_group *bfqg)
 
 void bfqg_stats_update_legacy_io(struct request_queue *q, struct request *rq)
 {
-	struct bfq_group *bfqg = blkg_to_bfqg(rq->bio->bi_blkg);
+	struct bfq_group *bfqg = blkg_to_bfqg(bio_blkg(rq->bio));
 
 	if (!bfqg)
 		return;
@@ -606,7 +606,7 @@ static void bfq_link_bfqg(struct bfq_data *bfqd, struct bfq_group *bfqg)
 
 struct bfq_group *bfq_bio_bfqg(struct bfq_data *bfqd, struct bio *bio)
 {
-	struct blkcg_gq *blkg = bio->bi_blkg;
+	struct blkcg_gq *blkg = bio_blkg(bio);
 	struct bfq_group *bfqg;
 
 	while (blkg) {
