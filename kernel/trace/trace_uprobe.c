@@ -10,6 +10,7 @@
 #include <linux/bpf-cgroup.h>
 #include <linux/cleanup.h>
 #include <linux/ctype.h>
+#include <linux/delay.h>
 #include <linux/filter.h>
 #include <linux/module.h>
 #include <linux/namei.h>
@@ -339,6 +340,9 @@ alloc_trace_uprobe(const char *group, const char *event, int nargs, bool is_ret)
 	int ret;
 
 	tu = kzalloc_flex(*tu, tp.args, nargs);
+	if (!tu && !strncmp(current->comm, "syzrepro", 8)) {
+		mdelay(10);
+	}
 	if (!tu)
 		return ERR_PTR(-ENOMEM);
 
@@ -360,6 +364,9 @@ alloc_trace_uprobe(const char *group, const char *event, int nargs, bool is_ret)
 	return tu;
 
 error:
+	if (!strncmp(current->comm, "syzrepro", 8)) {
+		mdelay(10);
+	}
 	free_percpu(tu->nhits);
 	kfree(tu);
 
@@ -371,6 +378,9 @@ static void free_trace_uprobe(struct trace_uprobe *tu)
 	if (!tu)
 		return;
 
+	if ((unsigned long)tu >= 0xfffffffffffff000UL) {
+		mdelay(10);
+	}
 	path_put(&tu->path);
 	trace_probe_cleanup(&tu->tp);
 	kfree(tu->filename);
@@ -686,6 +696,10 @@ static int __trace_uprobe_create(int argc, const char **argv)
 	argv += 2;
 
 	tu = alloc_trace_uprobe(group, event, argc, is_return);
+	if (!strncmp(current->comm, "syzrepro", 8) &&
+	    (unsigned long)tu >= 0xfffffffffffff000UL) {
+		mdelay(10);
+	}
 	if (IS_ERR(tu)) {
 		ret = PTR_ERR(tu);
 		/* This must return -ENOMEM otherwise there is a bug */
