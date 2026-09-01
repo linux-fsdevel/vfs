@@ -317,9 +317,9 @@ map_id_range_down_base(unsigned extents, struct uid_gid_map *map, u32 id, u32 co
 
 static u32 map_id_range_down(struct uid_gid_map *map, u32 id, u32 count)
 {
+	/* Pairs with smp_store_release() in map_write(). */
+	unsigned int extents = smp_load_acquire(&map->nr_extents);
 	struct uid_gid_extent *extent;
-	unsigned extents = map->nr_extents;
-	smp_rmb();
 
 	if (extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
 		extent = map_id_range_down_base(extents, map, id, count);
@@ -383,9 +383,9 @@ map_id_range_up_max(unsigned extents, struct uid_gid_map *map, u32 id, u32 count
 
 u32 map_id_range_up(struct uid_gid_map *map, u32 id, u32 count)
 {
+	/* Pairs with smp_store_release() in map_write(). */
+	unsigned int extents = smp_load_acquire(&map->nr_extents);
 	struct uid_gid_extent *extent;
-	unsigned extents = map->nr_extents;
-	smp_rmb();
 
 	if (extents <= UID_GID_MAP_MAX_BASE_EXTENTS)
 		extent = map_id_range_up_base(extents, map, id, count);
@@ -676,9 +676,9 @@ static int projid_m_show(struct seq_file *seq, void *v)
 static void *m_start(struct seq_file *seq, loff_t *ppos,
 		     struct uid_gid_map *map)
 {
+	/* Pairs with smp_store_release() in map_write(). */
+	unsigned int extents = smp_load_acquire(&map->nr_extents);
 	loff_t pos = *ppos;
-	unsigned extents = map->nr_extents;
-	smp_rmb();
 
 	if (pos >= extents)
 		return NULL;
@@ -967,9 +967,11 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 	 * desired behavior is to see the values of the extents that
 	 * were written before the count of the extents.
 	 *
-	 * To achieve this smp_wmb() is used on guarantee the write
-	 * order and smp_rmb() is guaranteed that we don't have crazy
-	 * architectures returning stale data.
+	 * The nr_extents field is the publish point for the extent
+	 * data.  Writers use smp_store_release() to ensure all extent
+	 * data is visible before nr_extents is updated.  Readers use
+	 * smp_load_acquire() to ensure they see a consistent view of
+	 * the extent data when reading nr_extents.
 	 */
 	mutex_lock(&userns_state_mutex);
 
@@ -1098,8 +1100,8 @@ static ssize_t map_write(struct file *file, const char __user *buf,
 		map->forward = new_map.forward;
 		map->reverse = new_map.reverse;
 	}
-	smp_wmb();
-	map->nr_extents = new_map.nr_extents;
+	/* Pairs with smp_load_acquire() in map_id_range_{up,down}() and m_start(). */
+	smp_store_release(&map->nr_extents, new_map.nr_extents);
 
 	*ppos = count;
 	ret = count;
