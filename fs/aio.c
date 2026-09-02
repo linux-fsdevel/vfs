@@ -1206,13 +1206,12 @@ static void aio_complete(struct aio_kiocb *iocb)
 	/* after flagging the request as done, we
 	 * must never even look at it again
 	 */
-	smp_wmb();	/* make event visible before updating tail */
-
 	ctx->tail = tail;
 
 	ring = folio_address(ctx->ring_folios[0]);
 	head = ring->head;
-	ring->tail = tail;
+	/* Make event visible before updating tail */
+	smp_store_release(&ring->tail, tail);
 	flush_dcache_folio(ctx->ring_folios[0]);
 
 	ctx->completed_events++;
@@ -1288,13 +1287,12 @@ static long aio_read_events_ring(struct kioctx *ctx,
 	/* Access to ->ring_folios here is protected by ctx->ring_lock. */
 	ring = folio_address(ctx->ring_folios[0]);
 	head = ring->head;
-	tail = ring->tail;
-
 	/*
 	 * Ensure that once we've read the current tail pointer, that
 	 * we also see the events that were stored up to the tail.
+	 * Pairs with smp_store_release() in aio_complete().
 	 */
-	smp_rmb();
+	tail = smp_load_acquire(&ring->tail);
 
 	pr_debug("h%u t%u m%u\n", head, tail, ctx->nr_events);
 
