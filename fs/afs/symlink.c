@@ -271,6 +271,8 @@ int afs_symlink_writepages(struct address_space *mapping,
 const struct inode_operations afs_symlink_inode_operations = {
 	.get_link	= afs_get_link,
 	.readlink	= afs_readlink,
+	.is_owned_by_me	= afs_is_owned_by_me,
+	.have_same_owner = afs_have_same_owner,
 };
 
 const struct address_space_operations afs_symlink_aops = {
