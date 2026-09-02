@@ -55,8 +55,8 @@
  * The new code replaces the old recursive symlink resolution with
  * an iterative one (in case of non-nested symlink chains).  It does
  * this with calls to <fs>_follow_link().
- * As a side effect, dir_namei(), _namei() and follow_link() are now 
- * replaced with a single function lookup_dentry() that can handle all 
+ * As a side effect, dir_namei(), _namei() and follow_link() are now
+ * replaced with a single function lookup_dentry() that can handle all
  * the special cases of the former code.
  *
  * With the new dcache, the pathname is stored at each inode, at least as
@@ -1255,6 +1255,72 @@ fs_initcall(init_fs_namei_sysctls);
 
 #endif /* CONFIG_SYSCTL */
 
+/*
+ * Determine if an inode is owned by the process (allowing for fsuid override),
+ * returning 0 if so, 1 if not and a negative error code if there was a problem
+ * making the determination.
+ */
+int vfs_inode_is_owned_by_me(struct mnt_idmap *idmap, struct inode *inode)
+{
+	if (unlikely(inode->i_opflags & IOP_OWNERSHIP_OVERRIDE))
+		return inode->i_op->is_owned_by_me(idmap, inode);
+	if (vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, inode), current_fsuid()))
+		return 0;
+	return 1; /* Not same. */
+}
+
+/*
+ * Determine if an inode has the same owner as its parent directory, returning
+ * 0 if so, 1 if not and a negative error code if there was a problem making
+ * the determination.
+ */
+static int vfs_inode_and_dir_have_same_owner(struct mnt_idmap *idmap, struct inode *inode,
+					     const struct nameidata *nd)
+{
+	if (unlikely(inode->i_opflags & IOP_OWNERSHIP_OVERRIDE)) {
+		struct dentry *parent;
+		struct inode *dir;
+		int ret;
+
+		if (inode != nd->inode) {
+			dir = nd->inode;
+			ret = inode->i_op->have_same_owner(idmap, inode, dir);
+		} else if (nd->flags & LOOKUP_RCU) {
+			parent = READ_ONCE(nd->path.dentry);
+			dir = READ_ONCE(parent->d_inode);
+			if (!dir)
+				return -ECHILD;
+			ret = inode->i_op->have_same_owner(idmap, inode, dir);
+		} else {
+			parent = dget_parent(nd->path.dentry);
+			dir = parent->d_inode;
+			ret = inode->i_op->have_same_owner(idmap, inode, dir);
+			dput(parent);
+		}
+		return ret;
+	}
+
+	if (vfsuid_valid(nd->dir_vfsuid) &&
+	    vfsuid_eq(i_uid_into_vfsuid(idmap, inode), nd->dir_vfsuid))
+		return 0;
+	return 1; /* Not same. */
+}
+
+/*
+ * Determine if two inodes have the same owner, returning 0 if so, 1 if not and
+ * a negative error code if there was a problem making the determination.
+ */
+static int vfs_inodes_have_same_owner(struct mnt_idmap *idmap, struct inode *inode,
+				      struct inode *dir)
+{
+	if (unlikely(inode->i_opflags & IOP_OWNERSHIP_OVERRIDE))
+		return inode->i_op->have_same_owner(idmap, inode, dir);
+	if (vfsuid_eq(i_uid_into_vfsuid(idmap, inode),
+		      i_uid_into_vfsuid(idmap, dir)))
+		return 0;
+	return 1; /* Not same. */
+}
+
 /**
  * may_follow_link - Check symlink following for unsafe situations
  * @nd: nameidata pathwalk data
@@ -1271,27 +1337,28 @@ fs_initcall(init_fs_namei_sysctls);
  *
  * Returns 0 if following the symlink is allowed, -ve on error.
  */
-static inline int may_follow_link(struct nameidata *nd, const struct inode *inode)
+static inline int may_follow_link(struct nameidata *nd, struct inode *inode)
 {
 	struct mnt_idmap *idmap;
-	vfsuid_t vfsuid;
+	int ret;
 
 	if (!sysctl_protected_symlinks)
-		return 0;
-
-	idmap = mnt_idmap(nd->path.mnt);
-	vfsuid = i_uid_into_vfsuid(idmap, inode);
-	/* Allowed if owner and follower match. */
-	if (vfsuid_eq_kuid(vfsuid, current_fsuid()))
 		return 0;
 
 	/* Allowed if parent directory not sticky and world-writable. */
 	if ((nd->dir_mode & (S_ISVTX|S_IWOTH)) != (S_ISVTX|S_IWOTH))
 		return 0;
 
+	idmap = mnt_idmap(nd->path.mnt);
+	/* Allowed if owner and follower match. */
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret <= 0)
+		return ret;
+
 	/* Allowed if parent directory and link owner match. */
-	if (vfsuid_valid(nd->dir_vfsuid) && vfsuid_eq(nd->dir_vfsuid, vfsuid))
-		return 0;
+	ret = vfs_inode_and_dir_have_same_owner(idmap, inode, nd);
+	if (ret <= 0)
+		return ret;
 
 	if (nd->flags & LOOKUP_RCU)
 		return -ECHILD;
@@ -1389,12 +1456,12 @@ int may_linkat(struct mnt_idmap *idmap, const struct path *link)
  * @inode: the inode of the file to open
  *
  * Block an O_CREAT open of a FIFO (or a regular file) when:
- *   - sysctl_protected_fifos (or sysctl_protected_regular) is enabled
- *   - the file already exists
- *   - we are in a sticky directory
- *   - we don't own the file
+ *   - sysctl_protected_fifos (or sysctl_protected_regular) is enabled,
+ *   - the file already exists,
+ *   - we are in a sticky directory,
+ *   - the directory is world writable,
+ *   - we don't own the file and
  *   - the owner of the directory doesn't own the file
- *   - the directory is world writable
  * If the sysctl_protected_fifos (or sysctl_protected_regular) is set to 2
  * the directory doesn't have to be world writable: being group writable will
  * be enough.
@@ -1405,13 +1472,45 @@ int may_linkat(struct mnt_idmap *idmap, const struct path *link)
  * On non-idmapped mounts or if permission checking is to be performed on the
  * raw inode simply pass @nop_mnt_idmap.
  *
+ * For a filesystem (e.g. a network filesystem) that has a separate ID space
+ * and has foreign IDs (maybe even non-integer IDs), i_uid cannot be compared
+ * to current_fsuid() and may not be directly comparable to another i_uid.
+ * Instead, the filesystem is asked to perform the comparisons.  With network
+ * filesystems, there also exists the possibility of doing anonymous
+ * operations and having anonymously-owned objects.
+ *
+ * We have the following scenarios:
+ *
+ *	USER	DIR	FILE	FILE	ALLOWED
+ *		OWNER	OWNER	STATE
+ *	=======	=======	=======	=======	=======
+ *	A	A	-	New	Yes
+ *	A	A	A	Exists	Yes
+ *	A	A	C	Exists	No
+ *	A	B	-	New	Yes
+ *	A	B	A	Exists	Yes, FO==U
+ *	A	B	B	Exists	Yes, FO==DO
+ *	A	B	C	Exists	No
+ *	A	anon[1]	-	New	Yes
+ *	A	anon[1]	A	Exists	Yes
+ *	A	anon[1]	C	Exists	No
+ *	anon	A	-	New	Yes
+ *	anon	A	A	Exists	Yes, FO==DO
+ *	anon	anon[1]	-	New	Yes
+ *	anon	anon[1]	-	Exists	No
+ *	anon	A	A	Exists	Yes, FO==DO
+ *	anon	A	C	Exists	No
+ *	anon	A	anon	Exists	No
+ *
+ * [1] Can anonymously-owned dirs be sticky?
+ *
  * Returns 0 if the open is allowed, -ve on error.
  */
 static int may_create_in_sticky(struct mnt_idmap *idmap, struct nameidata *nd,
-				struct inode *const inode)
+				struct inode *inode)
 {
 	umode_t dir_mode = nd->dir_mode;
-	vfsuid_t dir_vfsuid = nd->dir_vfsuid, i_vfsuid;
+	int ret;
 
 	if (likely(!(dir_mode & S_ISVTX)))
 		return 0;
@@ -1422,13 +1521,13 @@ static int may_create_in_sticky(struct mnt_idmap *idmap, struct nameidata *nd,
 	if (S_ISFIFO(inode->i_mode) && !sysctl_protected_fifos)
 		return 0;
 
-	i_vfsuid = i_uid_into_vfsuid(idmap, inode);
+	ret = vfs_inode_and_dir_have_same_owner(idmap, inode, nd);
+	if (ret <= 0)
+		return ret;
 
-	if (vfsuid_eq(i_vfsuid, dir_vfsuid))
-		return 0;
-
-	if (vfsuid_eq_kuid(i_vfsuid, current_fsuid()))
-		return 0;
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret <= 0)
+		return ret;
 
 	if (likely(dir_mode & 0002)) {
 		audit_log_path_denied(AUDIT_ANOM_CREAT, "sticky_create");
@@ -3645,12 +3744,14 @@ EXPORT_SYMBOL(user_path_at);
 int __check_sticky(struct mnt_idmap *idmap, struct inode *dir,
 		   struct inode *inode)
 {
-	kuid_t fsuid = current_fsuid();
+	int ret;
 
-	if (vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, inode), fsuid))
-		return 0;
-	if (vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, dir), fsuid))
-		return 0;
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret <= 0)
+		return ret;
+	ret = vfs_inodes_have_same_owner(idmap, inode, dir);
+	if (ret <= 0)
+		return ret;
 	return !capable_wrt_inode_uidgid(idmap, inode, CAP_FOWNER);
 }
 EXPORT_SYMBOL(__check_sticky);

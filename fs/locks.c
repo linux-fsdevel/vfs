@@ -68,6 +68,7 @@
 #include <trace/events/filelock.h>
 
 #include <linux/uaccess.h>
+#include "internal.h"
 
 static struct file_lock *file_lock(struct file_lock_core *flc)
 {
@@ -2136,10 +2137,12 @@ int
 vfs_setlease(struct file *filp, int arg, struct file_lease **lease, void **priv)
 {
 	struct inode *inode = file_inode(filp);
-	vfsuid_t vfsuid = i_uid_into_vfsuid(file_mnt_idmap(filp), inode);
 	int error;
 
-	if ((!vfsuid_eq_kuid(vfsuid, current_fsuid())) && !capable(CAP_LEASE))
+	error = vfs_inode_is_owned_by_me(file_mnt_idmap(filp), inode);
+	if (error < 0)
+		return error;
+	if (error != 0 && !capable(CAP_LEASE))
 		return -EACCES;
 	error = security_file_lock(filp, arg);
 	if (error)
