@@ -267,12 +267,10 @@ static unsigned long super_cache_count(struct shrinker *shrink,
 	 * However, if we are currently mounting the superblock, the underlying
 	 * filesystem might be in a state of partial construction and hence it
 	 * is dangerous to access it.  super_trylock_shared() uses a SB_BORN check
-	 * to avoid this situation, so do the same here. The memory barrier is
-	 * matched with the one in mount_fs() as we don't hold locks here.
+	 * to avoid this situation, so do the same here.
 	 */
-	if (!(sb->s_flags & SB_BORN))
+	if (!super_flags(sb, SB_BORN))
 		return 0;
-	smp_rmb();
 
 	if (sb->s_op && sb->s_op->nr_cached_objects &&
 	    super_fs_objects_eligible(sc))
