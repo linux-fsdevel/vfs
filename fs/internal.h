@@ -51,6 +51,7 @@ extern int finish_clean_context(struct fs_context *fc);
 /*
  * namei.c
  */
+int vfs_inode_is_owned_by_me(struct mnt_idmap *idmap, struct inode *inode);
 extern int filename_lookup(int dfd, struct filename *name, unsigned flags,
 			   struct path *path, const struct path *root);
 int filename_rmdir(int dfd, struct filename *name);

@@ -445,6 +445,9 @@ As of kernel 2.6.22, the following members are defined:
 				    struct dentry *dentry, struct file_kattr *fa);
 		int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
 	        struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
+		int (*is_owned_by_me)(struct mnt_idmap *idmap, struct inode *inode);
+		int (*have_same_owner)(struct mnt_idmap *idmap, struct inode *inode,
+				       struct dentry *dentry);
 	};
 
 Again, all methods are called without any locks being held, unless
@@ -633,6 +636,24 @@ otherwise noted.
 	called to get the offset context for a directory inode. A
         filesystem must define this operation to use
         simple_offset_dir_operations.
+
+``is_owned_by_me``
+	called to determine if the file can be considered to be 'owned' by
+	the owner of the process or if the process has a token that grants
+	it ownership privileges.  If unset, the default is to compare i_uid
+	to current_fsuid() - but this may give incorrect results for some
+	network or plug-in block filesystems.  For example, AFS determines
+	ownership entirely according to an obtained token and i_uid may not
+	even be from the same ID space as current_uid().
+
+``have_same_owner``
+	called to determine if an inode has the same owner as its immediate
+	parent on the path walked.  If unset, the default is to simply
+	compare the i_uid of both.  For example, AFS compares the owner IDs
+	of both - but these are a 64-bit values on some variants that might
+	not fit into a kuid_t and cifs has GUIDs that cannot be compared to
+	kuid_t.
+
 
 The Address Space Object
 ========================

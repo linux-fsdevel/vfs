@@ -91,6 +91,7 @@ static int afs_inode_init_from_status(struct afs_operation *op,
 	inode->i_flags |= S_NOATIME;
 	inode->i_uid = make_kuid(&init_user_ns, status->owner);
 	inode->i_gid = make_kgid(&init_user_ns, status->group);
+	inode->i_opflags |= IOP_OWNERSHIP_OVERRIDE;
 	set_nlink(&vnode->netfs.inode, status->nlink);
 
 	i_size_write(inode, status->size);

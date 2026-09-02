@@ -413,20 +413,22 @@ loff_t vfs_clone_file_range(struct file *file_in, loff_t pos_in,
 EXPORT_SYMBOL(vfs_clone_file_range);
 
 /* Check whether we are allowed to dedupe the destination file */
-static bool may_dedupe_file(struct file *file)
+static int may_dedupe_file(struct file *file)
 {
 	struct mnt_idmap *idmap = file_mnt_idmap(file);
 	struct inode *inode = file_inode(file);
+	int ret;
 
 	if (capable(CAP_SYS_ADMIN))
-		return true;
+		return 0;
 	if (file->f_mode & FMODE_WRITE)
-		return true;
-	if (vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, inode), current_fsuid()))
-		return true;
+		return 0;
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret <= 0)
+		return ret;
 	if (!inode_permission(idmap, inode, MAY_WRITE))
-		return true;
-	return false;
+		return 0;
+	return -EPERM;
 }
 
 loff_t vfs_dedupe_file_range_one(struct file *src_file, loff_t src_pos,
@@ -459,8 +461,8 @@ loff_t vfs_dedupe_file_range_one(struct file *src_file, loff_t src_pos,
 	if (ret)
 		return ret;
 
-	ret = -EPERM;
-	if (!may_dedupe_file(dst_file))
+	ret = may_dedupe_file(dst_file);
+	if (ret < 0)
 		goto out_drop_write;
 
 	ret = -EXDEV;

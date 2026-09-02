@@ -949,7 +949,7 @@ static bool coredump_file(struct core_name *cn, struct coredump_params *cprm,
 	 * filesystem.
 	 */
 	idmap = file_mnt_idmap(file);
-	if (!vfsuid_eq_kuid(i_uid_into_vfsuid(idmap, inode), current_fsuid())) {
+	if (vfs_inode_is_owned_by_me(idmap, inode) != 0) {
 		coredump_report_failure("Core dump to %s aborted: cannot preserve file owner", cn->corename);
 		return false;
 	}

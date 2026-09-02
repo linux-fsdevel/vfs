@@ -16,6 +16,7 @@
 #include <linux/fcntl.h>
 #include <linux/filelock.h>
 #include <linux/security.h>
+#include "internal.h"
 
 /**
  * setattr_should_drop_sgid - determine whether the setgid bit needs to be
@@ -91,19 +92,21 @@ EXPORT_SYMBOL(setattr_should_drop_suidgid);
  * permissions. On non-idmapped mounts or if permission checking is to be
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
-static bool chown_ok(struct mnt_idmap *idmap,
-		     const struct inode *inode, vfsuid_t ia_vfsuid)
+static int chown_ok(struct mnt_idmap *idmap,
+		    struct inode *inode, vfsuid_t ia_vfsuid)
 {
 	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
-	if (vfsuid_eq_kuid(vfsuid, current_fsuid()) &&
-	    vfsuid_eq(ia_vfsuid, vfsuid))
-		return true;
+	int ret;
+
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret <= 0)
+		return ret;
 	if (capable_wrt_inode_uidgid(idmap, inode, CAP_CHOWN))
-		return true;
+		return 0;
 	if (!vfsuid_valid(vfsuid) &&
 	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
-		return true;
-	return false;
+		return 0;
+	return -EPERM;
 }
 
 /**
@@ -118,23 +121,27 @@ static bool chown_ok(struct mnt_idmap *idmap,
  * permissions. On non-idmapped mounts or if permission checking is to be
  * performed on the raw inode simply pass @nop_mnt_idmap.
  */
-static bool chgrp_ok(struct mnt_idmap *idmap,
-		     const struct inode *inode, vfsgid_t ia_vfsgid)
+static int chgrp_ok(struct mnt_idmap *idmap,
+		    struct inode *inode, vfsgid_t ia_vfsgid)
 {
 	vfsgid_t vfsgid = i_gid_into_vfsgid(idmap, inode);
-	vfsuid_t vfsuid = i_uid_into_vfsuid(idmap, inode);
-	if (vfsuid_eq_kuid(vfsuid, current_fsuid())) {
+	int ret;
+
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret < 0)
+		return ret;
+	if (ret == 0) {
 		if (vfsgid_eq(ia_vfsgid, vfsgid))
-			return true;
+			return 0;
 		if (vfsgid_in_group_p(ia_vfsgid))
-			return true;
+			return 0;
 	}
 	if (capable_wrt_inode_uidgid(idmap, inode, CAP_CHOWN))
-		return true;
+		return 0;
 	if (!vfsgid_valid(vfsgid) &&
 	    ns_capable(inode->i_sb->s_user_ns, CAP_CHOWN))
-		return true;
-	return false;
+		return 0;
+	return -EPERM;
 }
 
 /**
@@ -163,6 +170,7 @@ int setattr_prepare(struct mnt_idmap *idmap, struct dentry *dentry,
 {
 	struct inode *inode = d_inode(dentry);
 	unsigned int ia_valid = attr->ia_valid;
+	int ret;
 
 	/*
 	 * First check size constraints.  These can't be overridden using
@@ -189,14 +197,18 @@ int setattr_prepare(struct mnt_idmap *idmap, struct dentry *dentry,
 		goto kill_priv;
 
 	/* Make sure a caller can chown. */
-	if ((ia_valid & ATTR_UID) &&
-	    !chown_ok(idmap, inode, attr->ia_vfsuid))
-		return -EPERM;
+	if (ia_valid & ATTR_UID) {
+		ret = chown_ok(idmap, inode, attr->ia_vfsuid);
+		if (ret < 0)
+			return ret;
+	}
 
 	/* Make sure caller can chgrp. */
-	if ((ia_valid & ATTR_GID) &&
-	    !chgrp_ok(idmap, inode, attr->ia_vfsgid))
-		return -EPERM;
+	if (ia_valid & ATTR_GID) {
+		ret = chgrp_ok(idmap, inode, attr->ia_vfsgid);
+		if (ret < 0)
+			return ret;
+	}
 
 	/* Make sure a caller can chmod. */
 	if (ia_valid & ATTR_MODE) {

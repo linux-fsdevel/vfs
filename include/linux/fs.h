@@ -627,6 +627,7 @@ is_uncached_acl(struct posix_acl *acl)
 #define IOP_CACHED_LINK		0x0040
 #define IOP_FASTPERM_MAY_EXEC	0x0080
 #define IOP_FLCTX		0x0100
+#define IOP_OWNERSHIP_OVERRIDE	0x0200	/* Use ->is_owned_by_me() and ->have_same_owner() */
 
 /*
  * Inode state bits.  Protected by inode->i_lock
@@ -1755,8 +1756,7 @@ static inline bool file_write_not_started(const struct file *file)
 	return sb_write_not_started(file_inode(file)->i_sb);
 }
 
-bool inode_owner_or_capable(struct mnt_idmap *idmap,
-			    const struct inode *inode);
+bool inode_owner_or_capable(struct mnt_idmap *idmap, struct inode *inode);
 
 /*
  * VFS helper functions..
@@ -2034,6 +2034,9 @@ struct inode_operations {
 			    struct dentry *dentry, struct file_kattr *fa);
 	int (*fileattr_get)(struct dentry *dentry, struct file_kattr *fa);
 	struct offset_ctx *(*get_offset_ctx)(struct inode *inode);
+	int (*is_owned_by_me)(struct mnt_idmap *idmap, struct inode *inode);
+	int (*have_same_owner)(struct mnt_idmap *idmap, struct inode *inode1,
+			       struct inode *inode2);
 } ____cacheline_aligned;
 
 /* Did the driver provide valid mmap hook configuration? */

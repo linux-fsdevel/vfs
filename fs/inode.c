@@ -2746,16 +2746,19 @@ EXPORT_SYMBOL(inode_init_owner);
  * On non-idmapped mounts or if permission checking is to be performed on the
  * raw inode simply pass @nop_mnt_idmap.
  */
-bool inode_owner_or_capable(struct mnt_idmap *idmap,
-			    const struct inode *inode)
+bool inode_owner_or_capable(struct mnt_idmap *idmap, struct inode *inode)
 {
 	vfsuid_t vfsuid;
 	struct user_namespace *ns;
+	int ret;
+
+	ret = vfs_inode_is_owned_by_me(idmap, inode);
+	if (ret == 0)
+		return true;
+	if (ret < 0)
+		return false;
 
 	vfsuid = i_uid_into_vfsuid(idmap, inode);
-	if (vfsuid_eq_kuid(vfsuid, current_fsuid()))
-		return true;
-
 	ns = current_user_ns();
 	if (vfsuid_has_mapping(ns, vfsuid) && ns_capable(ns, CAP_FOWNER))
 		return true;
