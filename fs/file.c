@@ -273,8 +273,6 @@ static int expand_fdtable(struct files_struct *files, unsigned int nr)
 	rcu_assign_pointer(files->fdt, new_fdt);
 	if (cur_fdt != &files->fdtab)
 		call_rcu(&cur_fdt->rcu, free_fdtable_rcu);
-	/* coupled with smp_rmb() in fd_install() */
-	smp_wmb();
 	return 0;
 }
 
@@ -313,7 +311,8 @@ repeat:
 	/* All good, so we try */
 	files->resize_in_progress = true;
 	error = expand_fdtable(files, nr);
-	files->resize_in_progress = false;
+	/* coupled with smp_load_acquire() in fd_install() */
+	smp_store_release(&files->resize_in_progress, false);
 
 	wake_up_all(&files->resize_wait);
 	return error;
@@ -685,13 +684,12 @@ void fd_install(unsigned int fd, struct file *file)
 		return;
 
 	rcu_read_lock_sched();
-	if (unlikely(files->resize_in_progress)) {
+	/* coupled with smp_store_release() in expand_files() */
+	if (unlikely(smp_load_acquire(&files->resize_in_progress))) {
 		rcu_read_unlock_sched();
 		fd_install_slowpath(fd, file);
 		return;
 	}
-	/* coupled with smp_wmb() in expand_fdtable() */
-	smp_rmb();
 	fdt = rcu_dereference_sched(files->fdt);
 	VFS_BUG_ON(rcu_access_pointer(fdt->fd[fd]) != NULL);
 	rcu_assign_pointer(fdt->fd[fd], file);
