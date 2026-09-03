@@ -219,10 +219,9 @@ EXPORT_SYMBOL_GPL(vfsgid_in_group_p);
 static int copy_mnt_idmap(struct uid_gid_map *map_from,
 			  struct uid_gid_map *map_to)
 {
+	/* Pairs with smp_store_release() in map_write(). */
+	u32 nr_extents = smp_load_acquire(&map_from->nr_extents);
 	struct uid_gid_extent *forward, *reverse;
-	u32 nr_extents = READ_ONCE(map_from->nr_extents);
-	/* Pairs with smp_wmb() when writing the idmapping. */
-	smp_rmb();
 
 	/*
 	 * Don't blindly copy @map_to into @map_from if nr_extents is
