@@ -1,0 +1,286 @@
+.\" Copyright, the authors of the Linux man-pages project
+.\"
+.\" SPDX-License-Identifier: Linux-man-pages-copyleft
+.\"
+.TH file_getattr 2 (date) "Linux man-pages (unreleased)"
+.SH NAME
+file_getattr \- get filesystem inode attributes
+.SH SYNOPSIS
+.nf
+.BR "#include <linux/fcntl.h>" "      /* " AT_* " constants */"
+.BR "#include <linux/fs.h>" "         /* struct " file_attr " and " FS_XFLAG_* " constants */"
+.BR "#include <sys/syscall.h>" "      /* " SYS_* " constants */"
+.B #include <unistd.h>
+.P
+.B long syscall(SYS_file_getattr,
+.BI "               int " dirfd ", const char *" pathname ,
+.BI "               struct file_attr *" fattr ", size_t " size ,
+.BI "               unsigned int " flags );
+.fi
+.P
+.IR Note :
+glibc provides no wrapper for
+.BR file_getattr (),
+use
+.BR syscall (2)
+instead.
+.SH DESCRIPTION
+The
+.BR file_getattr ()
+system call retrieves filesystem file attributes
+from the file specified by
+.IR pathname .
+.P
+This system call provides functionality similar to the
+.B FS_IOC_FSGETXATTR
+.BR ioctl (2)
+operation,
+but with the advantage that the file does not need to be opened.
+By using a pathname,
+.BR file_getattr ()
+can retrieve filesystem file attributes
+from all file types,
+including special files such as FIFOs, sockets, block devices, character
+devices, and symlinks, where opening targeted inode may not be possible.
+.P
+As with
+.BR openat (2),
+if
+.I pathname
+is relative,
+then it is interpreted relative to the directory
+referred to by the file descriptor
+.IR dirfd .
+The special value
+.B AT_FDCWD
+could be used to refer to the current working directory of the calling process.
+If
+.I pathname
+is absolute,
+then
+.I dirfd
+is ignored.
+.P
+The
+.I fattr
+argument is a pointer to a
+.I file_attr
+structure.
+This structure will be filled with file attributes.
+This structure is described in
+.BR file_attr(2type) .
+.P
+The
+.I size
+argument specifies the size of the buffer pointed to by
+.IR fattr .
+The size indicates version of the structure in use, refer to
+.B file_attr(2type)
+for more information on versioning.
+.P
+Userspace applications should zero-initialize
+.I struct file_attr
+before calling
+.BR file_getattr ()
+to ensure that fields not filled in by older kernels
+will have predictable values.
+.P
+The
+.I flags
+argument is a bit mask, available flags are:
+.TP
+.B AT_EMPTY_PATH
+If
+.I pathname
+is an empty string,
+operate on the file referred to by
+.IR dirfd .
+In this case,
+.I dirfd
+can refer to any type of file,
+not just a directory.
+If
+.I dirfd
+is
+.BR AT_FDCWD ,
+the call fails with the error
+.BR EBADF .
+.TP
+.B AT_SYMLINK_NOFOLLOW
+If
+.I pathname
+is a symbolic link,
+do not dereference it;
+instead get attributes of the symbolic link inode itself.
+By default, symbolic links are dereferenced.
+.SH RETURN VALUE
+On success,
+zero is returned.
+On error,
+\-1 is returned,
+and
+.I errno
+is set to indicate the error.
+.SH ERRORS
+.TP
+.B E2BIG
+.I size
+is too big (larger than
+.BR PAGE_SIZE ).
+.TP
+.B EACCES
+Search permission is denied for one of the directories
+in the path prefix of
+.IR pathname .
+.TP
+.B EBADF
+.I pathname
+is relative but
+.I dirfd
+is neither
+.B AT_FDCWD
+nor a valid file descriptor.
+.TP
+.B EBADF
+.I pathname
+is an empty string,
+.B AT_EMPTY_PATH
+was specified,
+but
+.I dirfd
+is an invalid file descriptor.
+.TP
+.B EFAULT
+.I pathname
+or
+.I fattr
+is an invalid pointer.
+.TP
+.B EINVAL
+Invalid flag specified in
+.IR flags .
+.TP
+.B EINVAL
+.I size
+is smaller than
+.BR FILE_ATTR_SIZE_VER0 .
+.TP
+.B ELOOP
+Too many symbolic links encountered while resolving
+.IR pathname .
+.TP
+.B ENAMETOOLONG
+.I pathname
+is too long.
+.TP
+.B ENOENT
+A component of
+.I pathname
+does not exist,
+or
+.I pathname
+is an empty string and
+.B AT_EMPTY_PATH
+was not specified in
+.IR flags .
+.TP
+.B ENOMEM
+Insufficient kernel memory was available.
+.TP
+.B ENOTDIR
+A component of the path prefix of
+.I pathname
+is not a directory or,
+.I pathname
+is relative and
+.I dirfd
+is a file descriptor referring to a file other than a directory.
+.TP
+.B EOPNOTSUPP
+The filesystem does not support getting attributes on this type of inode.
+.SH HISTORY
+.SS Linux 6.17
+This system call is introduced as a more flexible alternative to the
+FS_IOC_FSGETXATTR
+.BR ioctl (2)
+which could work on any type of files.
+.SH NOTES
+This system call is designed to be extensible.
+The
+.I size
+argument allows userspace applications to indicate
+which version of the
+.I file_attr
+structure they are using,
+enabling the kernel to support both old and new versions
+of the structure simultaneously.
+.P
+If
+.I size
+is smaller than the structure size the kernel expects,
+only the fields that fit within
+.I size
+will be filled in.
+If
+.I size
+is larger than the kernel's structure size,
+the extra bytes are zeroed.
+.SH EXAMPLES
+The program below demonstrates the use of
+.BR file_getattr ()
+to retrieve and display file attributes.
+.P
+.in +4n
+.EX
+#include <fcntl.h>
+#include <linux/fs.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef SYS_file_getattr
+#define SYS_file_getattr 467
+#endif
+
+int
+main(int argc, char *argv[])
+{
+    struct file_attr fa = { 0 };
+    int dfd;
+    long ret;
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <filename>\\n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    ret = syscall(SYS_file_getattr, AT_FDCWD, argv[1], &fa, sizeof(fa), 0);
+    if (ret == \-1) {
+        perror("file_getattr");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("File attributes:\\n");
+    printf("  xflags:     0x%llx\\n", (unsigned long long)fa.fa_xflags);
+    printf("  extsize:    %u\\n", fa.fa_extsize);
+    printf("  nextents:   %u\\n", fa.fa_nextents);
+    printf("  projid:     %u\\n", fa.fa_projid);
+    printf("  cowextsize: %u\\n", fa.fa_cowextsize);
+
+    /*
+     * Try setting NODUMP flag with chattr +d ./foo to see the difference
+     */
+    if (fa.fa_xflags & FS_XFLAG_NODUMP)
+        printf("  NODUMP flag is set\\n");
+
+    exit(EXIT_SUCCESS);
+}
+.EE
+.in
+.SH SEE ALSO
+.BR file_setattr (2),
+.BR file_attr (2type),
+.BR ioctl (2),
+.BR ioctl_fs (2),
+.BR openat (2)
