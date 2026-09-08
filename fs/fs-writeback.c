@@ -40,6 +40,7 @@ struct wb_writeback_work {
 	struct super_block *sb;
 	enum writeback_sync_modes sync_mode;
 	unsigned int tagged_writepages:1;
+	unsigned int for_foreign_flush:1;
 	unsigned int for_kupdate:1;
 	unsigned int range_cyclic:1;
 	unsigned int for_background:1;
@@ -1166,7 +1167,7 @@ int cgroup_writeback_by_id(u64 bdi_id, int memcg_id,
 	struct cgroup_subsys_state *memcg_css;
 	struct bdi_writeback *wb;
 	struct wb_writeback_work *work;
-	unsigned long dirty;
+	long dirty;
 	int ret;
 
 	/* lookup bdi and memcg */
@@ -1195,16 +1196,13 @@ int cgroup_writeback_by_id(u64 bdi_id, int memcg_id,
 	}
 
 	/*
-	 * The caller is attempting to write out most of
-	 * the currently dirty pages.  Let's take the current dirty page
-	 * count and inflate it by 25% which should be large enough to
-	 * flush out most dirty pages while avoiding getting livelocked by
-	 * concurrent dirtiers.
-	 *
-	 * BTW the memcg stats are flushed periodically and this is best-effort
-	 * estimation, so some potential error is ok.
+	 * The caller is attempting to write out most of the target wb's
+	 * currently dirty pages.  Size the work from the wb's reclaimable pages
+	 * and inflate the count by 25%, which should be large enough to flush
+	 * out most dirty pages while avoiding getting livelocked by concurrent
+	 * dirtiers.
 	 */
-	dirty = memcg_page_state(mem_cgroup_from_css(memcg_css), NR_FILE_DIRTY);
+	dirty = wb_stat_sum(wb, WB_RECLAIMABLE);
 	dirty = dirty * 10 / 8;
 
 	/* issue the writeback work */
@@ -1212,6 +1210,12 @@ int cgroup_writeback_by_id(u64 bdi_id, int memcg_id,
 	if (work) {
 		work->nr_pages = dirty;
 		work->sync_mode = WB_SYNC_NONE;
+		/*
+		 * Foreign flushes should write a snapshot of dirty pages without
+		 * chasing concurrent dirtiers, but still honor the finite target
+		 * wb budget calculated above.
+		 */
+		work->for_foreign_flush = 1;
 		work->range_cyclic = 1;
 		work->reason = reason;
 		work->done = done;
@@ -1582,18 +1586,21 @@ out:
  *                                           +--> dequeue for IO
  */
 static void queue_io(struct bdi_writeback *wb, struct wb_writeback_work *work,
-		     unsigned long dirtied_before)
+		     unsigned long dirtied_before, bool queue_dirty)
 {
-	int moved;
+	int moved = 0;
 	unsigned long time_expire_jif = dirtied_before;
 
 	assert_spin_locked(&wb->list_lock);
 	list_splice_init(&wb->b_more_io, &wb->b_io);
-	moved = move_expired_inodes(&wb->b_dirty, &wb->b_io, dirtied_before);
-	if (!work->for_sync)
-		time_expire_jif = jiffies - dirtytime_expire_interval * HZ;
-	moved += move_expired_inodes(&wb->b_dirty_time, &wb->b_io,
-				     time_expire_jif);
+	if (queue_dirty) {
+		moved = move_expired_inodes(&wb->b_dirty, &wb->b_io,
+					    dirtied_before);
+		if (!work->for_sync)
+			time_expire_jif = jiffies - dirtytime_expire_interval * HZ;
+		moved += move_expired_inodes(&wb->b_dirty_time, &wb->b_io,
+					     time_expire_jif);
+	}
 	if (moved)
 		wb_io_lists_populated(wb);
 	trace_writeback_queue_io(wb, work, dirtied_before, moved);
@@ -1680,11 +1687,13 @@ static void requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 
 	/*
 	 * Sync livelock prevention. Each inode is tagged and synced in one
-	 * shot. If still dirty, it will be redirty_tail()'ed below.  Update
-	 * the dirty time to prevent enqueue and sync it again.
+	 * shot for WB_SYNC_ALL or unbudgeted tagged writeback. If still dirty,
+	 * it will be redirty_tail()'ed below. Update the dirty time to prevent
+	 * enqueue and sync it again.
 	 */
 	if ((inode_state_read(inode) & I_DIRTY) &&
-	    (wbc->sync_mode == WB_SYNC_ALL || wbc->tagged_writepages))
+	    (wbc->sync_mode == WB_SYNC_ALL ||
+	     (wbc->tagged_writepages && !wbc->for_foreign_flush)))
 		inode->dirtied_when = jiffies;
 
 	if (wbc->pages_skipped) {
@@ -1707,6 +1716,7 @@ static void requeue_inode(struct inode *inode, struct bdi_writeback *wb,
 		 * sometimes bales out without doing anything.
 		 */
 		if (wbc->nr_to_write <= 0 &&
+		    !wbc->for_foreign_flush &&
 		    !inode_dirtied_after(inode, dirtied_before)) {
 			/* Slice used up. Queue for next turn. */
 			requeue_io(inode, wb);
@@ -1978,6 +1988,8 @@ static long writeback_chunk_size(struct super_block *sb,
 	 *                   (quickly) tag currently dirty pages
 	 *                   (maybe slowly) sync all tagged pages
 	 */
+	if (work->for_foreign_flush)
+		return work->nr_pages;
 	if (work->sync_mode == WB_SYNC_ALL || work->tagged_writepages)
 		return LONG_MAX;
 
@@ -2003,7 +2015,9 @@ static long writeback_sb_inodes(struct super_block *sb,
 {
 	struct writeback_control wbc = {
 		.sync_mode		= work->sync_mode,
-		.tagged_writepages	= work->tagged_writepages,
+		.tagged_writepages	= work->tagged_writepages ||
+					  work->for_foreign_flush,
+		.for_foreign_flush	= work->for_foreign_flush,
 		.for_kupdate		= work->for_kupdate,
 		.for_background		= work->for_background,
 		.for_sync		= work->for_sync,
@@ -2201,7 +2215,7 @@ static long writeback_inodes_wb(struct bdi_writeback *wb, long nr_pages,
 	blk_start_plug(&plug);
 	spin_lock(&wb->list_lock);
 	if (list_empty(&wb->b_io))
-		queue_io(wb, &work, jiffies);
+		queue_io(wb, &work, jiffies, true);
 	__writeback_inodes_wb(wb, &work);
 	spin_unlock(&wb->list_lock);
 	blk_finish_plug(&plug);
@@ -2262,6 +2276,13 @@ static long wb_writeback(struct bdi_writeback *wb,
 
 		spin_lock(&wb->list_lock);
 
+		if (queued && work->for_foreign_flush &&
+		    list_empty(&wb->b_io) &&
+		    list_empty(&wb->b_more_io)) {
+			spin_unlock(&wb->list_lock);
+			break;
+		}
+
 		trace_writeback_start(wb, work);
 		if (list_empty(&wb->b_io)) {
 			/*
@@ -2277,7 +2298,14 @@ static long wb_writeback(struct bdi_writeback *wb,
 			} else if (work->for_background)
 				dirtied_before = jiffies;
 
-			queue_io(wb, work, dirtied_before);
+			/*
+			 * After the initial queue_io() pass, a foreign flush may
+			 * still have I_SYNC-skipped inodes on b_more_io.  Move
+			 * those back to b_io without selecting another batch from
+			 * b_dirty.
+			 */
+			queue_io(wb, work, dirtied_before,
+				 !work->for_foreign_flush || !queued);
 			queued = true;
 		}
 		if (work->sb)
