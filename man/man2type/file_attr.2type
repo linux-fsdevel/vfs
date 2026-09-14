@@ -1,0 +1,187 @@
+.\" Copyright, the authors of the Linux man-pages project
+.\"
+.\" SPDX-License-Identifier: Linux-man-pages-copyleft
+.\"
+.TH file_attr 2type (date) "Linux man-pages (unreleased)"
+.SH NAME
+file_attr \- describe filesystem file attributes to get or set
+.SH SYNOPSIS
+.EX
+.B #include <linux/fs.h>
+.P
+.B struct file_attr {
+.BR "    u64  fa_xflags;" "     /* Extended flags */"
+.BR "    u32  fa_extsize;" "    /* Extent size hint */"
+.BR "    u32  fa_nextents;" "   /* Number of extents (read-only) */"
+.BR "    u32  fa_projid;" "     /* Project identifier */"
+.BR "    u32  fa_cowextsize;" " /* CoW extent size hint */"
+.B };
+.EE
+.SH DESCRIPTION
+Describes filesystem file attributes
+for use with the
+.BR file_getattr (2)
+and
+.BR file_setattr (2)
+system calls.
+.P
+The fields are as follows:
+.TP
+.I fa_xflags
+This field contains file attribute flags.
+It is a bit mask consisting of zero or more of the
+.B FS_XFLAG_*
+flags.
+Refer to the section
+.B FLAGS
+below for a list of all flags.
+.TP
+.I fa_extsize
+Extent size allocator hint in bytes.
+This value suggests a preferred extent size
+for new allocations to this file.
+.TP
+.I fa_nextents
+Number of data extents in the file (read-only).
+This field is filled in by
+.BR file_getattr (2)
+and is ignored by
+.BR file_setattr (2).
+.TP
+.I fa_projid
+Project identifier.
+Used by quota systems to group related files.
+.TP
+.I fa_cowextsize
+Copy-on-Write (CoW) extent size hint in bytes.
+This value suggests a preferred extent size
+for CoW operations.
+.SH FLAGS
+Flags can be:
+.RS
+.TP
+.B FS_XFLAG_REALTIME
+Data is stored in a realtime volume.
+.TP
+.B FS_XFLAG_IMMUTABLE
+File cannot be modified.
+.TP
+.B FS_XFLAG_APPEND
+All writes must append to the end of the file.
+.TP
+.B FS_XFLAG_SYNC
+All writes are synchronous.
+.TP
+.B FS_XFLAG_NOATIME
+Do not update file access time on reads.
+.TP
+.B FS_XFLAG_NODUMP
+Do not include file in backups.
+.TP
+.B FS_XFLAG_DAX
+Use Direct Access (DAX) for I/O operations.
+.TP
+.B FS_XFLAG_NODEFRAG
+Exclude this file from defragmentation operations.
+.TP
+.B FS_XFLAG_FILESTREAM
+Use filestream allocator for this file.
+.TP
+.B FS_XFLAG_EXTSIZE
+Use the extent size hint from the
+.I fa_extsize
+field.
+.TP
+.B FS_XFLAG_COWEXTSIZE
+Use the CoW extent size hint from the
+.I fa_cowextsize
+field.
+.RE
+.P
+Directory only flags:
+.RS
+.TP
+.B FS_XFLAG_RTINHERIT
+New files created in this directory inherit the realtime flag.
+.TP
+.B FS_XFLAG_NOSYMLINKS
+Disallow creation of symbolic links in this directory.
+.TP
+.B FS_XFLAG_EXTSZINHERIT
+New files created in this directory inherit the extent size hint.
+.TP
+.B FS_XFLAG_PROJINHERIT
+New files created in this directory inherit the project identifier.
+.RE
+.P
+The following flags are read-only:
+.RS
+.TP
+.B FS_XFLAG_PREALLOC
+File has preallocated extents.
+.TP
+.B FS_XFLAG_HASATTR
+File has extended attributes.
+.TP
+.B FS_XFLAG_VERITY
+File has fs-verity enabled.
+.TP
+.B FS_XFLAG_CASEFOLD
+The filesystem performs case-insensitive lookups (file and directory name
+comparisons ignore case).
+.TP
+.B FS_XFLAG_CASENONPRESERVING
+The filesystem does not preserve the case of file and directory names.
+.RE
+.P
+Not all filesystems support all flags.
+Setting unsupported flags may result in an
+.B EINVAL
+or
+.B EOPNOTSUPP
+error.
+.SH VERSIONS
+.SS Structure size
+The structure size is defined by
+.B FILE_ATTR_SIZE_VER*
+which is also a version of the structure being used.
+The
+.I size
+parameter passed to
+.BR file_getattr (2)
+and
+.BR file_setattr (2)
+indicates the version of
+.I struct file_attr\fP.
+.SS FILE_ATTR_SIZE_VER0
+Size is 24 bytes.
+.SH HISTORY
+.SS Linux v6.17
+This structure is introduced.
+The
+.I struct file_attr
+provides similar functionality to
+.I struct fsxattr
+used by the
+.B FS_IOC_FSGETXATTR
+and
+.B FS_IOC_FSSETXATTR
+.BR ioctl (2)
+operations,
+but is designed to be extensible through the
+.I size
+parameter of the system calls.
+.P
+Extra fields may be appended to the structure in future kernel versions.
+The kernel will expect new fields to be zeros
+for older versions of the structure.
+Therefore, a user
+.I must
+zero-fill the structure on initialization to keep compatibility with older
+kernels.
+.SS Linux v7.2
+The FS_XFLAG_CASEFOLD and FS_XFLAG_CASENONPRESERVING are introduced to enable
+upper layers, such as NFSD, to retrieve case sensitivity information.
+.SH SEE ALSO
+.BR file_getattr (2),
+.BR file_setattr (2)
