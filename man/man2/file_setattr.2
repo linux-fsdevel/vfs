@@ -1,0 +1,180 @@
+.\" Copyright, the authors of the Linux man-pages project
+.\"
+.\" SPDX-License-Identifier: Linux-man-pages-copyleft
+.\"
+.TH file_setattr 2 (date) "Linux man-pages (unreleased)"
+.SH NAME
+file_setattr \- set filesystem file attributes
+.SH SYNOPSIS
+.nf
+.BR "#include <linux/fcntl.h>" "      /* Definition of " AT_* " constants */"
+.BR "#include <linux/fs.h>" "         /* Definition of " FS_XFLAG_* " constants */"
+.BR "#include <sys/syscall.h>" "      /* Definition of " SYS_* " constants */"
+.B #include <unistd.h>
+.P
+.B long syscall(SYS_file_setattr,
+.BI "               int " dirfd ", const char *" path ,
+.BI "               struct file_attr *" fattr ", size_t " size ,
+.BI "               unsigned int " flags );
+.fi
+.P
+.SH DESCRIPTION
+The
+.BR file_setattr ()
+system call sets filesystem file attributes
+on the file specified by path.
+.P
+The
+.IR dirfd ,
+.IR path ,
+.IR fattr ,
+.IR size ,
+and
+.I flags
+arguments behaves in the same way as in
+.BR file_getattr (2).
+The only difference is that
+user-space applications should use
+.BR file_getattr (2)
+to initialize
+.I fattr
+argument beforehand.
+.SH RETURN VALUE
+On success,
+zero is returned.
+On error,
+\-1 is returned,
+and
+.I errno
+is set to indicate the error.
+.SH ERRORS
+.P
+The errors are the same as returned by
+.BR file_getattr (2)
+with the addition of following ones:
+.TP
+.B E2BIG
+.I size
+indicates a version which the kernel doesn't support
+(the size is larger than the kernel expects)
+and new fields are non-zero.
+.TP
+.B EINVAL
+Invalid combination of parameters provided in
+.I fattr
+for this type of file or filesystem.
+.TP
+.B EPERM
+The caller does not have the necessary permissions
+to change the file attributes.
+.TP
+.B EROFS
+The file is on a read-only filesystem.
+.SH HISTORY
+.SS Linux 6.17
+This system call is introduced.
+.SH NOTES
+This system call is designed to be extensible.
+The
+.I size
+argument allows user-space applications to indicate
+which version of the
+.I file_attr
+structure they are using,
+enabling the kernel to support both old and new versions
+of the structure simultaneously.
+.P
+If
+.I size
+is smaller than the structure size the kernel expects,
+the kernel treats the missing fields as having zero values
+(which is a no-op).
+If
+.I size
+is larger than expected,
+the kernel checks that all unknown (to the kernel) fields are zero;
+if not,
+the call fails with
+.BR E2BIG .
+.SH EXAMPLES
+The program below demonstrates the use of
+.BR file_setattr ()
+to set the
+.B FS_XFLAG_NODUMP
+flag on a file.
+.P
+.in +4n
+.EX
+#include <fcntl.h>
+#include <linux/fcntl.h>
+#include <linux/fs.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+
+#ifndef SYS_file_getattr
+#define SYS_file_getattr 467
+#endif
+
+#ifndef SYS_file_setattr
+#define SYS_file_setattr 468
+#endif
+
+int
+main(int argc, char *argv[])
+{
+    struct file_attr fa;
+    int dfd;
+    long ret;
+
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <filename>\[rs]n", argv[0]);
+        exit(EXIT_FAILURE);
+    }
+
+    dfd = open(argv[1], O_RDONLY);
+    if (dfd == \-1) {
+        perror("open");
+        exit(EXIT_FAILURE);
+    }
+
+    ret = syscall(SYS_file_getattr, dfd, "", &fa, sizeof(fa), AT_EMPTY_PATH);
+    if (ret == \-1) {
+        perror("file_getattr");
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Current flags: 0x%llx\[rs]n", (unsigned long long) fa.fa_xflags);
+
+    fa.fa_xflags |= FS_XFLAG_NODUMP;
+
+    ret = syscall(SYS_file_setattr, dfd, "", &fa, sizeof(fa), AT_EMPTY_PATH);
+    if (ret == \-1) {
+        perror("file_setattr");
+        exit(EXIT_FAILURE);
+    }
+
+    ret = syscall(SYS_file_getattr, dfd, "", &fa, sizeof(fa), AT_EMPTY_PATH);
+    if (ret == \-1) {
+        perror("file_getattr");
+        exit(EXIT_FAILURE);
+    }
+
+    if (fa.fa_xflags & FS_XFLAG_NODUMP)
+        printf("flags 0x%llx (NODUMP flag is set)\[rs]n",
+            (unsigned long long) fa.fa_xflags);
+
+    exit(EXIT_SUCCESS);
+}
+.EE
+.in
+.SH SEE ALSO
+.BR file_getattr (2),
+.BR ioctl (2),
+.BR ioctl_fs (2),
+.BR openat (2),
+.BR file_attr (2type),
+.BR path_resolution (7),
+.BR ioctl_xfs_fssetxattr (2)
