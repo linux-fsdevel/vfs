@@ -4115,7 +4115,7 @@ int path_mount(const char *dev_name, const struct path *path,
 	if (flags & SB_MANDLOCK)
 		warn_mandlock();
 
-	/* Default to relatime unless overriden */
+	/* Default to relatime unless overridden */
 	if (!(flags & MS_NOATIME))
 		mnt_flags |= MNT_RELATIME;
 
@@ -4246,8 +4246,6 @@ struct mnt_namespace *copy_mnt_ns(u64 flags, struct mnt_namespace *ns,
 	struct mount *old;
 	struct mount *new;
 	int copy_flags;
-
-	BUG_ON(!ns);
 
 	if (likely(!(flags & CLONE_NEWNS))) {
 		get_mnt_ns(ns);
@@ -4544,16 +4542,16 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 
 	FD_PREPARE(fdf, (flags & FSMOUNT_CLOEXEC) ? O_CLOEXEC : 0,
 		   dentry_open(&new_path, O_PATH, fc->cred));
-	if (fdf.err) {
+	if (fdf->fd < 0) {
 		dissolve_on_fput(new_path.mnt);
-		return fdf.err;
+		return fdf->fd;
 	}
 
 	/*
 	 * Attach to an apparent O_PATH fd with a note that we
 	 * need to unmount it, not just simply put it.
 	 */
-	fd_prepare_file(fdf)->f_mode |= FMODE_NEED_UNMOUNT;
+	fdf->file->f_mode |= FMODE_NEED_UNMOUNT;
 	return fd_publish(fdf);
 }
 
@@ -5198,12 +5196,12 @@ SYSCALL_DEFINE5(open_tree_attr, int, dfd, const char __user *, filename,
 		return -EINVAL;
 
 	FD_PREPARE(fdf, flags, vfs_open_tree(dfd, filename, flags));
-	if (fdf.err)
-		return fdf.err;
+	if (fdf->fd < 0)
+		return fdf->fd;
 
 	if (uattr) {
 		struct mount_kattr kattr = {};
-		struct file *file = fd_prepare_file(fdf);
+		struct file *file = fdf->file;
 		int ret;
 
 		if (flags & OPEN_TREE_CLONE)
@@ -5999,7 +5997,7 @@ SYSCALL_DEFINE4(statmount, const struct mnt_id_req __user *, req,
 			return -EPERM;
 	}
 
-	ks = kmalloc(sizeof(*ks), GFP_KERNEL_ACCOUNT);
+	ks = kmalloc_obj(*ks, GFP_KERNEL_ACCOUNT);
 	if (!ks)
 		return -ENOMEM;
 
@@ -6184,6 +6182,21 @@ struct mnt_namespace init_mnt_ns = {
 	.poll		= __WAIT_QUEUE_HEAD_INITIALIZER(init_mnt_ns.poll),
 };
 
+static void __init mount_rootfs_on_nullfs(struct vfsmount *mnt,
+					  struct vfsmount *nullfs_mnt)
+{
+	struct path root = {
+		.mnt	= nullfs_mnt,
+		.dentry	= nullfs_mnt->mnt_root,
+	};
+
+	LOCK_MOUNT_EXACT(mp, &root);
+	if (unlikely(IS_ERR(mp.parent)))
+		panic("VFS: Failed to mount rootfs on nullfs");
+	scoped_guard(mount_writer)
+		attach_mnt(real_mount(mnt), mp.parent, mp.mp);
+}
+
 static void __init init_mount_tree(void)
 {
 	struct vfsmount *mnt, *nullfs_mnt;
@@ -6215,15 +6228,7 @@ static void __init init_mount_tree(void)
 	mnt_root		= real_mount(nullfs_mnt);
 	init_mnt_ns.root	= mnt_root;
 
-	/* Mount mutable rootfs on top of nullfs. */
-	root.mnt		= nullfs_mnt;
-	root.dentry		= nullfs_mnt->mnt_root;
-
-	LOCK_MOUNT_EXACT(mp, &root);
-	if (unlikely(IS_ERR(mp.parent)))
-		panic("VFS: Failed to mount rootfs on nullfs");
-	scoped_guard(mount_writer)
-		attach_mnt(real_mount(mnt), mp.parent, mp.mp);
+	mount_rootfs_on_nullfs(mnt, nullfs_mnt);
 
 	pr_info("VFS: Finished mounting rootfs on nullfs\n");
 
