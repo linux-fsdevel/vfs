@@ -467,6 +467,8 @@ out2:
 out1:
 	iput(sbi->inodes);
 out:
+	if (qs->sb_buf && qs->sb_buf != bh1 && qs->sb_buf != bh2)
+		brelse(qs->sb_buf);
 	brelse(bh1);
 	brelse(bh2);
 outnobh:
