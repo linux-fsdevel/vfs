@@ -17,6 +17,7 @@
 #include <linux/module.h>
 #include <linux/capability.h>
 #include <linux/completion.h>
+#include <linux/wait_bit.h>
 #include <linux/personality.h>
 #include <linux/tty.h>
 #include <linux/iocontext.h>
@@ -261,8 +262,11 @@ repeat:
 	pidfs_exit(p);
 	cgroup_task_release(p);
 
-	/* Retrieve @thread_pid before __unhash_process() may set it to NULL. */
-	thread_pid = task_pid(p);
+	/*
+	 * Pin @thread_pid before __unhash_process() clears it. The last
+	 * PIDTYPE detach can otherwise free it before proc_flush_pid().
+	 */
+	thread_pid = get_pid(task_pid(p));
 
 	write_lock_irq(&tasklist_lock);
 	ptrace_release_task(p);
@@ -291,8 +295,8 @@ repeat:
 	}
 
 	write_unlock_irq(&tasklist_lock);
-	/* @thread_pid can't go away until free_pids() below */
 	proc_flush_pid(thread_pid);
+	put_pid(thread_pid);
 	exit_cred_namespaces(p);
 	add_device_randomness(&p->se.sum_exec_runtime,
 			      sizeof(p->se.sum_exec_runtime));
@@ -432,15 +436,14 @@ static void coredump_task_exit(struct task_struct *tsk,
 
 	self.task = tsk;
 	if (self.task->flags & PF_SIGNALED)
-		self.next = xchg(&core_state->dumper.next, &self);
+		self.next = xchg(&core_state->tasks, &self);
 	else
 		self.task = NULL;
 	/*
 	 * Implies mb(), the result of xchg() must be visible
-	 * to core_state->dumper.
+	 * to the dumper.
 	 */
-	if (atomic_dec_and_test(&core_state->nr_threads))
-		complete(&core_state->startup);
+	atomic_dec_and_wake_up(&core_state->threads_remaining);
 
 	for (;;) {
 		set_current_state(TASK_IDLE|TASK_FREEZABLE);
@@ -914,7 +917,7 @@ static void synchronize_group_exit(struct task_struct *tsk, long code)
 	 * Serialize with any possible pending coredump.
 	 * We must hold siglock around checking core_state
 	 * and setting PF_POSTCOREDUMP.  The core-inducing thread
-	 * will increment ->nr_threads for each thread in the
+	 * will increment ->threads_remaining for each thread in the
 	 * group without PF_POSTCOREDUMP set.
 	 */
 	tsk->flags |= PF_POSTCOREDUMP;
@@ -1000,10 +1003,11 @@ void __noreturn do_exit(long code)
 
 	exit_sem(tsk);
 	exit_shm(tsk);
-	exit_files(tsk);
-	exit_fs(tsk);
+	/* Hang the tty up before the last close of it can clear the session. */
 	if (group_dead)
 		disassociate_ctty(1);
+	exit_files(tsk);
+	exit_fs(tsk);
 	exit_nsproxy_namespaces(tsk);
 	exit_task_work(tsk);
 	exit_thread(tsk);

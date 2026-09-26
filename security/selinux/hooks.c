@@ -2159,6 +2159,36 @@ static int selinux_ptrace_traceme(struct task_struct *parent)
 			    SECCLASS_PROCESS, PROCESS__PTRACE, NULL);
 }
 
+/**
+ * selinux_mem_foll_force() - Determine whether /proc/$pid/mem can use FOLL_FORCE
+ * @subject: credentials using which /proc/$pid/mem was opened
+ * @opened_by_owner: whether checks on open() were bypassed because the opener
+ *                   has the same MM as the target
+ *
+ * Decide whether it should be possible to read non-readable VMAs and write
+ * non-writable VMAs via /proc/self/mem.
+ * The @opened_by_owner case only applies to systems configured with
+ * PROC_MEM_FORCE_ALWAYS, and only happens on accesses that are not visible to
+ * selinux_ptrace_access_check() because of the introspection exceptions in
+ * may_access_mm() and __ptrace_may_access().
+ *
+ * This allows a process to overwrite read-only code in its own address space.
+ *
+ * Creating an audit record on denial doesn't make sense here, since we can't
+ * tell whether FOLL_FORCE matters for the accessed VMAs.
+ */
+static int selinux_mem_foll_force(const struct cred *subject, bool opened_by_owner)
+{
+	struct av_decision avd;
+	u32 sid;
+
+	if (!opened_by_owner)
+		return 0;
+	sid = cred_sid(subject);
+
+	return avc_has_perm_noaudit(sid, sid, SECCLASS_PROCESS, PROCESS__PTRACE, 0, &avd);
+}
+
 static int selinux_capget(const struct task_struct *target, kernel_cap_t *effective,
 			  kernel_cap_t *inheritable, kernel_cap_t *permitted)
 {
@@ -3297,7 +3327,7 @@ static int selinux_inode_permission(struct inode *inode, int requested)
 	return rc;
 }
 
-static int selinux_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+static int selinux_inode_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 				 struct iattr *iattr)
 {
 	const struct cred *cred = current_cred();
@@ -3367,7 +3397,7 @@ static int selinux_inode_xattr_skipcap(const char *name)
 	return !strcmp(name, XATTR_NAME_SELINUX);
 }
 
-static int selinux_inode_setxattr(struct mnt_idmap *idmap,
+static int selinux_inode_setxattr(const struct mnt_idmap *idmap,
 				  struct dentry *dentry, const char *name,
 				  const void *value, size_t size, int flags)
 {
@@ -3453,20 +3483,20 @@ static int selinux_inode_setxattr(struct mnt_idmap *idmap,
 			    &ad);
 }
 
-static int selinux_inode_set_acl(struct mnt_idmap *idmap,
+static int selinux_inode_set_acl(const struct mnt_idmap *idmap,
 				 struct dentry *dentry, const char *acl_name,
 				 struct posix_acl *kacl)
 {
 	return dentry_has_perm(current_cred(), dentry, FILE__SETATTR);
 }
 
-static int selinux_inode_get_acl(struct mnt_idmap *idmap,
+static int selinux_inode_get_acl(const struct mnt_idmap *idmap,
 				 struct dentry *dentry, const char *acl_name)
 {
 	return dentry_has_perm(current_cred(), dentry, FILE__GETATTR);
 }
 
-static int selinux_inode_remove_acl(struct mnt_idmap *idmap,
+static int selinux_inode_remove_acl(const struct mnt_idmap *idmap,
 				    struct dentry *dentry, const char *acl_name)
 {
 	return dentry_has_perm(current_cred(), dentry, FILE__SETATTR);
@@ -3526,7 +3556,7 @@ static int selinux_inode_listxattr(struct dentry *dentry)
 	return dentry_has_perm(cred, dentry, FILE__GETATTR);
 }
 
-static int selinux_inode_removexattr(struct mnt_idmap *idmap,
+static int selinux_inode_removexattr(const struct mnt_idmap *idmap,
 				     struct dentry *dentry, const char *name)
 {
 	/* if not a selinux xattr, only check the ordinary setattr perm */
@@ -3606,7 +3636,7 @@ static int selinux_path_notify(const struct path *path, u64 mask,
  *
  * Permission check is handled by selinux_inode_getxattr hook.
  */
-static int selinux_inode_getsecurity(struct mnt_idmap *idmap,
+static int selinux_inode_getsecurity(const struct mnt_idmap *idmap,
 				     struct inode *inode, const char *name,
 				     void **buffer, bool alloc)
 {
@@ -7267,24 +7297,6 @@ static int selinux_bpf_prog(struct bpf_prog *prog)
 			    BPF__PROG_RUN, NULL);
 }
 
-static u32 selinux_bpffs_creator_sid(u32 fd)
-{
-	struct path path;
-	struct super_block *sb;
-	struct superblock_security_struct *sbsec;
-
-	CLASS(fd, f)(fd);
-
-	if (fd_empty(f))
-		return SECSID_NULL;
-
-	path = fd_file(f)->f_path;
-	sb = path.dentry->d_sb;
-	sbsec = selinux_superblock(sb);
-
-	return sbsec->creator_sid;
-}
-
 static int selinux_bpf_map_create(struct bpf_map *map, union bpf_attr *attr,
 				  struct bpf_token *token, bool kernel)
 {
@@ -7297,7 +7309,7 @@ static int selinux_bpf_map_create(struct bpf_map *map, union bpf_attr *attr,
 	if (!token)
 		ssid = bpfsec->sid;
 	else
-		ssid = selinux_bpffs_creator_sid(attr->map_token_fd);
+		ssid = selinux_bpf_token_security(token)->grantor_sid;
 
 	return avc_has_perm(ssid, bpfsec->sid, SECCLASS_BPF, BPF__MAP_CREATE,
 			    NULL);
@@ -7315,7 +7327,7 @@ static int selinux_bpf_prog_load(struct bpf_prog *prog, union bpf_attr *attr,
 	if (!token)
 		ssid = bpfsec->sid;
 	else
-		ssid = selinux_bpffs_creator_sid(attr->prog_token_fd);
+		ssid = selinux_bpf_token_security(token)->grantor_sid;
 
 	return avc_has_perm(ssid, bpfsec->sid, SECCLASS_BPF, BPF__PROG_LOAD,
 			    NULL);
@@ -7329,12 +7341,14 @@ static int selinux_bpf_token_create(struct bpf_token *token,
 				    const struct path *path)
 {
 	struct bpf_security_struct *bpfsec;
-	u32 sid = selinux_bpffs_creator_sid(attr->token_create.bpffs_fd);
+	struct superblock_security_struct *sbsec;
 	int err;
+
+	sbsec = selinux_superblock(path->dentry->d_sb);
 
 	bpfsec = selinux_bpf_token_security(token);
 	bpfsec->sid = current_sid();
-	bpfsec->grantor_sid = sid;
+	bpfsec->grantor_sid = sbsec->creator_sid;
 
 	bpfsec->perms = 0;
 	/**
@@ -7343,15 +7357,15 @@ static int selinux_bpf_token_create(struct bpf_token *token,
 	 * in the allowed_cmds bitmap.
 	 */
 	if (bpf_token_cmd(token, BPF_MAP_CREATE)) {
-		err = avc_has_perm(bpfsec->sid, sid, SECCLASS_BPF,
-				   BPF__MAP_CREATE_AS, NULL);
+		err = avc_has_perm(bpfsec->sid, bpfsec->grantor_sid,
+				   SECCLASS_BPF, BPF__MAP_CREATE_AS, NULL);
 		if (err)
 			return err;
 		bpfsec->perms |= BPF__MAP_CREATE;
 	}
 	if (bpf_token_cmd(token, BPF_PROG_LOAD)) {
-		err = avc_has_perm(bpfsec->sid, sid, SECCLASS_BPF,
-				   BPF__PROG_LOAD_AS, NULL);
+		err = avc_has_perm(bpfsec->sid, bpfsec->grantor_sid,
+				   SECCLASS_BPF, BPF__PROG_LOAD_AS, NULL);
 		if (err)
 			return err;
 		bpfsec->perms |= BPF__PROG_LOAD;
@@ -7565,6 +7579,7 @@ static struct security_hook_list selinux_hooks[] __ro_after_init = {
 
 	LSM_HOOK_INIT(ptrace_access_check, selinux_ptrace_access_check),
 	LSM_HOOK_INIT(ptrace_traceme, selinux_ptrace_traceme),
+	LSM_HOOK_INIT(mem_foll_force, selinux_mem_foll_force),
 	LSM_HOOK_INIT(capget, selinux_capget),
 	LSM_HOOK_INIT(capset, selinux_capset),
 	LSM_HOOK_INIT(capable, selinux_capable),

@@ -1487,7 +1487,7 @@ static const struct iomap_write_ops fuse_iomap_write_ops = {
 static ssize_t fuse_cache_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct file *file = iocb->ki_filp;
-	struct mnt_idmap *idmap = file_mnt_idmap(file);
+	const struct mnt_idmap *idmap = file_mnt_idmap(file);
 	struct address_space *mapping = file->f_mapping;
 	ssize_t written = 0;
 	struct inode *inode = mapping->host;
@@ -1597,8 +1597,7 @@ static int fuse_get_user_pages(struct fuse_args_pages *ap, struct iov_iter *ii,
 	 * manually extract pages using iov_iter_extract_pages() and then
 	 * copy that to a folios array.
 	 */
-	struct page **pages = kcalloc(max_pages, sizeof(struct page *),
-				      GFP_KERNEL);
+	struct page **pages = kzalloc_objs(struct page *, max_pages);
 	if (!pages) {
 		ret = -ENOMEM;
 		goto out;
