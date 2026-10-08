@@ -393,7 +393,7 @@ extern int fat_ent_read(struct inode *inode, struct fat_entry *fatent,
 			int entry);
 extern int fat_ent_write(struct inode *inode, struct fat_entry *fatent,
 			 int new, int wait);
-extern int fat_alloc_clusters(struct inode *inode, int *cluster,
+extern int fat_alloc_clusters(struct inode *inode, int *first_cluster,
 			      int nr_cluster);
 extern int fat_free_clusters(struct inode *inode, int cluster);
 extern int fat_count_free_clusters(struct super_block *sb);
