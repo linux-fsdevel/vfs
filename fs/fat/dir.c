@@ -1245,6 +1245,7 @@ static int fat_add_new_entries(struct inode *dir, void *slots, int nr_slots,
 	sector_t blknr, start_blknr, last_blknr;
 	unsigned long size, copy;
 	int err, i, n, offset, cluster[2];
+	struct fat_entry fatent;
 
 	/*
 	 * The minimum cluster size is 512bytes, and maximum entry
@@ -1255,9 +1256,25 @@ static int fat_add_new_entries(struct inode *dir, void *slots, int nr_slots,
 	*nr_cluster = (size + (sbi->cluster_size - 1)) >> sbi->cluster_bits;
 	BUG_ON(*nr_cluster > 2);
 
-	err = fat_alloc_clusters(dir, cluster, *nr_cluster);
+	err = fat_alloc_clusters(dir, &cluster[0], *nr_cluster);
 	if (err)
 		goto error;
+
+	if (*nr_cluster > 1) {
+		fatent_init(&fatent);
+		cluster[1] = fat_ent_read(dir, &fatent, cluster[0]);
+		fatent_brelse(&fatent);
+		if (cluster[1] == FAT_ENT_EOF || cluster[1] == FAT_ENT_FREE) {
+			fat_fs_error(sb,
+				     "%s: invalid cluster chain (i_pos %lld)",
+				     __func__, MSDOS_I(dir)->i_pos);
+			cluster[1] = -EIO;
+		}
+		if (cluster[1] < 0) {
+			err = cluster[1];
+			goto error_ent;
+		}
+	}
 
 	/*
 	 * First stage: Fill the directory entry.  NOTE: This cluster
@@ -1313,6 +1330,7 @@ error_free:
 error_nomem:
 	for (i = 0; i < n; i++)
 		bforget(bhs[i]);
+error_ent:
 	fat_free_clusters(dir, cluster[0]);
 error:
 	return err;
