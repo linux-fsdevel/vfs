@@ -7,6 +7,7 @@
 
 #include <linux/iomap.h>
 #include <linux/pagemap.h>
+#include <linux/buffer_head.h>
 
 #include "exfat_raw.h"
 #include "exfat_fs.h"
@@ -76,6 +77,21 @@ static int __exfat_iomap_begin(struct inode *inode, loff_t offset, loff_t length
 			&cluster, &num_clusters, may_alloc, &balloc);
 	if (err)
 		goto out;
+
+	/*
+	 * New clusters may still have dirty buffer_heads in the bdev
+	 * mapping (e.g. dentries of a just-removed directory).  Drop
+	 * them, as __block_write_begin_int() did for buffer_new
+	 * blocks, so a later bdev flush cannot write stale metadata
+	 * over the new file data.
+	 */
+	if (balloc) {
+		sector_t first = exfat_cluster_to_sector(sbi, cluster);
+		sector_t nr = (sector_t)num_clusters <<
+			      sbi->sect_per_clus_bits;
+
+		clean_bdev_aliases(sb->s_bdev, first, nr);
+	}
 
 	cluster_offset = exfat_cluster_offset(sbi, offset);
 	cluster_length = exfat_cluster_to_bytes(sbi, num_clusters);
