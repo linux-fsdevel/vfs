@@ -1,0 +1,15 @@
+[Unit]
+Description=overlayfs fstests runner
+After=multi-user-target dev-disk-by\x2dpartlabel-fsdevel1.device dev-disk-by\x2dpartlabel-fsdevel2.device
+Requires=dev-disk-by\x2dpartlabel-fsdevel1.device dev-disk-by\x2dpartlabel-fsdevel2.device
+SuccessAction=exit
+SuccessActionExitStatus=123
+FailureAction=exit
+FailureActionExitStatus=1
+
+[Service]
+StandardOutput=journal+console
+StandardError=journal+console
+RuntimeMaxSec=24h
+IgnoreSIGPIPE=no
+ExecStart=/usr/lib/vfs-ci/run-ovl-fstests.sh
