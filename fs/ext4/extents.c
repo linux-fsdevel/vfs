@@ -4561,7 +4561,7 @@ int ext4_ext_truncate(handle_t *handle, struct inode *inode)
 	 */
 
 	/* we have to know where to truncate from in crash case */
-	EXT4_I(inode)->i_disksize = inode->i_size;
+	__ext4_set_i_disksize(inode, inode->i_size);
 	err = ext4_mark_inode_dirty(handle, inode);
 	if (err)
 		return err;
@@ -4857,6 +4857,17 @@ static long ext4_zero_range(struct file *file, loff_t offset,
 		if (ret)
 			return ret;
 	}
+
+	/*
+	 * In SYNC mode, sync the pending zeroed EOF block to ensure the
+	 * i_disksize update is persisted.
+	 */
+	if (((file->f_flags & O_SYNC) || IS_SYNC(inode)) && new_size) {
+		ret = ext4_iomap_sync_zeroed_eof(inode, 0, LLONG_MAX);
+		if (ret)
+			return ret;
+	}
+
 	/* Finish zeroing out if it doesn't contain partial block */
 	if (IS_ALIGNED(offset | end, blocksize))
 		return ret;
@@ -4928,10 +4939,20 @@ static long ext4_do_fallocate(struct file *file, loff_t offset,
 	if (ret)
 		goto out;
 
-	if (((file->f_flags & O_SYNC) || IS_SYNC(inode)) &&
-	    EXT4_SB(inode->i_sb)->s_journal) {
-		ret = ext4_fc_commit(EXT4_SB(inode->i_sb)->s_journal,
-					EXT4_I(inode)->i_sync_tid);
+	if ((file->f_flags & O_SYNC) || IS_SYNC(inode)) {
+		/*
+		 * Sync the pending zeroed EOF block to ensure the
+		 * i_disksize update is persisted.
+		 */
+		if (new_size) {
+			ret = ext4_iomap_sync_zeroed_eof(inode, 0, LLONG_MAX);
+			if (ret)
+				goto out;
+		}
+		if (EXT4_SB(inode->i_sb)->s_journal) {
+			ret = ext4_fc_commit(EXT4_SB(inode->i_sb)->s_journal,
+						EXT4_I(inode)->i_sync_tid);
+		}
 	}
 out:
 	trace_ext4_fallocate_exit(inode, offset,
@@ -5137,27 +5158,36 @@ int ext4_convert_unwritten_extents(handle_t *handle, struct inode *inode,
 	int ret = 0, ret2 = 0, ret3 = 0;
 	struct ext4_map_blocks map;
 	unsigned int blkbits = inode->i_blkbits;
-	unsigned int credits = 0;
+	unsigned int credits;
+	bool internal_handle = !handle;
 
 	map.m_lblk = offset >> blkbits;
 	map.m_len = max_blocks = EXT4_MAX_BLOCKS(len, offset, blkbits);
 
-	if (!handle) {
-		/*
-		 * credits to insert 1 extent into extent tree
-		 */
-		credits = ext4_chunk_trans_blocks(inode, max_blocks);
+	/* Credits to convert one extent in this range to written state. */
+	credits = ext4_meta_trans_blocks(inode, max_blocks, 1, 0);
+
+	if (internal_handle) {
+		handle = ext4_journal_start(inode, EXT4_HT_MAP_BLOCKS, credits);
+		if (IS_ERR(handle)) {
+			ret = PTR_ERR(handle);
+			goto out;
+		}
 	}
 
 	while (max_blocks) {
-		if (credits) {
-			handle = ext4_journal_start(inode, EXT4_HT_MAP_BLOCKS,
-						    credits);
-			if (IS_ERR(handle)) {
-				ret = PTR_ERR(handle);
-				break;
-			}
-		}
+		/*
+		 * The caller cannot know how many extents the range covers,
+		 * so make sure the transaction can take one more extent,
+		 * extending or restarting it once it is full.  The reserved
+		 * handle of the buffer_head writeback path is safe as it has
+		 * enough credits for the conversion, so it is not restarted
+		 * here.
+		 */
+		ret = ext4_journal_ensure_credits(handle, credits, 0);
+		if (ret < 0)
+			break;
+
 		/*
 		 * Do not cache any unrelated extents, as it does not hold the
 		 * i_rwsem or invalidate_lock, which could corrupt the extent
@@ -5177,11 +5207,6 @@ int ext4_convert_unwritten_extents(handle_t *handle, struct inode *inode,
 		}
 
 		ret2 = ext4_mark_inode_dirty(handle, inode);
-		if (credits) {
-			ret3 = ext4_journal_stop(handle);
-			if (unlikely(ret3))
-				ret2 = ret3;
-		}
 		ret = ret < 0 ? ret : ret2;
 		if (ret)
 			break;
@@ -5189,6 +5214,13 @@ int ext4_convert_unwritten_extents(handle_t *handle, struct inode *inode,
 		map.m_lblk += map.m_len;
 		map.m_len = (max_blocks -= map.m_len);
 	}
+
+	if (internal_handle) {
+		ret3 = ext4_journal_stop(handle);
+		if (!ret)
+			ret = ret3;
+	}
+out:
 	/* Converted some or all blocks successfully? */
 	if (converted)
 		*converted = conv_blocks;
@@ -5203,8 +5235,8 @@ int ext4_convert_unwritten_io_end_vec(handle_t *handle, ext4_io_end_t *io_end)
 
 	/*
 	 * This is somewhat ugly but the idea is clear: When transaction is
-	 * reserved, everything goes into it. Otherwise we rather start several
-	 * smaller transactions for conversion of each extent separately.
+	 * reserved, everything goes into it. Otherwise the conversion runs
+	 * its own transaction, extending or restarting it as it goes.
 	 */
 	if (handle) {
 		handle = ext4_journal_start_reserved(handle,
@@ -5663,6 +5695,14 @@ static int ext4_collapse_range(struct file *file, loff_t offset, loff_t len)
 		return -EINVAL;
 
 	/*
+	 * Persist the pending zeroed EOF block to ensure i_disksize
+	 * can be safely updated thereafter.
+	 */
+	ret = ext4_iomap_sync_zeroed_eof(inode, 0, LLONG_MAX);
+	if (ret)
+		return ret;
+
+	/*
 	 * Write tail of the last page before removed range and data that
 	 * will be shifted since they will get removed from the page cache
 	 * below. We are also protected from pages becoming dirty by
@@ -5711,7 +5751,7 @@ static int ext4_collapse_range(struct file *file, loff_t offset, loff_t len)
 
 	new_size = inode->i_size - len;
 	i_size_write(inode, new_size);
-	EXT4_I(inode)->i_disksize = new_size;
+	__ext4_set_i_disksize(inode, new_size);
 
 	up_write(&EXT4_I(inode)->i_data_sem);
 	ret = ext4_mark_inode_dirty(handle, inode);
@@ -5765,6 +5805,14 @@ static int ext4_insert_range(struct file *file, loff_t offset, loff_t len)
 		return -EFBIG;
 
 	/*
+	 * Persist the pending zeroed EOF block to ensure i_disksize
+	 * can be safely updated thereafter.
+	 */
+	ret = ext4_iomap_sync_zeroed_eof(inode, 0, LLONG_MAX);
+	if (ret)
+		return ret;
+
+	/*
 	 * Write out all dirty pages. Need to round down to align start offset
 	 * to page size boundary for page size > block size.
 	 */
@@ -5783,8 +5831,7 @@ static int ext4_insert_range(struct file *file, loff_t offset, loff_t len)
 	ext4_fc_mark_ineligible(sb, EXT4_FC_REASON_FALLOC_RANGE, handle);
 
 	/* Expand file to avoid data loss if there is error while shifting */
-	inode->i_size += len;
-	EXT4_I(inode)->i_disksize += len;
+	ext4_update_inode_size(inode, inode->i_size + len);
 	ret = ext4_mark_inode_dirty(handle, inode);
 	if (ret)
 		goto out_handle;
