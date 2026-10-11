@@ -308,9 +308,20 @@ static bool bvec_split_segs(const struct queue_limits *lim,
 static unsigned int bio_split_alignment(struct bio *bio,
 		const struct queue_limits *lim)
 {
+	const struct bio_crypt_ctx *bc = bio_crypt_ctx(bio);
+	unsigned int align = lim->logical_block_size;
+
+	/*
+	 * A split advances the remaining bio's data unit number by whole
+	 * data units only (see bio_crypt_advance()), so a split inside a
+	 * data unit would make it use the wrong data unit numbers.
+	 */
+	if (bc)
+		align = max(align, bc->bc_key->crypto_cfg.data_unit_size);
 	if (op_is_write(bio_op(bio)) && lim->zone_write_granularity)
-		return lim->zone_write_granularity;
-	return lim->logical_block_size;
+		align = max(align, lim->zone_write_granularity);
+
+	return align;
 }
 
 static inline unsigned int bvec_seg_gap(struct bio_vec *bvprv,
@@ -335,19 +346,18 @@ static inline unsigned int bvec_seg_gap(struct bio_vec *bvprv,
 int bio_split_io_at(struct bio *bio, const struct queue_limits *lim,
 		unsigned *segs, unsigned max_bytes, unsigned len_align_mask)
 {
-	struct bio_crypt_ctx *bc = bio_crypt_ctx(bio);
 	struct bio_vec bv, bvprv, *bvprvp = NULL;
 	unsigned nsegs = 0, bytes = 0, gaps = 0;
+	unsigned int align, split_bytes;
 	struct bvec_iter iter;
-	unsigned start_align_mask = lim->dma_alignment;
-
-	if (bc) {
-		start_align_mask |= (bc->bc_key->crypto_cfg.data_unit_size - 1);
-		len_align_mask |= (bc->bc_key->crypto_cfg.data_unit_size - 1);
-	}
 
 	bio_for_each_bvec(bv, bio, iter) {
-		if (bv.bv_offset & start_align_mask ||
+		/*
+		 * The bio_vecs of a bio with a crypto context don't have to
+		 * be data unit aligned, only the bio as a whole does; see
+		 * bio_crypt_set_ctx() and bio_split_alignment().
+		 */
+		if (bv.bv_offset & lim->dma_alignment ||
 		    bv.bv_len & len_align_mask)
 			return -EINVAL;
 
@@ -398,14 +408,20 @@ split:
 	 * we do not use the full hardware limits.
 	 *
 	 * It is possible to submit a bio that can't be split into a valid io:
-	 * there may either be too many discontiguous vectors for the max
-	 * segments limit, or contain virtual boundary gaps without having a
-	 * valid block sized split. A zero byte result means one of those
-	 * conditions occured.
+	 * it may have too many discontiguous vectors for the max segments
+	 * limit, contain virtual boundary gaps without having a valid block
+	 * sized split, or have a crypto context whose data units are larger
+	 * than the number of bytes that fit. A zero byte result means one of
+	 * those conditions occurred.
 	 */
-	bytes = ALIGN_DOWN(bytes, bio_split_alignment(bio, lim));
-	if (!bytes)
+	align = bio_split_alignment(bio, lim);
+	split_bytes = ALIGN_DOWN(bytes, align);
+	if (!split_bytes) {
+		pr_warn_ratelimited("%pg: split needs %u align, %u bytes fit\n",
+				    bio->bi_bdev, align, bytes);
 		return -EINVAL;
+	}
+	bytes = split_bytes;
 
 	/*
 	 * Bio splitting may cause subtle trouble such as hang when doing sync

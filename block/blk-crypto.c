@@ -98,6 +98,25 @@ out_no_mem:
 }
 subsys_initcall(bio_crypt_ctx_init);
 
+/**
+ * bio_crypt_set_ctx() - attach an encryption context to a bio
+ * @bio: the bio to attach the context to
+ * @key: the key that the bio will be en/decrypted with
+ * @dun: the data unit number of the bio's first data unit
+ * @gfp_mask: memory allocation flags
+ *
+ * The caller must keep the bio aligned to the data unit size of @key: it must
+ * start at a data unit boundary and be a whole number of data units long,
+ * since the data unit number of a bio describes its first data unit.
+ *
+ * blk_crypto_submit_bio() rejects a bio whose size is not a whole number
+ * of data units, and the block layer splits and merges encrypted bios
+ * only at data unit boundaries; a layer that splits bios itself, e.g.
+ * device-mapper, must keep the alignment itself.
+ *
+ * The bio must be submitted with blk_crypto_submit_bio(), after
+ * blk_crypto_start_using_key() was called for @key on the block device.
+ */
 void bio_crypt_set_ctx(struct bio *bio, const struct blk_crypto_key *key,
 		       const u64 dun[BLK_CRYPTO_DUN_ARRAY_SIZE], gfp_t gfp_mask)
 {
@@ -260,6 +279,13 @@ bool __blk_crypto_submit_bio(struct bio *bio)
 		return false;
 	}
 
+	/* Error if the bio doesn't cover a whole number of data units. */
+	if (WARN_ON_ONCE(!IS_ALIGNED(bio->bi_iter.bi_size,
+				     bc_key->crypto_cfg.data_unit_size))) {
+		bio_endio_status(bio, BLK_STS_INVAL);
+		return false;
+	}
+
 	/*
 	 * If the device does not natively support the encryption context, try to use
 	 * the fallback if available.
@@ -392,13 +418,13 @@ bool blk_crypto_config_supported_natively(struct block_device *bdev,
  * @key: A key to use on the device
  *
  * Upper layers must call this function to ensure that either the hardware
- * supports the key's crypto settings, or the crypto API fallback has transforms
- * for the needed mode allocated and ready to go. This function may allocate
- * an skcipher, and *should not* be called from the data path, since that might
- * cause a deadlock
+ * supports the key's crypto settings, or that the crypto API fallback is ready
+ * to handle them. This function may allocate an skcipher, and *should not* be
+ * called from the data path, since that might cause a deadlock
  *
- * Return: 0 on success; -EOPNOTSUPP if the key is wrapped but the hardware does
- *	   not support wrapped keys; -ENOPKG if the key is a raw key but the
+ * Return: 0 on success; -EOPNOTSUPP if the key can't be used on @bdev, e.g. a
+ *	   wrapped key without hardware support or a data unit size that the
+ *	   fallback can't handle; -ENOPKG if the key is a raw key but the
  *	   hardware does not support raw keys and blk-crypto-fallback is either
  *	   disabled or the needed algorithm is disabled in the crypto API; or
  *	   another -errno code if something else went wrong.
@@ -412,7 +438,7 @@ int blk_crypto_start_using_key(struct block_device *bdev,
 		pr_warn_ratelimited("%pg: no support for wrapped keys\n", bdev);
 		return -EOPNOTSUPP;
 	}
-	return blk_crypto_fallback_start_using_mode(key->crypto_cfg.crypto_mode);
+	return blk_crypto_fallback_start_using_key(&key->crypto_cfg);
 }
 EXPORT_SYMBOL_GPL(blk_crypto_start_using_key);
 
