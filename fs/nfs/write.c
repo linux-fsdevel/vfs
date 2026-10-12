@@ -1985,16 +1985,110 @@ int nfs_filemap_write_and_wait_range(struct address_space *mapping,
 }
 EXPORT_SYMBOL_GPL(nfs_filemap_write_and_wait_range);
 
-/*
- * flush the inode to disk.
+/**
+ * nfs_flush_killed - flush on close for a task killed by a signal
+ * @inode: inode being closed
+ *
+ * A task that has been killed must not wait for the server.  Ask the flusher
+ * threads to write back the dirty data and commit unstable writes instead,
+ * without waiting.  This covers the whole superblock and is best effort: the
+ * request coalesces with a pass that is already running, and gives no
+ * guarantee about when this inode's data reaches the server.
  */
-int nfs_wb_all(struct inode *inode)
+void nfs_flush_killed(struct inode *inode)
 {
-	int ret;
+	if (mapping_tagged(inode->i_mapping, PAGECACHE_TAG_DIRTY) ||
+	    atomic_long_read(&NFS_I(inode)->commit_info.ncommit))
+		wakeup_flusher_threads_bdi(inode_to_bdi(inode), WB_REASON_SYNC);
+}
+EXPORT_SYMBOL_GPL(nfs_flush_killed);
+
+/*
+ * Like filemap_write_and_wait_range(), but a fatal signal interrupts the wait
+ * for writeback to complete, and errors are left for the caller to collect.
+ * Starting writeback can still block.  *@interrupted tells an interrupted
+ * wait apart from an error returned by writeback itself.
+ */
+static int nfs_write_and_wait_range_killable(struct address_space *mapping,
+					     loff_t start, loff_t end,
+					     bool *interrupted)
+{
+	pgoff_t index = start >> PAGE_SHIFT;
+	pgoff_t last = end >> PAGE_SHIFT;
+	struct folio_batch fbatch;
+	unsigned int i, nr;
+	int err;
+
+	*interrupted = false;
+	if (!mapping->nrpages)
+		return 0;
+	err = filemap_fdatawrite_range(mapping, start, end);
+	if (err == -EIO)
+		return err;
+	folio_batch_init(&fbatch);
+	while (index <= last &&
+	       (nr = filemap_get_folios_tag(mapping, &index, last,
+					    PAGECACHE_TAG_WRITEBACK, &fbatch))) {
+		for (i = 0; i < nr; i++) {
+			if (folio_wait_writeback_killable(fbatch.folios[i])) {
+				folio_batch_release(&fbatch);
+				*interrupted = true;
+				return -EINTR;
+			}
+		}
+		folio_batch_release(&fbatch);
+		cond_resched();
+	}
+	return err;
+}
+
+/**
+ * nfs_file_write_and_wait_range - killable file_write_and_wait_range()
+ * @file: file to write back
+ * @start: first byte of the range
+ * @end: last byte of the range (inclusive)
+ *
+ * Return: 0 on success, -EINTR if a fatal signal interrupted the wait, in
+ * which case the file's writeback error cursor is not advanced, or another
+ * negative error code.
+ */
+int nfs_file_write_and_wait_range(struct file *file, loff_t start, loff_t end)
+{
+	bool interrupted;
+	int err, err2;
+
+	if (end < start)
+		return 0;
+	err = nfs_write_and_wait_range_killable(file->f_mapping, start, end,
+						&interrupted);
+	if (interrupted)
+		return err;
+	err2 = file_check_and_advance_wb_err(file);
+	return err ? err : err2;
+}
+
+/*
+ * If @interrupted is non-NULL, a fatal signal interrupts the wait for
+ * writeback, and *@interrupted is set if it did.
+ */
+static int __nfs_wb_all(struct inode *inode, bool *interrupted)
+{
+	struct address_space *mapping = inode->i_mapping;
+	int ret, err;
 
 	trace_nfs_writeback_inode_enter(inode);
 
-	ret = filemap_write_and_wait(inode->i_mapping);
+	if (interrupted) {
+		ret = nfs_write_and_wait_range_killable(mapping, 0, LLONG_MAX,
+							interrupted);
+		if (*interrupted)
+			goto out;
+		err = filemap_check_errors(mapping);
+		if (!ret)
+			ret = err;
+	} else {
+		ret = filemap_write_and_wait(mapping);
+	}
 	if (ret)
 		goto out;
 	ret = nfs_commit_inode(inode, FLUSH_SYNC);
@@ -2007,7 +2101,38 @@ out:
 	trace_nfs_writeback_inode_exit(inode, ret);
 	return ret;
 }
+
+/*
+ * flush the inode to disk.
+ */
+int nfs_wb_all(struct inode *inode)
+{
+	return __nfs_wb_all(inode, NULL);
+}
 EXPORT_SYMBOL_GPL(nfs_wb_all);
+
+/**
+ * nfs_wb_all_close - flush the inode to disk on close
+ * @inode: inode being closed
+ *
+ * Like nfs_wb_all(), but a fatal signal interrupts the wait for writeback.
+ * If the signal is killing the thread group, the data is left to the flusher
+ * threads.  An exit_group() by another thread also sends SIGKILL; that waits
+ * as before.
+ */
+int nfs_wb_all_close(struct inode *inode)
+{
+	bool interrupted;
+	int ret = __nfs_wb_all(inode, &interrupted);
+
+	if (!interrupted)
+		return ret;
+	if (!nfs_current_group_killed())
+		return nfs_wb_all(inode);
+	nfs_flush_killed(inode);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(nfs_wb_all_close);
 
 int nfs_wb_folio_cancel(struct inode *inode, struct folio *folio)
 {
