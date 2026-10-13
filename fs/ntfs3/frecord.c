@@ -1893,14 +1893,30 @@ enum REPARSE_SIGN ni_parse_reparse(struct ntfs_inode *ni, struct ATTRIB *attr,
 	return REPARSE_LINK;
 }
 
+/*
+ * ntfs_lock_new_page - Get a locked page to decompress a frame into.
+ *
+ * With @nowait the page lock is only tried, never waited for: the caller
+ * already holds the lock of another page of the same frame, and a second
+ * reader doing the same for a different page of that frame would deadlock
+ * with it. A page locked by someone else is left to its owner and a
+ * temporary page is used instead.
+ */
 static struct folio *ntfs_lock_new_page(struct address_space *mapping,
-					pgoff_t index, gfp_t gfp)
+					pgoff_t index, gfp_t gfp, bool nowait)
 {
-	struct folio *folio = __filemap_get_folio(
-		mapping, index, FGP_LOCK | FGP_ACCESSED | FGP_CREAT, gfp);
+	fgf_t fgp = FGP_LOCK | FGP_ACCESSED | FGP_CREAT;
+	struct folio *folio;
 
-	if (IS_ERR(folio))
-		return folio;
+	if (nowait)
+		fgp |= FGP_NOWAIT;
+
+	folio = __filemap_get_folio(mapping, index, fgp, gfp);
+	if (IS_ERR(folio)) {
+		if (!nowait || PTR_ERR(folio) != -EAGAIN)
+			return folio;
+		goto use_tmp;
+	}
 
 	if (!folio_test_uptodate(folio)) {
 		struct page *page = folio_file_page(folio, index);
@@ -1913,6 +1929,7 @@ static struct folio *ntfs_lock_new_page(struct address_space *mapping,
 	/* Use a temporary page to avoid data corruption */
 	folio_unlock(folio);
 	folio_put(folio);
+use_tmp:
 	folio = folio_alloc(gfp, 0);
 	if (!folio)
 		return ERR_PTR(-ENOMEM);
@@ -1975,7 +1992,7 @@ int ni_read_folio_cmpr(struct ntfs_inode *ni, struct folio *folio)
 		if (i == idx)
 			continue;
 
-		f = ntfs_lock_new_page(mapping, index, gfp_mask);
+		f = ntfs_lock_new_page(mapping, index, gfp_mask, true);
 		if (IS_ERR(f)) {
 			err = PTR_ERR(f);
 			goto out1;
@@ -2072,7 +2089,7 @@ int ni_decompress_file(struct ntfs_inode *ni)
 		for (i = 0; i < pages_per_frame; i++, index++) {
 			struct folio *f;
 
-			f = ntfs_lock_new_page(mapping, index, gfp_mask);
+			f = ntfs_lock_new_page(mapping, index, gfp_mask, false);
 			if (IS_ERR(f)) {
 				while (i--) {
 					unlock_page(pages[i]);
