@@ -421,6 +421,97 @@ static int hfs_read_inode(struct inode *inode, void *data)
 	return 0;
 }
 
+/**
+ * hfs_system_read_inode - read an internal B-tree inode
+ * @inode: inode to initialize, hashed by its CNID
+ *
+ * The extent and catalog B-trees are described by the MDB instead of by
+ * catalog records, so they do not go through hfs_read_inode().
+ *
+ * Return: 0 on success, -EIO if the MDB does not describe this CNID.
+ */
+static int hfs_system_read_inode(struct inode *inode)
+{
+	struct hfs_sb_info *hsb = HFS_SB(inode->i_sb);
+	struct hfs_mdb *mdb = hsb->mdb;
+
+	HFS_I(inode)->flags = 0;
+	HFS_I(inode)->rsrc_inode = NULL;
+	mutex_init(&HFS_I(inode)->extents_lock);
+	HFS_I(inode)->tz_secondswest = sys_tz.tz_minuteswest * 60;
+
+	inode->i_uid = hsb->s_uid;
+	inode->i_gid = hsb->s_gid;
+	set_nlink(inode, 1);
+
+	switch (inode->i_ino) {
+	case HFS_EXT_CNID:
+		hfs_inode_read_fork(inode, mdb->drXTExtRec, mdb->drXTFlSize,
+				    mdb->drXTFlSize, be32_to_cpu(mdb->drXTClpSiz));
+		if (HFS_I(inode)->alloc_blocks > HFS_I(inode)->first_blocks) {
+			pr_err("invalid btree extent records\n");
+			return -EIO;
+		}
+		break;
+	case HFS_CAT_CNID:
+		hfs_inode_read_fork(inode, mdb->drCTExtRec, mdb->drCTFlSize,
+				    mdb->drCTFlSize, be32_to_cpu(mdb->drCTClpSiz));
+		if (!HFS_I(inode)->first_blocks) {
+			pr_err("invalid btree extent records (0 size)\n");
+			return -EIO;
+		}
+		break;
+	default:
+		return -EIO;
+	}
+
+	/*
+	 * may_open() requires a file type, and a crafted catalog record can
+	 * reach this inode by its CNID.
+	 */
+	inode->i_mode = S_IFREG;
+
+	/* Set before hfs_system_iget() publishes the inode. */
+	inode->i_mapping->a_ops = &hfs_btree_aops;
+
+	return 0;
+}
+
+/**
+ * hfs_system_iget - look up an internal B-tree inode by CNID
+ * @sb: super block
+ * @cnid: HFS_EXT_CNID or HFS_CAT_CNID
+ *
+ * Return: the inode, or an ERR_PTR() if it cannot be initialized.
+ */
+struct inode *hfs_system_iget(struct super_block *sb, u32 cnid)
+{
+	struct inode *inode;
+	int err;
+
+	inode = iget_locked(sb, cnid);
+	if (!inode)
+		return ERR_PTR(-ENOMEM);
+
+	/*
+	 * The B-tree inodes are created once per mount, so finding one
+	 * already in the cache means the same tree was opened twice.
+	 */
+	if (!(inode_state_read_once(inode) & I_NEW)) {
+		iput(inode);
+		return ERR_PTR(-EEXIST);
+	}
+
+	err = hfs_system_read_inode(inode);
+	if (err) {
+		iget_failed(inode);
+		return ERR_PTR(err);
+	}
+
+	unlock_new_inode(inode);
+	return inode;
+}
+
 /*
  * __hfs_iget()
  *
@@ -446,6 +537,18 @@ struct inode *hfs_iget(struct super_block *sb, struct hfs_cat_key *key, hfs_cat_
 	default:
 		return NULL;
 	}
+
+	/*
+	 * hfs_test_inode() matches on i_ino alone, so a crafted record can
+	 * alias any cached inode.  hfs_read_inode() rejects an invalid CNID,
+	 * but it does not run when the inode is already cached, and a record
+	 * naming a reserved CNID would hand out a B-tree inode as a regular
+	 * dentry.
+	 */
+	if (!hfs_is_valid_cnid(cnid, rec->type) ||
+	    hfs_is_system_reserved_cnid(cnid))
+		return NULL;
+
 	inode = iget5_locked(sb, cnid, hfs_test_inode, hfs_read_inode, &data);
 	if (inode && (inode_state_read_once(inode) & I_NEW))
 		unlock_new_inode(inode);
