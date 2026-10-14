@@ -938,7 +938,7 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	struct fat_slot_info old_sinfo, sinfo;
 	struct timespec64 ts;
 	loff_t new_i_pos;
-	int err, is_dir, corrupt = 0;
+	int err, is_dir, rollback_err = 0;
 	struct super_block *sb = old_dir->i_sb;
 
 	old_sinfo.bh = sinfo.bh = dotdot_bh = NULL;
@@ -984,7 +984,7 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 		err = vfat_update_dotdot_de(new_dir, old_inode, dotdot_bh,
 					    dotdot_de);
 		if (err)
-			goto error_dotdot;
+			goto error_no_rollback;
 		drop_nlink(old_dir);
 		if (!new_inode)
  			inc_nlink(new_dir);
@@ -993,7 +993,7 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	err = fat_remove_entries(old_dir, &old_sinfo);	/* and releases bh */
 	old_sinfo.bh = NULL;
 	if (err)
-		goto error_dotdot;
+		goto error_no_rollback;
 	vfat_update_dir_metadata(old_dir, &ts);
 
 	if (new_inode) {
@@ -1009,34 +1009,25 @@ out:
 
 	return err;
 
-error_dotdot:
-	/* data cluster is shared, serious corruption */
-	corrupt = 1;
-
-	if (dotdot_de) {
-		corrupt |= vfat_update_dotdot_de(old_dir, old_inode, dotdot_bh,
-						 dotdot_de);
-	}
+error_no_rollback:
+	/* Do not continue an on-disk rollback that cannot be completed. */
+	rollback_err = err;
 error_inode:
 	fat_detach(old_inode);
 	fat_attach(old_inode, old_sinfo.i_pos);
 	if (new_inode) {
 		fat_attach(new_inode, new_i_pos);
-		if (corrupt) {
+		if (!rollback_err) {
 			mark_inode_dirty(new_inode);
-			corrupt |= sync_inode_metadata(new_inode, 1);
+			rollback_err = sync_inode_metadata(new_inode, 1);
 		}
-	} else {
-		/*
-		 * If new entry was not sharing the data cluster, it
-		 * shouldn't be serious corruption.
-		 */
-		int err2 = fat_remove_entries(new_dir, &sinfo);
-		if (corrupt)
-			corrupt |= err2;
-		sinfo.bh = NULL;
+	} else if (!rollback_err) {
+		/* Read the entry block again if a failed write invalidated it. */
+		rollback_err = bh_read(sinfo.bh, 0);
+		if (rollback_err >= 0)
+			rollback_err = fat_remove_entries(new_dir, &sinfo);
 	}
-	if (corrupt < 0) {
+	if (rollback_err < 0) {
 		fat_fs_error(new_dir->i_sb,
 			     "%s: Filesystem corrupted (i_pos %lld)",
 			     __func__, new_i_pos);
@@ -1067,7 +1058,7 @@ static int vfat_rename_exchange(struct inode *old_dir, struct dentry *old_dentry
 	struct inode *old_inode, *new_inode;
 	struct timespec64 ts = current_time(old_dir);
 	loff_t old_i_pos, new_i_pos;
-	int err, corrupt = 0;
+	int err, rollback_err = 0;
 	struct super_block *sb = old_dir->i_sb;
 
 	old_inode = d_inode(old_dentry);
@@ -1106,13 +1097,13 @@ static int vfat_rename_exchange(struct inode *old_dir, struct dentry *old_dentry
 		err = vfat_update_dotdot_de(new_dir, old_inode, old_dotdot_bh,
 					    old_dotdot_de);
 		if (err)
-			goto error_old_dotdot;
+			goto error_no_rollback;
 	}
 	if (new_dotdot_de) {
 		err = vfat_update_dotdot_de(old_dir, new_inode, new_dotdot_bh,
 					    new_dotdot_de);
 		if (err)
-			goto error_new_dotdot;
+			goto error_no_rollback;
 	}
 
 	/* if cross directory and only one is a directory, adjust nlink */
@@ -1135,24 +1126,17 @@ out:
 
 	return err;
 
-error_new_dotdot:
-	if (new_dotdot_de) {
-		corrupt |= vfat_update_dotdot_de(new_dir, new_inode,
-						 new_dotdot_bh, new_dotdot_de);
-	}
-
-error_old_dotdot:
-	if (old_dotdot_de) {
-		corrupt |= vfat_update_dotdot_de(old_dir, old_inode,
-						 old_dotdot_bh, old_dotdot_de);
-	}
-
+error_no_rollback:
+	/* Do not start a partial on-disk rollback after a failed ".." write. */
+	rollback_err = err;
 error_exchange:
 	vfat_exchange_ipos(old_inode, new_inode, new_i_pos, old_i_pos);
-	corrupt |= vfat_sync_ipos(new_dir, new_inode);
-	corrupt |= vfat_sync_ipos(old_dir, old_inode);
+	if (!rollback_err) {
+		rollback_err |= vfat_sync_ipos(new_dir, new_inode);
+		rollback_err |= vfat_sync_ipos(old_dir, old_inode);
+	}
 
-	if (corrupt < 0) {
+	if (rollback_err < 0) {
 		fat_fs_error(new_dir->i_sb,
 			     "%s: Filesystem corrupted (i_pos %lld, %lld)",
 			     __func__, old_i_pos, new_i_pos);

@@ -441,7 +441,7 @@ static int do_msdos_rename(struct inode *old_dir, unsigned char *old_name,
 	struct fat_slot_info old_sinfo, sinfo;
 	struct timespec64 ts;
 	loff_t new_i_pos;
-	int err, old_attrs, is_dir, update_dotdot, corrupt = 0;
+	int err, old_attrs, is_dir, update_dotdot, rollback_err = 0;
 
 	old_sinfo.bh = sinfo.bh = dotdot_bh = NULL;
 	old_inode = d_inode(old_dentry);
@@ -533,7 +533,7 @@ static int do_msdos_rename(struct inode *old_dir, unsigned char *old_name,
 		if (IS_DIRSYNC(new_dir)) {
 			err = sync_dirty_buffer(dotdot_bh);
 			if (err)
-				goto error_dotdot;
+				goto error_no_rollback;
 		}
 		drop_nlink(old_dir);
 		if (!new_inode)
@@ -543,7 +543,7 @@ static int do_msdos_rename(struct inode *old_dir, unsigned char *old_name,
 	err = fat_remove_entries(old_dir, &old_sinfo);	/* and releases bh */
 	old_sinfo.bh = NULL;
 	if (err)
-		goto error_dotdot;
+		goto error_no_rollback;
 	inode_inc_iversion(old_dir);
 	fat_truncate_time(old_dir, &ts, FAT_UPDATE_CMTIME);
 	mark_inode_dirty(old_dir);
@@ -561,37 +561,26 @@ out:
 	brelse(old_sinfo.bh);
 	return err;
 
-error_dotdot:
-	/* data cluster is shared, serious corruption */
-	corrupt = 1;
-
-	if (update_dotdot) {
-		fat_set_start(dotdot_de, MSDOS_I(old_dir)->i_logstart);
-		mmb_mark_buffer_dirty(dotdot_bh,
-				      &MSDOS_I(old_inode)->i_metadata_bhs);
-		corrupt |= sync_dirty_buffer(dotdot_bh);
-	}
+error_no_rollback:
+	/* Do not continue an on-disk rollback that cannot be completed. */
+	rollback_err = err;
 error_inode:
 	fat_detach(old_inode);
 	fat_attach(old_inode, old_sinfo.i_pos);
 	MSDOS_I(old_inode)->i_attrs = old_attrs;
 	if (new_inode) {
 		fat_attach(new_inode, new_i_pos);
-		if (corrupt) {
+		if (!rollback_err) {
 			mark_inode_dirty(new_inode);
-			corrupt |= sync_inode_metadata(new_inode, 1);
+			rollback_err = sync_inode_metadata(new_inode, 1);
 		}
-	} else {
-		/*
-		 * If new entry was not sharing the data cluster, it
-		 * shouldn't be serious corruption.
-		 */
-		int err2 = fat_remove_entries(new_dir, &sinfo);
-		if (corrupt)
-			corrupt |= err2;
-		sinfo.bh = NULL;
+	} else if (!rollback_err) {
+		/* Read the entry block again if a failed write invalidated it. */
+		rollback_err = bh_read(sinfo.bh, 0);
+		if (rollback_err >= 0)
+			rollback_err = fat_remove_entries(new_dir, &sinfo);
 	}
-	if (corrupt < 0) {
+	if (rollback_err < 0) {
 		fat_fs_error(new_dir->i_sb,
 			     "%s: Filesystem corrupted (i_pos %lld)",
 			     __func__, sinfo.i_pos);
