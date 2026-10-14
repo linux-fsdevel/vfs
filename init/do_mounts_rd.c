@@ -31,9 +31,9 @@ static int __init crd_load(decompress_fn deco);
 
 /*
  * This routine tries to find a RAM disk image to load, and returns the
- * number of blocks to read for a non-compressed image, 0 if the image
- * is a compressed image, and -1 if an image with the right magic
- * numbers could not be found.
+ * number of blocks to read for a non-compressed image, and -1 if an
+ * image with the right magic numbers could not be found. The compressed
+ * flag is set if the image is compressed.
  *
  * We currently check for the following magic numbers:
  *	minix
@@ -50,7 +50,7 @@ static int __init crd_load(decompress_fn deco);
  */
 static int __init
 identify_ramdisk_image(struct file *file, loff_t pos,
-		decompress_fn *decompressor)
+		decompress_fn *decompressor, bool *compressed)
 {
 	const int size = 512;
 	struct minix_super_block *minixsb;
@@ -63,6 +63,7 @@ identify_ramdisk_image(struct file *file, loff_t pos,
 	unsigned long n;
 	int start_block = rd_image_start;
 
+	*compressed = false;
 	buf = kmalloc(size, GFP_KERNEL);
 	if (!buf)
 		return -ENOMEM;
@@ -87,7 +88,7 @@ identify_ramdisk_image(struct file *file, loff_t pos,
 			printk(KERN_EMERG
 			       "RAMDISK: %s decompressor not configured!\n",
 			       compress_name);
-		nblocks = 0;
+		*compressed = true;
 		goto done;
 	}
 
@@ -185,6 +186,7 @@ int __init rd_load_image(void)
 	char *buf = NULL;
 	unsigned short rotate = 0;
 	decompress_fn decompressor = NULL;
+	bool compressed;
 	char rotator[4] = { '|' , '/' , '-' , '\\' };
 
 	out_file = filp_open("/dev/ram", O_RDWR, 0);
@@ -196,15 +198,15 @@ int __init rd_load_image(void)
 		goto noclose_input;
 
 	in_pos = rd_image_start * BLOCK_SIZE;
-	nblocks = identify_ramdisk_image(in_file, in_pos, &decompressor);
-	if (nblocks < 0)
-		goto done;
-
-	if (nblocks == 0) {
+	nblocks = identify_ramdisk_image(in_file, in_pos, &decompressor,
+					 &compressed);
+	if (compressed) {
 		if (crd_load(decompressor) == 0)
 			goto successful_load;
 		goto done;
 	}
+	if (nblocks < 0)
+		goto done;
 
 	/*
 	 * NOTE NOTE: nblocks is not actually blocks but
