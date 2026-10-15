@@ -595,7 +595,9 @@ anon_pipe_write(struct kiocb *iocb, struct iov_iter *from)
 				break;
 			}
 
-			copied = copy_page_from_iter(page, 0, PAGE_SIZE, from);
+			copied = copy_page_from_iter(page, 0,
+						     min_t(size_t, PAGE_SIZE,
+							   iov_iter_count(from)), from);
 			if (unlikely(copied < PAGE_SIZE && iov_iter_count(from))) {
 				anon_pipe_put_page(pipe, page);
 				if (!ret)
