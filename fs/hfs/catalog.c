@@ -269,48 +269,54 @@ void hfs_set_next_unused_CNID(struct super_block *sb,
  * Correct the next unused CNID of Catalog Tree.
  */
 static
-int hfs_correct_next_unused_CNID(struct super_block *sb, u32 cnid)
+int hfs_correct_next_unused_CNID(struct super_block *sb,
+				 struct hfs_find_data *fd, u32 cnid)
 {
 	struct hfs_btree *cat_tree;
 	struct hfs_bnode *node;
+	u32 max_cnid = 0;
+	u32 remaining;
 	s64 leaf_head;
 	s64 leaf_tail;
 	s64 node_id;
+	int res;
 
 	hfs_dbg("cnid %u, next_id %lld\n",
 		cnid, atomic64_read(&HFS_SB(sb)->next_id));
 
-	if ((cnid + 1) < atomic64_read(&HFS_SB(sb)->next_id)) {
+	if ((cnid + 1) != atomic64_read(&HFS_SB(sb)->next_id)) {
 		/* next ID should be unchanged */
 		return 0;
 	}
 
+	/* If the previous CNID is still in use, it must be the maximum. */
+	res = hfs_cat_find_brec(sb, cnid - 1, fd);
+	if (!res) {
+		hfs_set_next_unused_CNID(sb, cnid, cnid - 1);
+		return 0;
+	}
+	if (res != -ENOENT)
+		return res;
+
 	cat_tree = HFS_SB(sb)->cat_tree;
 	leaf_head = cat_tree->leaf_head;
 	leaf_tail = cat_tree->leaf_tail;
-
-	if (leaf_head > leaf_tail) {
-		pr_err("node is corrupted: leaf_head %lld, leaf_tail %lld\n",
-			leaf_head, leaf_tail);
-		return -ERANGE;
-	}
-
-	node = hfs_bnode_find(cat_tree, leaf_tail);
-	if (IS_ERR(node)) {
-		pr_err("fail to find leaf node: node ID %lld\n",
-			leaf_tail);
-		return -ENOENT;
-	}
-
+	remaining = cat_tree->node_count;
 	node_id = leaf_tail;
 
 	do {
 		int i;
 
-		if (node_id != leaf_tail) {
-			node = hfs_bnode_find(cat_tree, node_id);
-			if (IS_ERR(node))
-				return -ENOENT;
+		/* A valid leaf chain cannot visit more nodes than the tree. */
+		if (!remaining)
+			return -EIO;
+		remaining--;
+
+		node = hfs_bnode_find(cat_tree, node_id);
+		if (IS_ERR(node)) {
+			pr_err("fail to find leaf node: node ID %lld\n",
+			       node_id);
+			return PTR_ERR(node);
 		}
 
 		hfs_dbg("node %lld, leaf_tail %lld, leaf_head %lld\n",
@@ -331,42 +337,52 @@ int hfs_correct_next_unused_CNID(struct super_block *sb, u32 cnid)
 				pr_err("fail to get the keylen: "
 					"node_id %lld, record index %d\n",
 					node_id, i);
-				return -EINVAL;
+				res = -EINVAL;
+				goto out;
 			}
 
 			entryoffset = off + keylen;
 			entrylength = len - keylen;
 
-			if (entrylength > sizeof(rec)) {
+			if (entrylength <= 0 || entrylength > sizeof(rec)) {
 				pr_err("unexpected record length: "
 					"entrylength %d\n",
 					entrylength);
-				return -EINVAL;
+				res = -EINVAL;
+				goto out;
 			}
 
 			hfs_bnode_read(node, &rec, entryoffset, entrylength);
 
 			if (rec.type == HFS_CDR_DIR) {
+				if (entrylength != sizeof(struct hfs_cat_dir)) {
+					res = -EIO;
+					goto out;
+				}
 				found_cnid = be32_to_cpu(rec.dir.DirID);
 				hfs_dbg("found_cnid %u\n", found_cnid);
-				hfs_set_next_unused_CNID(sb, cnid, found_cnid);
-				hfs_bnode_put(node);
-				return 0;
+				max_cnid = max(max_cnid, found_cnid);
 			} else if (rec.type == HFS_CDR_FIL) {
+				if (entrylength != sizeof(struct hfs_cat_file)) {
+					res = -EIO;
+					goto out;
+				}
 				found_cnid = be32_to_cpu(rec.file.FlNum);
 				hfs_dbg("found_cnid %u\n", found_cnid);
-				hfs_set_next_unused_CNID(sb, cnid, found_cnid);
-				hfs_bnode_put(node);
-				return 0;
+				max_cnid = max(max_cnid, found_cnid);
 			}
 		}
 
 		node_id = node->prev;
 		hfs_bnode_put(node);
 
-	} while (node_id >= leaf_head);
+	} while (node_id);
 
-	return -ENOENT;
+	hfs_set_next_unused_CNID(sb, cnid, max_cnid);
+	return 0;
+out:
+	hfs_bnode_put(node);
+	return res;
 }
 
 /*
@@ -420,7 +436,7 @@ int hfs_cat_delete(u32 cnid, struct inode *dir, const struct qstr *str)
 	inode_set_mtime_to_ts(dir, inode_set_ctime_current(dir));
 	mark_inode_dirty(dir);
 
-	res = hfs_correct_next_unused_CNID(sb, cnid);
+	res = hfs_correct_next_unused_CNID(sb, &fd, cnid);
 	if (res)
 		goto out;
 
