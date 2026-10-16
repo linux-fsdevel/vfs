@@ -65,7 +65,7 @@
 	(CONGESTION_ON_THRESH(congestion_kb) -				\
 	 (CONGESTION_ON_THRESH(congestion_kb) >> 2))
 
-static int ceph_netfs_check_write_begin(struct file *file, loff_t pos, unsigned int len,
+static int ceph_netfs_check_write_begin(struct file *file, uoff_t pos, unsigned int len,
 					struct folio **foliop, void **_fsdata);
 
 static inline struct ceph_snap_context *page_snap_context(struct page *page)
@@ -1868,7 +1868,7 @@ ceph_find_incompatible(struct folio *folio)
 	return NULL;
 }
 
-static int ceph_netfs_check_write_begin(struct file *file, loff_t pos, unsigned int len,
+static int ceph_netfs_check_write_begin(struct file *file, uoff_t pos, unsigned int len,
 					struct folio **foliop, void **_fsdata)
 {
 	struct inode *inode = file_inode(file);
@@ -2546,7 +2546,7 @@ static int __ceph_pool_perm_get(struct ceph_inode_info *ci,
 	}
 
 	pool_ns_len = pool_ns ? pool_ns->len : 0;
-	perm = kmalloc_flex(*perm, pool_ns, pool_ns_len + 1, GFP_KERNEL);
+	perm = kmalloc_flex(*perm, pool_ns, pool_ns_len + 1);
 	if (!perm) {
 		err = -ENOMEM;
 		goto out_unlock;
