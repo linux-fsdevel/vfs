@@ -1,0 +1,128 @@
+name: kernel-build-test
+
+on:
+  workflow_call:
+    inputs:
+      arch:
+        type: string
+        required: true
+      toolchain:
+        type: string
+        default: gcc
+      distro:
+        type: string
+        required: true
+      runs_on:
+        description: 'JSON-encoded runner label array, e.g. ["ubuntu-24.04"]'
+        type: string
+        default: '["ubuntu-24.04"]'
+      timeout_minutes:
+        type: number
+        default: 90
+      test_suite:
+        type: string
+        required: true
+
+jobs:
+  build-and-test:
+    runs-on: ${{ fromJSON(inputs.runs_on) }}
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    env:
+      MKOSI_KERNEL: "${{ github.workspace }}/../mkosi-kernel"
+      MKOSI_FSTESTS: "${{ github.workspace }}/../fstests"
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: systemd/mkosi@9a28ad20bbea61894ea7b971d318a71f4374cf3b
+
+      # Free up disk space and back mkosi's workspace with a large, sparse,
+      # zstd-compressed btrfs loopback so the kernel build + 15G image don't
+      # exhaust the runner's small root filesystem. Compression lets a 100G
+      # logical fs fit in the ~20-30G of real free space. Mirrors systemd's
+      # own CI (.github/workflows/mkosi.yml). Move-then-delete in the
+      # background so the job doesn't block on the slow rm.
+      - name: Free disk space
+        run: |
+          sudo mv /usr/local /usr/local.trash
+          sudo mv /opt/hostedtoolcache /opt/hostedtoolcache.trash
+          sudo systemd-run rm -rf /usr/local.trash /opt/hostedtoolcache.trash
+
+      - name: Maximize build space
+        run: |
+          truncate --size=100G btrfs.raw
+          mkfs.btrfs btrfs.raw
+          sudo mkdir -p /mnt/mkosi
+          LOOP="$(sudo losetup --find --show --direct-io=on btrfs.raw)"
+          rm -f btrfs.raw
+          sudo mount "$LOOP" /mnt/mkosi --options compress=zstd:1,user_subvol_rm_allowed,noatime,discard=async,space_cache=v2
+          sudo chown "$(id -u):$(id -g)" /mnt/mkosi
+          mkdir -p /mnt/mkosi/tmp
+          echo "TMPDIR=/mnt/mkosi/tmp" >>"$GITHUB_ENV"
+
+      - name: Clone mkosi-kernel
+        run: git clone --depth=1 https://github.com/DaanDeMeyer/mkosi-kernel.git "$MKOSI_KERNEL"
+
+      - name: Clone fstests
+        if: inputs.test_suite != 'selftests'
+        run: |
+          git clone --depth=1 https://github.com/kdave/xfstests.git "$MKOSI_FSTESTS"
+          if [ "${{ inputs.test_suite }}" = "ovl-fstests" ]; then
+            git clone --depth=1 https://github.com/amir73il/unionmount-testsuite.git "$MKOSI_FSTESTS/src/unionmount-testsuite"
+          fi
+
+      - name: Configure mkosi
+        run: |
+          set -euo pipefail
+          cp -av ci/mkosi/mkosi.kernel.config "${MKOSI_KERNEL}/"
+          cp -avr ci/mkosi/mkosi.extra/. "${MKOSI_KERNEL}/mkosi.extra/"
+          cp -avr ci/mkosi/mkosi.repart  "${MKOSI_KERNEL}/"
+          mkdir -p "${MKOSI_KERNEL}/mkosi.conf.d"
+          cp -av ci/mkosi/mkosi.conf.d/99-vfs.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          if [ "${{ inputs.test_suite }}" != "selftests" ]; then
+            cp -av ci/mkosi/mkosi.conf.d/99-vfs-fstests.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          fi
+
+          if [ "${{ inputs.test_suite }}" = "ovl-fstests" ]; then
+            cp -av ci/mkosi/mkosi.conf.d/99-vfs-ovl.conf "${MKOSI_KERNEL}/mkosi.conf.d/"
+          fi
+
+          # mkosi.local.conf is parsed before mkosi.conf.d/, and [Match] is
+          # evaluated incrementally, so the kernel build source must be declared
+          # here (not in 99-vfs.conf) for mkosi-kernel's 15-linux.conf
+          # "[Match] BuildSources=kernel" to fire and apply its Linux= override.
+          # Otherwise mkosi version-sorts /usr/lib/modules and boots the (newer)
+          # distro kernel instead of the built one.
+          cat > "${MKOSI_KERNEL}/mkosi.local.conf" <<EOF
+          [Distribution]
+          Distribution=${{ inputs.distro }}
+
+          [Build]
+          BuildSources=$GITHUB_WORKSPACE:kernel
+          WorkspaceDirectory=$TMPDIR
+          PackageCacheDirectory=$TMPDIR/cache
+          EOF
+          mkosi --directory="${MKOSI_KERNEL}" genkey
+
+      - name: Run mkosi summary
+        run: mkosi --directory="${MKOSI_KERNEL}" summary
+
+      - name: Build image and kernel
+        run: mkosi --directory="${MKOSI_KERNEL}" build
+
+      - name: Run ${{ inputs.test_suite }}
+        run: |
+          set -euo pipefail
+
+          case "${{ inputs.test_suite }}" in
+            selftests)   unit=vfs-selftests.service ;;
+            xfstests)    unit=xfs-fstests.service ;;
+            ovl-fstests) unit=ovl-fstests.service ;;
+          esac
+
+          rc=0
+          mkosi --directory="${MKOSI_KERNEL}" box -- mkosi --directory="${MKOSI_KERNEL}" --kernel-command-line-extra=systemd.unit="$unit" qemu || rc=$?
+
+          if [ "$rc" -ne 123 ]; then
+            echo "::error::Tests failed (exit code $rc)"
+            exit 1
+          fi
