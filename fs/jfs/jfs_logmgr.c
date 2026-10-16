@@ -1316,6 +1316,17 @@ int lmLogInit(struct jfs_log * log)
 				rc = -EINVAL;
 				goto errout20;
 			}
+			/*
+			 * The external log must use the same block size as the
+			 * file system.  log->l2bsize was set to L2LOGPSIZE above
+			 * and is used as a shift count below.
+			 */
+			if (le32_to_cpu(logsuper->l2bsize) != L2LOGPSIZE ||
+			    le32_to_cpu(logsuper->size) < 2) {
+				jfs_warn("invalid log superblock");
+				rc = -EINVAL;
+				goto errout20;
+			}
 			log->size = le32_to_cpu(logsuper->size);
 			log->l2bsize = le32_to_cpu(logsuper->l2bsize);
 			jfs_info("lmLogInit: external log:0x%p base:0x%Lx size:0x%x",
