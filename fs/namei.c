@@ -5299,6 +5299,7 @@ int filename_mknodat(int dfd, struct filename *name, umode_t mode,
 	struct path path;
 	int error;
 	unsigned int lookup_flags = 0;
+	struct vfsmount *mnt;
 
 	error = may_mknod(mode);
 	if (error)
@@ -5330,9 +5331,11 @@ retry:
 			break;
 	}
 out2:
+	mnt = is_delegated(&di) ? mntget(path.mnt) : NULL;
 	end_creating_path(&path, dentry);
-	if (is_delegated(&di)) {
+	if (mnt) {
 		error = break_deleg_wait(&di);
+		mntput(mnt);
 		if (!error)
 			goto retry;
 	}
@@ -5426,6 +5429,7 @@ EXPORT_SYMBOL(vfs_mkdir);
 
 int filename_mkdirat(int dfd, struct filename *name, umode_t mode)
 {
+	struct vfsmount *mnt;
 	struct dentry *dentry;
 	struct path path;
 	int error;
@@ -5445,9 +5449,11 @@ retry:
 		if (IS_ERR(dentry))
 			error = PTR_ERR(dentry);
 	}
+	mnt = is_delegated(&delegated_inode) ? mntget(path.mnt) : NULL;
 	end_creating_path(&path, dentry);
-	if (is_delegated(&delegated_inode)) {
+	if (mnt) {
 		error = break_deleg_wait(&delegated_inode);
+		mntput(mnt);
 		if (!error)
 			goto retry;
 	}
@@ -5576,12 +5582,14 @@ exit4:
 exit3:
 	mnt_drop_write(path.mnt);
 exit2:
-	path_put(&path);
 	if (is_delegated(&delegated_inode)) {
 		error = break_deleg_wait(&delegated_inode);
-		if (!error)
+		if (!error) {
+			path_put(&path);
 			goto retry;
+		}
 	}
+	path_put(&path);
 	if (retry_estale(error, lookup_flags)) {
 		lookup_flags |= LOOKUP_REVAL;
 		goto retry;
@@ -5801,6 +5809,7 @@ EXPORT_SYMBOL(vfs_symlink);
 int filename_symlinkat(struct filename *from, int newdfd, struct filename *to)
 {
 	int error;
+	struct vfsmount *mnt;
 	struct dentry *dentry;
 	struct path path;
 	unsigned int lookup_flags = 0;
@@ -5818,9 +5827,11 @@ retry:
 	if (!error)
 		error = vfs_symlink(mnt_idmap(path.mnt), path.dentry->d_inode,
 				    dentry, from->name, &delegated_inode);
+	mnt = is_delegated(&delegated_inode) ? mntget(path.mnt) : NULL;
 	end_creating_path(&path, dentry);
-	if (is_delegated(&delegated_inode)) {
+	if (mnt) {
 		error = break_deleg_wait(&delegated_inode);
+		mntput(mnt);
 		if (!error)
 			goto retry;
 	}
