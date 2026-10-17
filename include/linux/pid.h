@@ -59,6 +59,7 @@ struct pid {
 	refcount_t count;
 	unsigned int level;
 	spinlock_t lock;
+	spinlock_t tasks_lock;
 	struct {
 		u64 ino;
 		struct rhash_head pidfs_hash;

@@ -45,9 +45,11 @@
 #include <linux/pidfs.h>
 #include <net/sock.h>
 #include <uapi/linux/pidfd.h>
+#include "sched/sched.h"	/* double_lock() */
 
 struct pid init_struct_pid = {
 	.count		= REFCOUNT_INIT(1),
+	.tasks_lock	= __SPIN_LOCK_UNLOCKED(init_struct_pid.tasks_lock),
 	.tasks		= {
 		{ .first = NULL },
 		{ .first = NULL },
@@ -193,6 +195,7 @@ struct pid *alloc_pid(struct pid_namespace *ns, pid_t *arg_set_tid,
 	pid->level = ns->level;
 	refcount_set(&pid->count, 1);
 	spin_lock_init(&pid->lock);
+	spin_lock_init(&pid->tasks_lock);
 	for (type = 0; type < PIDTYPE_MAX; ++type)
 		INIT_HLIST_HEAD(&pid->tasks[type]);
 	init_waitqueue_head(&pid->wait_pidfd);
@@ -396,7 +399,8 @@ void attach_pid(struct task_struct *task, enum pid_type type)
 	lockdep_assert_held_write(&tasklist_lock);
 
 	pid = *task_pid_ptr(task, type);
-	hlist_add_head_rcu(&task->pid_links[type], &pid->tasks[type]);
+	scoped_guard(spinlock, &pid->tasks_lock)
+		hlist_add_head_rcu(&task->pid_links[type], &pid->tasks[type]);
 }
 
 static void __change_pid(struct pid **pids, struct task_struct *task,
@@ -427,10 +431,15 @@ void detach_pid(struct pid **pids, struct task_struct *task, enum pid_type type)
 }
 
 void change_pid(struct pid **pids, struct task_struct *task, enum pid_type type,
-		struct pid *pid)
+		struct pid *new)
 {
-	__change_pid(pids, task, type, pid);
-	attach_pid(task, type);
+	struct pid *old = task->signal->pids[type];
+
+	double_lock(&old->tasks_lock, &new->tasks_lock);
+	__change_pid(pids, task, type, new);
+	hlist_add_head_rcu(&task->pid_links[type], &new->tasks[type]);
+	spin_unlock(&old->tasks_lock);
+	spin_unlock(&new->tasks_lock);
 }
 
 void exchange_tids(struct task_struct *left, struct task_struct *right)
@@ -441,6 +450,7 @@ void exchange_tids(struct task_struct *left, struct task_struct *right)
 	struct hlist_head *head2 = &pid2->tasks[PIDTYPE_PID];
 
 	lockdep_assert_held_write(&tasklist_lock);
+	double_lock(&pid1->tasks_lock, &pid2->tasks_lock);
 
 	/* Swap the single entry tid lists */
 	hlists_swap_heads_rcu(head1, head2);
@@ -452,6 +462,9 @@ void exchange_tids(struct task_struct *left, struct task_struct *right)
 	/* Swap the cached value */
 	WRITE_ONCE(left->pid, pid_nr(pid2));
 	WRITE_ONCE(right->pid, pid_nr(pid1));
+
+	spin_unlock(&pid1->tasks_lock);
+	spin_unlock(&pid2->tasks_lock);
 }
 
 /* transfer_pid is an optimization of attach_pid(new), detach_pid(old) */
@@ -460,7 +473,8 @@ void transfer_pid(struct task_struct *old, struct task_struct *new,
 {
 	WARN_ON_ONCE(type == PIDTYPE_PID);
 	lockdep_assert_held_write(&tasklist_lock);
-	hlist_replace_rcu(&old->pid_links[type], &new->pid_links[type]);
+	scoped_guard(spinlock, &old->signal->pids[type]->tasks_lock)
+		hlist_replace_rcu(&old->pid_links[type], &new->pid_links[type]);
 }
 
 struct task_struct *pid_task(struct pid *pid, enum pid_type type)
