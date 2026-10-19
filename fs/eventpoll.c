@@ -27,6 +27,7 @@
 #include <linux/mount.h>
 #include <linux/bitops.h>
 #include <linux/mutex.h>
+#include <linux/rwsem.h>
 #include <linux/anon_inodes.h>
 #include <linux/device.h>
 #include <linux/uaccess.h>
@@ -63,12 +64,13 @@
  * Locking
  * -------
  *
- * Three levels, acquired from outer to inner:
+ * Locks are acquired from outer to inner:
  *
- *   epnested_mutex   (global; rare; taken only for EPOLL_CTL_ADD
- *                     loop / path checks)
- *     > ep->mtx     (per-eventpoll; sleepable; serializes most ops)
- *       > ep->lock  (per-eventpoll; IRQ-safe spinlock)
+ *   epnested_rwsem  (global; write for topology changes, read for
+ *                    ordinary-file adds to watched epolls)
+ *     > epnested_mutex or ep_file_mutexes[]
+ *       > ep->mtx   (per-eventpoll; sleepable; serializes most ops)
+ *         > ep->lock (per-eventpoll; IRQ-safe spinlock)
  *
  *   file->f_lock    (per-file; NOT IRQ-safe; guards f_ep hlist ops;
  *                    nested inside ep->mtx, outside ep->lock)
@@ -84,6 +86,9 @@
  *     view of the epoll topology; a per-object scheme would let two
  *     concurrent inserts (A into B, B into A) construct a cycle
  *     without either observer seeing it.
+ *   - Ordinary-file adds cannot form cycles. A read hold on the global
+ *     rwsem freezes topology while a file-specific mutex serializes
+ *     changes to that file's reverse wakeup-path count.
  *   - Per-ep ep->mtx is preferred for scalability elsewhere. Events
  *     that require epnested_mutex are rare.
  *
@@ -387,10 +392,12 @@ static long max_user_watches __read_mostly;
  *      of a given length -- reverse_path_check().
  *
  * Both need a global view of the epoll topology and must be atomic
- * with the insertion, so the check is serialized by epnested_mutex
- * and carries its scratch state on a stack-allocated struct
- * ep_ctl_ctx scoped to one do_epoll_ctl() call. Non-nested inserts
- * skip this machinery entirely and take only ep->mtx.
+ * with the insertion. Topology changes take epnested_mutex under the
+ * write side of epnested_rwsem. Ordinary-file adds to watched epolls
+ * take the read side and a hashed file mutex, since only their target
+ * file's path count changes. Scratch state is on a stack-allocated
+ * struct ep_ctl_ctx scoped to one do_epoll_ctl() call. Non-nested
+ * inserts skip this machinery entirely and take only ep->mtx.
  *
  *   epnested_mutex     Serializes the whole check.
  *   loop_check_gen     Global monotonic stamp, bumped at the start of
@@ -413,7 +420,17 @@ static long max_user_watches __read_mostly;
  * preserve both bail-outs.
  */
 static DEFINE_MUTEX(epnested_mutex);
-static u64 loop_check_gen = 0;
+/* Hash collisions only reduce concurrency. */
+#define EP_FILE_LOCK_BITS 8
+static __cacheline_aligned_in_smp DECLARE_RWSEM(epnested_rwsem);
+static struct mutex ep_file_mutexes[1 << EP_FILE_LOCK_BITS];
+
+static struct mutex *ep_file_mutex(struct file *file)
+{
+	return &ep_file_mutexes[hash_ptr(file, EP_FILE_LOCK_BITS)];
+}
+
+static u64 loop_check_gen __cacheline_aligned_in_smp;
 
 #define PATH_ARR_SIZE 5
 
@@ -421,7 +438,8 @@ static u64 loop_check_gen = 0;
  * Per-do_epoll_ctl() scratch for the loop / path checks. Allocated on
  * the caller's stack; populated by ep_ctl_lock() and the downward
  * walk; consumed by reverse_path_check(); released by ep_ctl_unlock().
- * Only valid while the caller holds epnested_mutex.
+ * Only valid while the caller holds the topology write lock or the
+ * topology read lock together with the target file's hashed mutex.
  */
 struct ep_ctl_ctx {
 	/*
@@ -1664,8 +1682,7 @@ static void ep_rbtree_insert(struct eventpoll *ep, struct epitem *epi)
  * epoll topologies without rejecting reasonable usage.
  *
  * Enforced at EPOLL_CTL_ADD; CTL_MOD and CTL_DEL cannot add paths.
- * The running tallies live in ctx->path_count[] and are protected by
- * epnested_mutex.
+ * The running tallies live in ctx->path_count[].
  */
 static const int path_limits[PATH_ARR_SIZE] = { 1000, 500, 100, 50, 10 };
 
@@ -2560,18 +2577,19 @@ static inline int epoll_mutex_lock(struct mutex *mutex, bool nonblock)
 /*
  * Acquire the locks required for do_epoll_ctl() on @ep for @op.
  *
- * Always takes ep->mtx. For EPOLL_CTL_ADD, additionally runs the
- * loop / path check under epnested_mutex when the topology can
- * change: @ep is already watched (epfile->f_ep non-NULL), @ep was
- * recently loop-checked (ep->gen == loop_check_gen), or @tfile is
- * itself an eventpoll.
+ * Always takes ep->mtx. For EPOLL_CTL_ADD, additionally checks paths
+ * under the topology read lock when @ep is watched and @tfile is an
+ * ordinary file. Adding an eventpoll or handling a recently checked
+ * @ep uses the topology write lock for the full loop/path check.
  *
  * Return value encodes both outcome and lock state:
  *
  *   0        success; ep->mtx held.
  *   1        success; ep->mtx held AND the full check ran under
- *            epnested_mutex (which is also still held). The value
- *            doubles as the @full_check argument to ep_insert().
+ *            the topology write lock and epnested_mutex.
+ *   2        success; ep->mtx held, topology read lock and target
+ *            file mutex held for a full path check. Both 1 and 2
+ *            are true as the @full_check argument to ep_insert().
  *   -errno   failure; no locks held.
  *
  * The caller releases what was taken with ep_ctl_unlock(ep, ret).
@@ -2584,6 +2602,7 @@ static int ep_ctl_lock(struct ep_ctl_ctx *ctx, struct eventpoll *ep, int op,
 		       struct file *epfile, struct file *tfile, bool nonblock)
 {
 	struct eventpoll *tep;
+	struct mutex *file_mutex;
 	int error;
 
 	error = epoll_mutex_lock(&ep->mtx, nonblock);
@@ -2596,11 +2615,41 @@ static int ep_ctl_lock(struct ep_ctl_ctx *ctx, struct eventpoll *ep, int op,
 	    !is_file_epoll(tfile))
 		return 0;
 
-	/* Full check needed: drop ep->mtx so we can take epnested_mutex. */
+	if (READ_ONCE(epfile->f_ep) && ep->gen != loop_check_gen &&
+	    !is_file_epoll(tfile)) {
+		/* Freeze topology, then serialize checks for this leaf file. */
+		mutex_unlock(&ep->mtx);
+		if (nonblock) {
+			if (!down_read_trylock(&epnested_rwsem))
+				return -EAGAIN;
+		} else {
+			down_read(&epnested_rwsem);
+		}
+		file_mutex = ep_file_mutex(tfile);
+		error = epoll_mutex_lock(file_mutex, nonblock);
+		if (error)
+			goto err_unlock_read;
+		error = epoll_mutex_lock(&ep->mtx, nonblock);
+		if (error) {
+			mutex_unlock(file_mutex);
+			goto err_unlock_read;
+		}
+		return 2;
+	}
+
+	/* Full check needed: acquire topology write lock before ep->mtx. */
 	mutex_unlock(&ep->mtx);
+	if (nonblock) {
+		if (!down_write_trylock(&epnested_rwsem))
+			return -EAGAIN;
+	} else {
+		down_write(&epnested_rwsem);
+	}
 	error = epoll_mutex_lock(&epnested_mutex, nonblock);
-	if (error)
+	if (error) {
+		up_write(&epnested_rwsem);
 		return error;
+	}
 
 	loop_check_gen++;
 
@@ -2622,17 +2671,28 @@ err_unlock_nested:
 	clear_tfile_check_list(ctx);
 	loop_check_gen++;
 	mutex_unlock(&epnested_mutex);
+	up_write(&epnested_rwsem);
+	return error;
+
+err_unlock_read:
+	up_read(&epnested_rwsem);
 	return error;
 }
 
 static void ep_ctl_unlock(struct ep_ctl_ctx *ctx, struct eventpoll *ep,
-			  int full_check)
+			  struct file *tfile, int full_check)
 {
 	mutex_unlock(&ep->mtx);
 	if (full_check) {
 		clear_tfile_check_list(ctx);
-		loop_check_gen++;
-		mutex_unlock(&epnested_mutex);
+		if (full_check == 2) {
+			mutex_unlock(ep_file_mutex(tfile));
+			up_read(&epnested_rwsem);
+		} else {
+			loop_check_gen++;
+			mutex_unlock(&epnested_mutex);
+			up_write(&epnested_rwsem);
+		}
 	}
 }
 
@@ -2719,7 +2779,7 @@ int do_epoll_ctl_file(struct file *f, int op, struct epoll_key *tf,
 		break;
 	}
 
-	ep_ctl_unlock(&ctx, ep, full_check);
+	ep_ctl_unlock(&ctx, ep, tf->file, full_check);
 	return error;
 }
 
@@ -2998,6 +3058,10 @@ COMPAT_SYSCALL_DEFINE6(epoll_pwait2, int, epfd,
 static int __init eventpoll_init(void)
 {
 	struct sysinfo si;
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(ep_file_mutexes); i++)
+		mutex_init(&ep_file_mutexes[i]);
 
 	si_meminfo(&si);
 	/*
