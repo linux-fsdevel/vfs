@@ -169,6 +169,15 @@ static inline void print_ipv4_addr(struct audit_buffer *ab, __be32 addr,
 		audit_log_format(ab, " %s=%d", name2, ntohs(port));
 }
 
+static inline void audit_log_lsm_path(struct audit_buffer *ab,
+									const struct path *path)
+{
+	if (current->fs)
+		audit_log_d_path(ab, " path=", path);
+	else
+		audit_log_format(ab, " path=(null)");
+}
+
 /**
  * audit_log_lsm_data - helper to log common LSM audit data
  * @ab : the audit buffer
@@ -196,7 +205,7 @@ void audit_log_lsm_data(struct audit_buffer *ab,
 	case LSM_AUDIT_DATA_PATH: {
 		struct inode *inode;
 
-		audit_log_d_path(ab, " path=", &a->u.path);
+		audit_log_lsm_path(ab, &a->u.path);
 
 		inode = d_backing_inode(a->u.path.dentry);
 		if (inode) {
@@ -209,7 +218,7 @@ void audit_log_lsm_data(struct audit_buffer *ab,
 	case LSM_AUDIT_DATA_FILE: {
 		struct inode *inode;
 
-		audit_log_d_path(ab, " path=", &a->u.file->f_path);
+		audit_log_lsm_path(ab, &a->u.file->f_path);
 
 		inode = file_inode(a->u.file);
 		if (inode) {
@@ -222,7 +231,7 @@ void audit_log_lsm_data(struct audit_buffer *ab,
 	case LSM_AUDIT_DATA_IOCTL_OP: {
 		struct inode *inode;
 
-		audit_log_d_path(ab, " path=", &a->u.op->path);
+		audit_log_lsm_path(ab, &a->u.op->path);
 
 		inode = a->u.op->path.dentry->d_inode;
 		if (inode) {
@@ -321,7 +330,7 @@ void audit_log_lsm_data(struct audit_buffer *ab,
 				if (!addr)
 					break;
 				if (u->path.dentry) {
-					audit_log_d_path(ab, " path=", &u->path);
+					audit_log_lsm_path(ab, &u->path);
 					break;
 				}
 				len = addr->len-sizeof(short);
