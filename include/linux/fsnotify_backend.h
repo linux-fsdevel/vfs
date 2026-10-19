@@ -801,7 +801,7 @@ static inline __u32 fsnotify_ignore_mask(struct fsnotify_mark *mark)
 	__u32 ignore_mask = mark->ignore_mask;
 
 	/* The event flags in ignore mask take effect */
-	if (mark->flags & FSNOTIFY_MARK_FLAG_HAS_IGNORE_FLAGS)
+	if (READ_ONCE(mark->flags) & FSNOTIFY_MARK_FLAG_HAS_IGNORE_FLAGS)
 		return ignore_mask;
 
 	/*
@@ -811,7 +811,7 @@ static inline __u32 fsnotify_ignore_mask(struct fsnotify_mark *mark)
 	 */
 	ignore_mask |= FS_ISDIR;
 	ignore_mask &= ~FS_EVENT_ON_CHILD;
-	ignore_mask |= mark->mask & FS_EVENT_ON_CHILD;
+	ignore_mask |= READ_ONCE(mark->mask) & FS_EVENT_ON_CHILD;
 
 	return ignore_mask;
 }

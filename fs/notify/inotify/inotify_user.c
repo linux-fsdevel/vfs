@@ -554,12 +554,21 @@ static int inotify_update_existing_watch(struct fsnotify_group *group,
 	i_mark = container_of(fsn_mark, struct inotify_inode_mark, fsn_mark);
 
 	spin_lock(&fsn_mark->lock);
+	/*
+	 * Event delivery reads mask and flags without mark->lock, so update
+	 * each of them with a single store and never expose a partial value.
+	 */
 	if (replace) {
-		fsn_mark->mask = 0;
-		fsn_mark->flags &= ~INOTIFY_MARK_FLAGS;
+		WRITE_ONCE(fsn_mark->mask, inotify_arg_to_mask(inode, arg));
+		WRITE_ONCE(fsn_mark->flags,
+			   (fsn_mark->flags & ~INOTIFY_MARK_FLAGS) |
+			   inotify_arg_to_flags(arg));
+	} else {
+		WRITE_ONCE(fsn_mark->mask,
+			   fsn_mark->mask | inotify_arg_to_mask(inode, arg));
+		WRITE_ONCE(fsn_mark->flags,
+			   fsn_mark->flags | inotify_arg_to_flags(arg));
 	}
-	fsn_mark->mask |= inotify_arg_to_mask(inode, arg);
-	fsn_mark->flags |= inotify_arg_to_flags(arg);
 	spin_unlock(&fsn_mark->lock);
 
 	fsnotify_recalc_mask(fsn_mark->connector);
