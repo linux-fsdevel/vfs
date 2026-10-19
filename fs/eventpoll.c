@@ -422,7 +422,7 @@ static long max_user_watches __read_mostly;
 static DEFINE_MUTEX(epnested_mutex);
 /* Hash collisions only reduce concurrency. */
 #define EP_FILE_LOCK_BITS 8
-static DECLARE_RWSEM(epnested_rwsem);
+static __cacheline_aligned_in_smp DECLARE_RWSEM(epnested_rwsem);
 static struct mutex ep_file_mutexes[1 << EP_FILE_LOCK_BITS];
 
 static struct mutex *ep_file_mutex(struct file *file)
@@ -430,7 +430,7 @@ static struct mutex *ep_file_mutex(struct file *file)
 	return &ep_file_mutexes[hash_ptr(file, EP_FILE_LOCK_BITS)];
 }
 
-static u64 loop_check_gen = 0;
+static u64 loop_check_gen __cacheline_aligned_in_smp;
 
 #define PATH_ARR_SIZE 5
 
