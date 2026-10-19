@@ -1066,7 +1066,9 @@ static int __fat_remove_entries(struct inode *dir, loff_t pos, int nr_slots)
 	return err;
 }
 
-int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
+static int fat_remove_entries_internal(struct inode *dir,
+				       struct fat_slot_info *sinfo,
+				       bool require_uptodate)
 {
 	struct super_block *sb = dir->i_sb;
 	struct msdos_dir_entry *de;
@@ -1079,8 +1081,15 @@ int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
 	 */
 	nr_slots = sinfo->nr_slots;
 	de = sinfo->de;
-	sinfo->de = NULL;
 	bh = sinfo->bh;
+	if (require_uptodate) {
+		lock_buffer(bh);
+		if (!buffer_uptodate(bh)) {
+			unlock_buffer(bh);
+			return -EIO;
+		}
+	}
+	sinfo->de = NULL;
 	sinfo->bh = NULL;
 	while (nr_slots && de >= (struct msdos_dir_entry *)bh->b_data) {
 		de->name[0] = DELETED_FLAG;
@@ -1088,6 +1097,8 @@ int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
 		nr_slots--;
 	}
 	mmb_mark_buffer_dirty(bh, &MSDOS_I(dir)->i_metadata_bhs);
+	if (require_uptodate)
+		unlock_buffer(bh);
 	if (IS_DIRSYNC(dir))
 		err = sync_dirty_buffer(bh);
 	brelse(bh);
@@ -1116,7 +1127,19 @@ int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
 
 	return 0;
 }
+
+int fat_remove_entries(struct inode *dir, struct fat_slot_info *sinfo)
+{
+	return fat_remove_entries_internal(dir, sinfo, false);
+}
 EXPORT_SYMBOL_GPL(fat_remove_entries);
+
+int fat_remove_entries_if_uptodate(struct inode *dir,
+				   struct fat_slot_info *sinfo)
+{
+	return fat_remove_entries_internal(dir, sinfo, true);
+}
+EXPORT_SYMBOL_GPL(fat_remove_entries_if_uptodate);
 
 static int fat_zeroed_cluster(struct inode *dir, sector_t blknr, int nr_used,
 			      struct buffer_head **bhs, int nr_bhs)
