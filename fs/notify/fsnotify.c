@@ -264,12 +264,12 @@ static int fsnotify_handle_inode_event(struct fsnotify_group *group,
 	if (WARN_ON_ONCE(!inode && !dir))
 		return 0;
 
-	if ((inode_mark->flags & FSNOTIFY_MARK_FLAG_EXCL_UNLINK) &&
+	if ((READ_ONCE(inode_mark->flags) & FSNOTIFY_MARK_FLAG_EXCL_UNLINK) &&
 	    path && d_unlinked(path->dentry))
 		return 0;
 
 	/* Check interest of this mark in case event was sent with two marks */
-	if (!(mask & inode_mark->mask & ALL_FSNOTIFY_EVENTS))
+	if (!(mask & READ_ONCE(inode_mark->mask) & ALL_FSNOTIFY_EVENTS))
 		return 0;
 
 	return ops->handle_inode_event(inode_mark, mask, inode, dir, name, cookie);
@@ -349,7 +349,7 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 	/* clear ignored on inode modification */
 	if (mask & FS_MODIFY) {
 		fsnotify_foreach_iter_mark_type(iter_info, mark, type) {
-			if (!(mark->flags &
+			if (!(READ_ONCE(mark->flags) &
 			      FSNOTIFY_MARK_FLAG_IGNORED_SURV_MODIFY))
 				mark->ignore_mask = 0;
 		}
@@ -358,7 +358,7 @@ static int send_to_group(__u32 mask, const void *data, int data_type,
 	/* Are any of the group marks interested in this event? */
 	fsnotify_foreach_iter_mark_type(iter_info, mark, type) {
 		group = mark->group;
-		marks_mask |= mark->mask;
+		marks_mask |= READ_ONCE(mark->mask);
 		marks_ignore_mask |=
 			fsnotify_effective_ignore_mask(mark, is_dir, type);
 	}
@@ -439,7 +439,7 @@ static bool fsnotify_iter_select_report_types(
 			 * But is *this mark* watching children?
 			 */
 			if (type == FSNOTIFY_ITER_TYPE_PARENT &&
-			    !(mark->mask & FS_EVENT_ON_CHILD) &&
+			    !(READ_ONCE(mark->mask) & FS_EVENT_ON_CHILD) &&
 			    !(fsnotify_ignore_mask(mark) & FS_EVENT_ON_CHILD))
 				continue;
 
