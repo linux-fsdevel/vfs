@@ -3,6 +3,7 @@
 #include <linux/export.h>
 #include <linux/uaccess.h>
 #include <linux/fs_struct.h>
+#include <linux/init_task.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
 #include <linux/prefetch.h>
@@ -284,7 +285,8 @@ char *d_path(const struct path *path, char *buf, int buflen)
 		return path->dentry->d_op->d_dname(path->dentry, buf, buflen);
 
 	rcu_read_lock();
-	get_fs_root_rcu(current->fs, &root);
+	/* exit_fs() already ran if we are called from exit_task_work() */
+	get_fs_root_rcu(current->fs ?: &init_fs, &root);
 	if (unlikely(d_unlinked(path->dentry)))
 		prepend(&b, " (deleted)", 11);
 	else
