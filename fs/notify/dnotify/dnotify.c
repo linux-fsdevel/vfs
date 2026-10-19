@@ -58,8 +58,9 @@ struct dnotify_mark {
  * the set of all those events.  After it updates what dnotify is interested in
  * it calls the fsnotify function so it can update the set of all events relevant
  * to this inode.
+ * Returns "true" if fsnotify_conn_set_children_dentry_flags() needs to be called.
  */
-static void dnotify_recalc_inode_mask(struct fsnotify_mark *fsn_mark)
+static bool dnotify_recalc_inode_mask(struct fsnotify_mark *fsn_mark)
 {
 	__u32 new_mask = 0;
 	struct dnotify_struct *dn;
@@ -72,10 +73,10 @@ static void dnotify_recalc_inode_mask(struct fsnotify_mark *fsn_mark)
 	for (dn = dn_mark->dn; dn != NULL; dn = dn->dn_next)
 		new_mask |= (dn->dn_mask & ~FS_DN_MULTISHOT);
 	if (fsn_mark->mask == new_mask)
-		return;
+		return false;
 	fsn_mark->mask = new_mask;
 
-	fsnotify_recalc_mask(fsn_mark->connector);
+	return fsnotify_recalc_mask(fsn_mark->connector);
 }
 
 /*
@@ -265,6 +266,7 @@ int fcntl_dirnotify(int fd, struct file *filp, unsigned int arg)
 	fl_owner_t id = current->files;
 	struct file *f = NULL;
 	int destroy = 0, error = 0;
+	bool update_children = false;
 	__u32 mask;
 
 	/* we use these to tell if we need to kfree */
@@ -377,9 +379,11 @@ int fcntl_dirnotify(int fd, struct file *filp, unsigned int arg)
 	else if (error == -EEXIST)
 		error = 0;
 
-	dnotify_recalc_inode_mask(fsn_mark);
+	update_children = dnotify_recalc_inode_mask(fsn_mark);
 out:
 	spin_unlock(&fsn_mark->lock);
+	if (update_children)
+		fsnotify_conn_set_children_dentry_flags(fsn_mark->connector);
 
 	if (destroy)
 		fsnotify_detach_mark(fsn_mark);
