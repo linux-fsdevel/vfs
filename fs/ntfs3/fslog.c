@@ -2956,6 +2956,7 @@ static inline bool check_if_root_index(const struct ATTRIB *attr,
 
 	while (o < ao) {
 		u16 esize;
+		bool last;
 
 		if (o >= asize)
 			break;
@@ -2964,8 +2965,13 @@ static inline bool check_if_root_index(const struct ATTRIB *attr,
 		if (!esize)
 			break;
 
+		last = de_is_last(e);
+
 		o += esize;
 		e = Add2Ptr(e, esize);
+
+		if (last)
+			break;
 	}
 
 	return o == ao;
@@ -2981,6 +2987,7 @@ static inline bool check_if_alloc_index(const struct INDEX_HDR *hdr,
 
 	while (o < attr_off) {
 		u16 esize;
+		bool last;
 
 		if (de_off >= used)
 			break;
@@ -2989,9 +2996,14 @@ static inline bool check_if_alloc_index(const struct INDEX_HDR *hdr,
 		if (!esize)
 			break;
 
+		last = de_is_last(e);
+
 		o += esize;
 		de_off += esize;
 		e = Add2Ptr(e, esize);
+
+		if (last)
+			break;
 	}
 
 	return o == attr_off;
