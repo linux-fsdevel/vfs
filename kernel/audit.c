@@ -2218,7 +2218,11 @@ void audit_log_d_path(struct audit_buffer *ab, const char *prefix,
 		audit_log_format(ab, "\"<no_memory>\"");
 		return;
 	}
-	p = d_path(path, pathname, PATH_MAX+11);
+	/* No fs after exit_fs(), so there is no root to be relative to */
+	if (current->fs)
+		p = d_path(path, pathname, PATH_MAX+11);
+	else
+		p = d_absolute_path(path, pathname, PATH_MAX+11);
 	if (IS_ERR(p)) { /* Should never happen since we send PATH_MAX */
 		/* FIXME: can we save some information here? */
 		audit_log_format(ab, "\"<too_long>\"");
