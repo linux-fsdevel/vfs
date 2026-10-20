@@ -2178,6 +2178,10 @@ void fuse_chan_abort(struct fuse_chan *fch, bool abort_with_err)
 		spin_unlock(&fch->bg_lock);
 
 		fuse_chan_set_initialized(fch, NULL);
+
+		if (fiq->ops->abort)
+			fiq->ops->abort(fiq);
+
 		list_for_each_entry(fud, &fch->devices, entry) {
 			struct fuse_pqueue *fpq = &fud->pq;
 
