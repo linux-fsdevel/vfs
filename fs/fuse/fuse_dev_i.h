@@ -149,6 +149,11 @@ struct fuse_iqueue_ops {
 	void (*send_req)(struct fuse_iqueue *fiq, struct fuse_req *req);
 
 	/**
+	 * @abort: Abort transport-specific state
+	 */
+	void (*abort)(struct fuse_iqueue *fiq);
+
+	/**
 	 * @release: Clean up when fuse_iqueue is destroyed
 	 */
 	void (*release)(struct fuse_iqueue *fiq);

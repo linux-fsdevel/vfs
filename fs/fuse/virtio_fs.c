@@ -55,6 +55,7 @@ struct virtio_fs_vq {
 	struct work_struct dispatch_work;
 	struct fuse_dev *fud;
 	bool connected;
+	bool aborted;
 	long in_flight;
 	struct completion in_flight_zero; /* No inflight requests */
 	struct kobject *kobj;
@@ -842,6 +843,15 @@ static void virtio_fs_requests_done_work(struct work_struct *work)
 		virtqueue_disable_cb(vq);
 
 		while ((req = virtqueue_get_buf(vq, &len)) != NULL) {
+			if (fsvq->aborted) {
+				/*
+				 * fuse_chan_abort() ended every request this
+				 * queue still owns; the token may already be
+				 * freed, do not touch it.
+				 */
+				dec_in_flight_req(fsvq);
+				continue;
+			}
 			if (!virtio_fs_verify_response(req, len)) {
 				req->out.h.error = -EIO;
 				req->out.h.len = sizeof(struct fuse_out_header);
@@ -1541,10 +1551,26 @@ static void virtio_fs_send_req(struct fuse_iqueue *fiq, struct fuse_req *req)
 	}
 }
 
+static void virtio_fs_abort(struct fuse_iqueue *fiq)
+{
+	struct virtio_fs *fs = fiq->priv;
+	int i;
+
+	for (i = 0; i < fs->nvqs; i++) {
+		struct virtio_fs_vq *fsvq = &fs->vqs[i];
+
+		spin_lock(&fsvq->lock);
+		fsvq->connected = false;
+		fsvq->aborted = true;
+		spin_unlock(&fsvq->lock);
+	}
+}
+
 static const struct fuse_iqueue_ops virtio_fs_fiq_ops = {
 	.send_forget	= virtio_fs_send_forget,
 	.send_interrupt	= virtio_fs_send_interrupt,
 	.send_req	= virtio_fs_send_req,
+	.abort		= virtio_fs_abort,
 	.release	= virtio_fs_fiq_release,
 };
 
