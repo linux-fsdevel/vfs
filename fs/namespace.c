@@ -6116,8 +6116,13 @@ static inline int prepare_klistmount(struct klistmount *kls, struct mnt_id_req *
 	u64 last_mnt_id = kreq->param;
 	struct mnt_namespace *ns;
 
-	/* The first valid unique mount id is MNT_UNIQUE_ID_OFFSET + 1. */
-	if (last_mnt_id != 0 && last_mnt_id <= MNT_UNIQUE_ID_OFFSET)
+	/*
+	 * The first valid unique mount id is MNT_UNIQUE_ID_OFFSET + 1.  A
+	 * U64_MAX cursor is invalid as well: advancing it by one would wrap
+	 * around to zero and restart the enumeration.
+	 */
+	if (last_mnt_id != 0 &&
+	    (last_mnt_id <= MNT_UNIQUE_ID_OFFSET || last_mnt_id == U64_MAX))
 		return -EINVAL;
 
 	kls->last_mnt_id = last_mnt_id;
