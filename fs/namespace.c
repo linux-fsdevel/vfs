@@ -5655,8 +5655,18 @@ static int copy_statmount_to_user(struct kstatmount *s)
 	char __user *str = ((char __user *)s->buf) + sizeof(*sm);
 	size_t copysize = min_t(size_t, s->bufsize, sizeof(*sm));
 
-	if (seq->count && copy_to_user(str, seq->buf, seq->count))
-		return -EFAULT;
+	if (seq->count) {
+		/*
+		 * The string area starts after the struct and must fit into the
+		 * caller-provided buffer.  A request that emitted no strings
+		 * still leaves the reserved empty string in seq->buf.
+		 */
+		if (s->bufsize < sizeof(*sm) ||
+		    seq->count > s->bufsize - sizeof(*sm))
+			return -EOVERFLOW;
+		if (copy_to_user(str, seq->buf, seq->count))
+			return -EFAULT;
+	}
 
 	/* Return the number of bytes copied to the buffer */
 	sm->size = copysize + seq->count;
@@ -6106,8 +6116,13 @@ static inline int prepare_klistmount(struct klistmount *kls, struct mnt_id_req *
 	u64 last_mnt_id = kreq->param;
 	struct mnt_namespace *ns;
 
-	/* The first valid unique mount id is MNT_UNIQUE_ID_OFFSET + 1. */
-	if (last_mnt_id != 0 && last_mnt_id <= MNT_UNIQUE_ID_OFFSET)
+	/*
+	 * The first valid unique mount id is MNT_UNIQUE_ID_OFFSET + 1.  A
+	 * U64_MAX cursor is invalid as well: advancing it by one would wrap
+	 * around to zero and restart the enumeration.
+	 */
+	if (last_mnt_id != 0 &&
+	    (last_mnt_id <= MNT_UNIQUE_ID_OFFSET || last_mnt_id == U64_MAX))
 		return -EINVAL;
 
 	kls->last_mnt_id = last_mnt_id;

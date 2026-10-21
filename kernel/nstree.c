@@ -450,6 +450,9 @@ static int copy_ns_id_req(const struct ns_id_req __user *req,
 static inline int prepare_klistns(struct klistns *kls, struct ns_id_req *kreq,
 				  u64 __user *ns_ids, size_t nr_ns_ids)
 {
+	/* A U64_MAX cursor would wrap when advanced. */
+	if (kreq->ns_id == U64_MAX)
+		return -EINVAL;
 	kls->last_ns_id = kreq->ns_id;
 	kls->user_ns_id = kreq->user_ns_id;
 	kls->nr_ns_ids	= nr_ns_ids;
