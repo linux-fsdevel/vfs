@@ -646,7 +646,7 @@ static udf_pblk_t udf_table_new_block(struct super_block *sb,
 	goal_eloc.logicalBlockNum++;
 	goal_elen -= sb->s_blocksize;
 
-	if (goal_elen)
+	if (goal_elen & UDF_EXTENT_LENGTH_MASK)
 		udf_write_aext(table, &goal_epos, &goal_eloc, goal_elen, 1);
 	else
 		udf_delete_aext(table, goal_epos, &freed);
