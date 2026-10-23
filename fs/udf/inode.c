@@ -1587,6 +1587,11 @@ reread:
 	 */
 	if (iinfo->i_lenEAttr > bs || iinfo->i_lenAlloc > bs)
 		goto out;
+	/* We need to have space at least for generic descriptor */
+	if (iinfo->i_lenEAttr && iinfo->i_lenEAttr <
+					sizeof(struct extendedAttrHeaderDesc))
+		goto out;
+
 	/* Now do exact checks */
 	if (udf_file_entry_alloc_offset(inode) + iinfo->i_lenAlloc > bs)
 		goto out;
