@@ -2906,8 +2906,31 @@ loff_t ni_seek_data_or_hole(struct ntfs_inode *ni, loff_t offset, bool data)
 {
 	int err;
 	u8 cluster_bits = ni->mi.sbi->cluster_bits;
-	CLST vcn, lcn, clen;
+	CLST vcn, lcn, clen, frame_clusters = 0;
 	loff_t vbo;
+
+	if (ni->ni_flags & NI_FLAG_COMPRESSED_MASK) {
+		/*
+		 * Xpress or LZX (WOF). The main data attribute's run list is
+		 * entirely sparse: the real, compressed bytes live in a
+		 * separate named attribute (see ni_read_frame()) and every
+		 * logical byte in [0, i_size) is reconstructed on read. There
+		 * is no hole to find here.
+		 */
+		loff_t i_size = i_size_read(&ni->vfs_inode);
+
+		if (data)
+			return offset < i_size ? offset : -ENXIO;
+
+		return i_size;
+	}
+
+	if (ni->std_fa & FILE_ATTRIBUTE_COMPRESSED) {
+		/* LZNT compression: compressed frames are embedded directly
+		 * in the main data attribute's own run list.
+		 */
+		frame_clusters = NTFS_LZNT_CLUSTERS;
+	}
 
 	/* Enumerate all fragments. */
 	for (vcn = offset >> cluster_bits;; vcn += clen) {
@@ -2956,8 +2979,8 @@ loff_t ni_seek_data_or_hole(struct ntfs_inode *ni, loff_t offset, bool data)
 				break;
 			}
 
-			if ((ni->std_fa & FILE_ATTRIBUTE_COMPRESSED) &&
-			    (vcn & (NTFS_LZNT_CLUSTERS - 1))) {
+			if (frame_clusters &&
+			    (vcn & (frame_clusters - 1))) {
 				/* Compressed cluster in compressed frame. */
 				break;
 			}
@@ -2971,8 +2994,8 @@ loff_t ni_seek_data_or_hole(struct ntfs_inode *ni, loff_t offset, bool data)
 			 */
 			if (lcn == SPARSE_LCN &&
 			    /* native compression hole begins at aligned vcn. */
-			    (!(ni->std_fa & FILE_ATTRIBUTE_COMPRESSED) ||
-			     !(vcn & (NTFS_LZNT_CLUSTERS - 1)))) {
+			    (!frame_clusters ||
+			     !(vcn & (frame_clusters - 1)))) {
 				/* Hole in sparsed or compressed file frame. */
 				break;
 			}
