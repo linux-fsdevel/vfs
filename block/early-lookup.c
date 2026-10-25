@@ -338,6 +338,9 @@ int __init early_lookup_dps_root(dev_t *dev)
 {
 	static const char root_type_uuids[][UUID_STRING_LEN + 1] __initconst = {
 		CONFIG_DPS_ROOT_PARTITION_TYPE_UUID,
+#ifdef CONFIG_DPS_ROOT_PARTITION_TYPE_UUID_SECONDARY
+		CONFIG_DPS_ROOT_PARTITION_TYPE_UUID_SECONDARY,
+#endif
 	};
 	static char esp_partuuid[UUID_STRING_LEN + 1] __initdata;
 	int err;

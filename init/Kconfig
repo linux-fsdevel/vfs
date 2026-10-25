@@ -2363,6 +2363,13 @@ config DPS_ROOT_PARTITION_TYPE_UUID
 	default "4f68bce3-e8cd-4db1-96e7-fbcaf984b709" if X86_64
 	default "44479540-f297-41b2-9af7-d131d5f0458a" if X86
 
+config DPS_ROOT_PARTITION_TYPE_UUID_SECONDARY
+	depends on DPS_ROOT_PARTITION_TYPE_UUID != "" && COMPAT
+	string
+	default "69dad710-2ce4-4e3c-b16c-21a1d49abed3" if ARM64
+	default "60d5a7fe-8e7d-435c-b714-3dd8162144e1" if RISCV
+	default "44479540-f297-41b2-9af7-d131d5f0458a" if X86_64 && IA32_EMULATION
+
 config DPS_ROOT_AUTO_DISCOVERY
 	def_bool DPS_ROOT_PARTITION_TYPE_UUID != ""
 
