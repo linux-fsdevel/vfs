@@ -1743,6 +1743,16 @@ static inline int early_lookup_bdev(const char *pathname, dev_t *dev)
 }
 #endif /* CONFIG_BLOCK */
 
+#ifdef CONFIG_DPS_ROOT_AUTO_DISCOVERY
+int __init early_lookup_dps_root(dev_t *dev);
+#else
+static inline int early_lookup_dps_root(dev_t *dev)
+{
+	*dev = 0;
+	return 0;
+}
+#endif
+
 int bdev_freeze(struct block_device *bdev);
 int bdev_thaw(struct block_device *bdev);
 int bdev_deny_freeze(struct block_device *bdev);
