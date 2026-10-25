@@ -40,6 +40,7 @@ static bool event_compare(struct fsnotify_event *old_fsn,
 		return false;
 	if ((old->mask == new->mask) &&
 	    (old->wd == new->wd) &&
+	    (old->sync_cookie == new->sync_cookie) &&
 	    (old->name_len == new->name_len) &&
 	    (!old->name_len || !strcmp(old->name, new->name)))
 		return true;
