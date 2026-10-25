@@ -213,6 +213,8 @@ next_attr:
 
 		names += 1;
 		fname = Add2Ptr(attr, roff);
+		if (fname_full_size(fname) > rsize)
+			goto out;
 		if (fname->type == FILE_NAME_DOS)
 			goto next_attr;
 
