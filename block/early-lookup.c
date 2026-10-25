@@ -5,10 +5,14 @@
  */
 #include <linux/blkdev.h>
 #include <linux/ctype.h>
+#include <linux/efi.h>
+#include <linux/ucs2_string.h>
+#include <linux/uuid.h>
 
 struct uuidcmp {
 	const char *uuid;
 	int len;
+	struct gendisk *disk;
 };
 
 /**
@@ -45,12 +49,10 @@ static int __init match_dev_by_uuid(struct device *dev, const void *data)
  */
 static int __init devt_from_partuuid(const char *uuid_str, dev_t *devt)
 {
-	struct uuidcmp cmp;
+	struct uuidcmp cmp = { .uuid = uuid_str };
 	struct device *dev = NULL;
 	int offset = 0;
 	char *slash;
-
-	cmp.uuid = uuid_str;
 
 	slash = strchr(uuid_str, '/');
 	/* Check for optional partition number offset attributes. */
@@ -251,6 +253,117 @@ int __init early_lookup_bdev(const char *name, dev_t *devt)
 		return devt_from_devname(name + 5, devt);
 	return devt_from_devnum(name, devt);
 }
+
+#ifdef CONFIG_DPS_ROOT_AUTO_DISCOVERY
+static int __init match_dev_by_type_uuid(struct device *dev, const void *data)
+{
+	struct block_device *bdev = dev_to_bdev(dev);
+	const struct uuidcmp *cmp = data;
+
+	return bdev->bd_disk == cmp->disk && bdev->bd_meta_info &&
+		!(bdev->bd_meta_info->gpt_attr & GPT_ATTR_NO_AUTO_DISCOVERY) &&
+		!strcasecmp(cmp->uuid, bdev->bd_meta_info->type_uuid);
+}
+
+/*
+ * Search the ESP's disk for an eligible partition of the requested type.
+ * Return -EAGAIN until the ESP is available, or -ENODEV if no match exists.
+ */
+static int __init early_lookup_bdev_by_type_uuid(const char *type_uuid,
+						 const char *esp_partuuid,
+						 dev_t *devt)
+{
+	struct uuidcmp esp_cmp = {
+		.uuid = esp_partuuid,
+		.len = UUID_STRING_LEN,
+	};
+	struct uuidcmp type_cmp = {
+		.uuid = type_uuid,
+	};
+	struct device *esp_dev;
+	struct device *type_dev;
+
+	esp_dev = class_find_device(&block_class, NULL, &esp_cmp,
+				    &match_dev_by_uuid);
+	if (!esp_dev)
+		return -EAGAIN;
+
+	type_cmp.disk = dev_to_disk(esp_dev);
+	scoped_guard(mutex, &type_cmp.disk->open_mutex)
+		type_dev = class_find_device(&block_class, NULL, &type_cmp,
+					     &match_dev_by_type_uuid);
+	put_device(esp_dev);
+	if (!type_dev)
+		return -ENODEV;
+
+	*devt = type_dev->devt;
+	pr_info("VFS: Discovered root partition /dev/%pg with GPT type UUID %s\n",
+		dev_to_bdev(type_dev), type_uuid);
+	put_device(type_dev);
+	return 0;
+}
+
+static int __init efi_get_esp_partuuid(char *partuuid, size_t size)
+{
+	static efi_guid_t loader_guid __initdata = LINUX_EFI_LOADER_ENTRY_GUID;
+	efi_char16_t partuuid_ucs2[UUID_STRING_LEN + 1] = {};
+	unsigned long partuuid_ucs2_size = sizeof(partuuid_ucs2);
+	efi_status_t status;
+
+	if (!efi_rt_services_supported(EFI_RT_SUPPORTED_GET_VARIABLE))
+		return -EOPNOTSUPP;
+
+	status = efi.get_variable(L"LoaderDevicePartUUID", &loader_guid, NULL,
+				  &partuuid_ucs2_size, partuuid_ucs2);
+	if (status != EFI_SUCCESS)
+		return efi_status_to_err(status);
+
+	if (ucs2_as_utf8((u8 *)partuuid, partuuid_ucs2, size) != UUID_STRING_LEN ||
+	    !uuid_is_valid(partuuid))
+		return -EINVAL;
+
+	return 0;
+}
+
+/**
+ * early_lookup_dps_root - discover the root device by DPS partition type UUID
+ * @dev: receives the discovered device number
+ *
+ * Return: 0 on success, -EINVAL if the ESP partition UUID cannot be read or
+ * is invalid, -EAGAIN if the EFI partition is not yet available, or -ENODEV
+ * if no matching root exists.
+ * With DPS disabled, return 0 and set @dev to zero.
+ */
+int __init early_lookup_dps_root(dev_t *dev)
+{
+	static const char root_type_uuids[][UUID_STRING_LEN + 1] __initconst = {
+		CONFIG_DPS_ROOT_PARTITION_TYPE_UUID,
+#ifdef CONFIG_DPS_ROOT_PARTITION_TYPE_UUID_SECONDARY
+		CONFIG_DPS_ROOT_PARTITION_TYPE_UUID_SECONDARY,
+#endif
+	};
+	static char esp_partuuid[UUID_STRING_LEN + 1] __initdata;
+	int err;
+
+	if (!esp_partuuid[0]) {
+		err = efi_get_esp_partuuid(esp_partuuid, sizeof(esp_partuuid));
+		if (err) {
+			pr_err("VFS: Unable to get EFI partition UUID: %pe, skipping root partition discovery\n",
+				ERR_PTR(err));
+			return -EINVAL;
+		}
+	}
+
+	for (int i = 0; i < ARRAY_SIZE(root_type_uuids); i++) {
+		err = early_lookup_bdev_by_type_uuid(root_type_uuids[i],
+						     esp_partuuid, dev);
+		if (err != -ENODEV)
+			return err;
+	}
+
+	return -ENODEV;
+}
+#endif /* CONFIG_DPS_ROOT_AUTO_DISCOVERY */
 
 static char __init *bdevt_str(dev_t devt, char *buf)
 {

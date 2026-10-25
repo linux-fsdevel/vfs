@@ -5,6 +5,7 @@
 #ifndef _LINUX_BLKDEV_H
 #define _LINUX_BLKDEV_H
 
+#include <linux/bits.h>
 #include <linux/types.h>
 #include <linux/blk_types.h>
 #include <linux/blk_plug.h>
@@ -65,9 +66,13 @@ extern const struct class block_class;
  */
 #define PARTITION_META_INFO_UUIDLTH	(UUID_STRING_LEN + 1)
 
+#define GPT_ATTR_NO_AUTO_DISCOVERY	BIT_U64(63)
+
 struct partition_meta_info {
 	char uuid[PARTITION_META_INFO_UUIDLTH];
+	char type_uuid[PARTITION_META_INFO_UUIDLTH];
 	u8 volname[PARTITION_META_INFO_VOLNAMELTH];
+	u64 gpt_attr;
 };
 
 /**
@@ -1741,6 +1746,16 @@ static inline int early_lookup_bdev(const char *pathname, dev_t *dev)
 	return -EINVAL;
 }
 #endif /* CONFIG_BLOCK */
+
+#ifdef CONFIG_DPS_ROOT_AUTO_DISCOVERY
+int __init early_lookup_dps_root(dev_t *dev);
+#else
+static inline int early_lookup_dps_root(dev_t *dev)
+{
+	*dev = 0;
+	return 0;
+}
+#endif
 
 int bdev_freeze(struct block_device *bdev);
 int bdev_thaw(struct block_device *bdev);
