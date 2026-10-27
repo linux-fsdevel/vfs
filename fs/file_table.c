@@ -176,8 +176,10 @@ static int __init init_fs_stat_sysctls(void)
 fs_initcall(init_fs_stat_sysctls);
 #endif
 
-static int init_file(struct file *f, int flags, const struct cred *cred)
+static int init_file(struct file *f, int flags, const struct cred *cred,
+		     fmode_t fmode)
 {
+	fmode_t fsnotify_mode = fmode & FMODE_FSNOTIFY_MASK;
 	int error;
 
 	f->f_cred = get_cred(cred);
@@ -200,12 +202,16 @@ static int init_file(struct file *f, int flags, const struct cred *cred)
 	memset(&f->f_ra, 0, sizeof(f->f_ra));
 
 	f->f_flags	= flags;
-	f->f_mode	= OPEN_FMODE(flags);
+	f->f_mode	= OPEN_FMODE(flags) | fmode;
 	/*
 	 * Disable permission and pre-content events for all files by default.
 	 * They may be enabled later by fsnotify_open_perm_and_set_mode().
+	 * A caller passing an fsnotify mode in @fmode overrides the default;
+	 * it has to be applied here, because file_set_fsnotify_mode() clears
+	 * the fsnotify bits that f_mode was just assigned.
 	 */
-	file_set_fsnotify_mode(f, FMODE_NONOTIFY_PERM);
+	file_set_fsnotify_mode(f, fsnotify_mode ? fsnotify_mode :
+						  FMODE_NONOTIFY_PERM);
 
 	f->f_op		= NULL;
 	f->f_mapping	= NULL;
@@ -263,7 +269,7 @@ struct file *alloc_empty_file(int flags, const struct cred *cred)
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
 
-	error = init_file(f, flags, cred);
+	error = init_file(f, flags, cred, 0);
 	if (unlikely(error)) {
 		kmem_cache_free(filp_cache, f);
 		return ERR_PTR(error);
@@ -297,13 +303,11 @@ struct file *alloc_empty_file_noaccount(int flags, const struct cred *cred)
 	if (unlikely(!f))
 		return ERR_PTR(-ENOMEM);
 
-	error = init_file(f, flags, cred);
+	error = init_file(f, flags, cred, FMODE_NOACCOUNT);
 	if (unlikely(error)) {
 		kmem_cache_free(filp_cache, f);
 		return ERR_PTR(error);
 	}
-
-	f->f_mode |= FMODE_NOACCOUNT;
 
 	return f;
 }
@@ -314,6 +318,25 @@ static int init_backing_file(struct backing_file *ff,
 	memset(&ff->user_path, 0, sizeof(ff->user_path));
 	backing_file_set_security(&ff->file, NULL);
 	return security_backing_file_alloc(&ff->file, user_file);
+}
+
+/*
+ * The fsnotify mode a backing file inherits from the user file it is opened
+ * for.
+ *
+ * A user file that must not generate fsnotify events at all (e.g. the fd that
+ * fanotify creates for a permission event with dentry_open_nonotify()) must
+ * not generate them through its backing file either. Otherwise a listener
+ * watching the backing filesystem gets a nested permission event from its own
+ * read(2), which only another reader of the same group can answer.
+ *
+ * Every other mode is not inherited: events on the real file are intentional,
+ * see commit bc2473c90fca ("ovl: enable fsnotify events on underlying real
+ * files").
+ */
+static fmode_t backing_file_fsnotify_mode(const struct file *user_file)
+{
+	return FMODE_FSNOTIFY_NONE(user_file->f_mode) ? FMODE_NONOTIFY : 0;
 }
 
 /*
@@ -333,14 +356,14 @@ struct file *alloc_empty_backing_file(int flags, const struct cred *cred,
 	if (unlikely(!ff))
 		return ERR_PTR(-ENOMEM);
 
-	error = init_file(&ff->file, flags, cred);
+	error = init_file(&ff->file, flags, cred,
+			  backing_file_fsnotify_mode(user_file) |
+			  FMODE_BACKING | FMODE_NOACCOUNT);
 	if (unlikely(error)) {
 		kmem_cache_free(bfilp_cache, ff);
 		return ERR_PTR(error);
 	}
 
-	/* The f_mode flags must be set before fput(). */
-	ff->file.f_mode |= FMODE_BACKING | FMODE_NOACCOUNT;
 	error = init_backing_file(ff, user_file);
 	if (unlikely(error)) {
 		fput(&ff->file);
