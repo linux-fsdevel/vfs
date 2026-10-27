@@ -89,6 +89,13 @@ struct ATTR_STD_INFO5 *ni_std5(struct ntfs_inode *ni)
 {
 	const struct ATTRIB *attr;
 
+	/* Stream inodes have no MFT record of their own (mi.mrec is
+	 * NULL); the standard information attribute lives in the base
+	 * record.
+	 */
+	if (ni->base && ni->base != ni)
+		ni = ni->base;
+
 	attr = mi_find_attr(ni, &ni->mi, NULL, ATTR_STD, NULL, 0, NULL);
 
 	return attr ? resident_data_ex(attr, sizeof(struct ATTR_STD_INFO5)) :
