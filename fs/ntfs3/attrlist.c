@@ -29,7 +29,17 @@ static inline bool al_is_valid_le(const struct ntfs_inode *ni,
 
 void al_destroy(struct ntfs_inode *ni)
 {
-	ni = ni->base;
+	struct ntfs_inode *base = ni->base;
+
+	/* Stream inodes share the base's attribute list; freeing it here
+	 * would race the base's ni_lock-held consumers and leave the base
+	 * with a destroyed list while it is still alive.  Only the owner
+	 * frees.
+	 */
+	if (base != ni)
+		return;
+
+	ni = base;
 	run_close(&ni->attr_list.run);
 	kvfree(ni->attr_list.le);
 	ni->attr_list.le = NULL;
