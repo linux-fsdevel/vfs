@@ -1835,7 +1835,11 @@ __nfs_lookup_revalidate(struct dentry *dentry, unsigned int flags)
 		if (dentry->d_fsdata == NFS_FSDATA_BLOCKED)
 			return -ECHILD;
 	} else {
-		/* Wait for unlink to complete - see unblock_revalidate() */
+		/* Wait for unlink to complete - see unblock_revalidate().
+		 * smp_load_acquire() ensures ->d_fsdata is read after
+		 * ->d_seq was read, matching block_revalidate() which
+		 * sets ->d_fsdata before ->d_seq.
+		 */
 		wait_var_event(&dentry->d_fsdata,
 			       smp_load_acquire(&dentry->d_fsdata)
 			       != NFS_FSDATA_BLOCKED);
@@ -1856,15 +1860,29 @@ static void block_revalidate(struct dentry *dentry)
 	/* old devname - just in case */
 	kfree(dentry->d_fsdata);
 
+	dentry->d_fsdata = NFS_FSDATA_BLOCKED;
+
 	/* Any new reference that could lead to an open
-	 * will take ->d_lock in lookup_open() -> d_lookup().
-	 * Holding this lock ensures we cannot race with
-	 * __nfs_lookup_revalidate() and removes and need
-	 * for further barriers.
+	 * will either:
+	 *  - take ->d_lock in lookup_open() -> d_lookup() or
+	 *  - will check d_seq in legitimize_path() or similar
+	 *    after taking the reference.
+	 *
+	 * Holding this lock and invalidating ->d_seq *after* recording
+	 * NFS_FSDATA_BLOCKED ensures we cannot race with
+	 * __nfs_lookup_revalidate().
+	 * If __nfs_lookup_revalidate() doesn't see NFS_FSDATA_BLOCKED then:
+	 * In the ref-walk case - d_lookup() will have incremented
+	 * d_count() before we check it.
+	 * In the RCU-walk case - ->d_seq must have been sampled before
+	 * we call write_seqcount_invalidate() below (because it was sampled
+	 * before we set NFS_FSDATA_BLOCKED) so d_count() will have been
+	 * incremented or the d_seq check will fail in legitimize_path()
+	 * (or both).
 	 */
 	lockdep_assert_held(&dentry->d_lock);
+	write_seqcount_invalidate(&dentry->d_seq);
 
-	dentry->d_fsdata = NFS_FSDATA_BLOCKED;
 }
 
 static void unblock_revalidate(struct dentry *dentry)
