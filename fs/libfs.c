@@ -34,6 +34,7 @@ int simple_getattr(struct mnt_idmap *idmap, const struct path *path,
 		   unsigned int query_flags)
 {
 	struct inode *inode = d_inode(path->dentry);
+
 	generic_fillattr(&nop_mnt_idmap, request_mask, inode, stat);
 	stat->blocks = inode->i_mapping->nrpages << (PAGE_SHIFT - 9);
 	return 0;
@@ -114,6 +115,7 @@ static struct dentry *scan_positives(struct dentry *cursor,
 	spin_lock(&dentry->d_lock);
 	while (*p) {
 		struct dentry *d = hlist_entry(*p, struct dentry, d_sib);
+
 		p = &d->d_sib.next;
 		// we must at least skip cursors, to avoid livelocks
 		if (d->d_flags & DCACHE_DENTRY_CURSOR)
@@ -145,6 +147,7 @@ static struct dentry *scan_positives(struct dentry *cursor,
 loff_t dcache_dir_lseek(struct file *file, loff_t offset, int whence)
 {
 	struct dentry *dentry = file->f_path.dentry;
+
 	switch (whence) {
 		case 1:
 			offset += file->f_pos;
@@ -599,6 +602,7 @@ static void __simple_recursive_removal(struct dentry *dentry,
 			      bool locked)
 {
 	struct dentry *this = dget(dentry);
+
 	while (true) {
 		struct dentry *victim = NULL, *child;
 		struct inode *inode = this->d_inode;
@@ -1096,6 +1100,7 @@ static DEFINE_SPINLOCK(pin_fs_lock);
 int simple_pin_fs(struct file_system_type *type, struct vfsmount **mount, int *count)
 {
 	struct vfsmount *mnt = NULL;
+
 	spin_lock(&pin_fs_lock);
 	if (unlikely(!*mount)) {
 		spin_unlock(&pin_fs_lock);
@@ -1117,6 +1122,7 @@ EXPORT_SYMBOL(simple_pin_fs);
 void simple_release_fs(struct vfsmount **mount, int *count)
 {
 	struct vfsmount *mnt;
+
 	spin_lock(&pin_fs_lock);
 	mnt = *mount;
 	if (!--*count)
@@ -1365,6 +1371,7 @@ ssize_t simple_attr_read(struct file *file, char __user *buf,
 	} else {
 		/* first read */
 		u64 val;
+
 		ret = attr->get(attr->data, &val);
 		if (ret)
 			goto out;
