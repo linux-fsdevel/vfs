@@ -1690,6 +1690,38 @@ entry will default to 2 instead of 0.
 = =============================================================
 
 
+unprivileged_userns_caps_allowed
+================================
+
+This file contains a hexadecimal bitmask representing the capability bounding
+ceiling enforced on unprivileged user namespace creation. Instead of granting
+full capabilities upon namespace creation, this ceiling can be used to
+configure which capabilities are permitted.
+
+When an unprivileged task (a task lacking ``CAP_SYS_ADMIN`` in its parent user
+namespace) creates a new user namespace, the capability bounding set of the
+new namespace is intersected with the union of this mask and the creator's
+effective capabilities in the parent namespace:
+
+  child_bset = parent_bset & (sysctl_ceiling | creator_effective)
+
+Privileged creators (holding ``CAP_SYS_ADMIN`` in the parent namespace) are
+unaffected by this ceiling and inherit the parent namespace's bounding set
+unmodified.
+
+Upon entering a user namespace during creation or via ``setns(2)``,
+the task's permitted, effective, and bounding capability sets are clamped
+to the namespace's bounding set. Tasks inside the namespace cannot exceed
+this ceiling, even when executing setuid binaries or binaries with file
+capabilities.
+
+Unknown capability bits (above ``CAP_LAST_CAP``) are ignored and masked
+off when writing to this file.
+
+* Default: ``CAP_FULL_SET`` (all capabilities permitted)
+* Privilege required to modify: ``CAP_SETPCAP`` in the initial user namespace.
+
+
 warn_limit
 ==========
 

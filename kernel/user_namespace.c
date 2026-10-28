@@ -3,6 +3,9 @@
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/slab.h>
+#include <linux/capability.h>
+#include <linux/string.h>
+#include <linux/sysctl.h>
 #include <linux/sched/signal.h>
 #include <linux/user_namespace.h>
 #include <linux/proc_ns.h>
@@ -41,17 +44,77 @@ static void dec_user_namespaces(struct ucounts *ucounts)
 	return dec_ucount(ucounts, UCOUNT_USER_NAMESPACES);
 }
 
+static kernel_cap_t sysctl_unpriv_userns_bset = CAP_FULL_SET;
+
+static int unpriv_userns_bset_handler(const struct ctl_table *table,
+				      int write, void *buffer,
+				      size_t *lenp, loff_t *ppos)
+{
+	struct ctl_table tmp_table = *table;
+	char buf[32] = {};
+	unsigned long long val;
+	char *s;
+	int ret;
+
+	if (!*lenp)
+		return 0;
+	if (write && *ppos)
+		return -EINVAL;
+	if (write && !capable(CAP_SETPCAP))
+		return -EPERM;
+
+	if (!write) {
+		kernel_cap_t unpriv_bset = READ_ONCE(sysctl_unpriv_userns_bset);
+
+		snprintf(buf, sizeof(buf), "%016llx", unpriv_bset.val);
+	}
+
+	tmp_table.data = buf;
+	tmp_table.maxlen = sizeof(buf);
+
+	ret = proc_dostring(&tmp_table, write, buffer, lenp, ppos);
+	if (ret || !write)
+		return ret;
+
+	s = strim(buf);
+	ret = kstrtoull(s, 16, &val);
+	if (ret)
+		return ret;
+
+	val &= CAP_VALID_MASK;
+	WRITE_ONCE(sysctl_unpriv_userns_bset, (kernel_cap_t){ .val = val });
+	return 0;
+}
+
+static const struct ctl_table user_namespace_sysctls[] = {
+	{
+		.procname	= "unprivileged_userns_caps_allowed",
+		.mode		= 0644,
+		.proc_handler	= unpriv_userns_bset_handler,
+	},
+};
+
+static int __init init_user_ns_sysctls(void)
+{
+	register_sysctl_init("kernel", user_namespace_sysctls);
+	return 0;
+}
+subsys_initcall(init_user_ns_sysctls);
+
 static void set_cred_user_ns(struct cred *cred, struct user_namespace *user_ns)
 {
-	/* Start with the same capabilities as init but useless for doing
-	 * anything as the capabilities are bound to the new user namespace.
+	/*
+	 * Tasks inside the user namespace start with (and are permanently
+	 * bounded by) the capabilities permitted by the user namespace
+	 * capability ceiling. The capabilities are scoped to the new user
+	 * namespace.
 	 */
 	cred->securebits = SECUREBITS_DEFAULT;
+	cred->cap_bset = user_ns->cap_bset;
+	cred->cap_permitted = user_ns->cap_bset;
+	cred->cap_effective = user_ns->cap_bset;
 	cred->cap_inheritable = CAP_EMPTY_SET;
-	cred->cap_permitted = CAP_FULL_SET;
-	cred->cap_effective = CAP_FULL_SET;
 	cred->cap_ambient = CAP_EMPTY_SET;
-	cred->cap_bset = CAP_FULL_SET;
 #ifdef CONFIG_KEYS
 	key_put(cred->request_key_auth);
 	cred->request_key_auth = NULL;
@@ -86,6 +149,7 @@ int create_user_ns(struct cred *new)
 	kuid_t owner = new->euid;
 	kgid_t group = new->egid;
 	struct ucounts *ucounts;
+	kernel_cap_t cap_bset;
 	int ret, i;
 
 	ret = -ENOSPC;
@@ -119,6 +183,24 @@ int create_user_ns(struct cred *new)
 	if (ret < 0)
 		goto fail_dec;
 
+	/*
+	 * If the caller has CAP_SYS_ADMIN in the parent namespace,
+	 * they are a privileged creator and inherit the parent's
+	 * bounding set directly.
+	 *
+	 * Otherwise, enforce the unprivileged bounding ceiling, but
+	 * allow the child namespace to retain any capabilities the
+	 * creator already holds.
+	 */
+	cap_bset = parent_ns->cap_bset;
+	if (!ns_capable_noaudit(parent_ns, CAP_SYS_ADMIN)) {
+		kernel_cap_t unpriv_bset = READ_ONCE(sysctl_unpriv_userns_bset);
+		kernel_cap_t allowed = cap_combine(unpriv_bset,
+						   new->cap_effective);
+
+		cap_bset = cap_intersect(cap_bset, allowed);
+	}
+
 	ret = -ENOMEM;
 	ns = kmem_cache_zalloc(user_ns_cachep, GFP_KERNEL);
 	if (!ns)
@@ -144,6 +226,7 @@ int create_user_ns(struct cred *new)
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_SIGPENDING, rlimit(RLIMIT_SIGPENDING));
 	set_userns_rlimit_max(ns, UCOUNT_RLIMIT_MEMLOCK, rlimit(RLIMIT_MEMLOCK));
 	ns->ucounts = ucounts;
+	ns->cap_bset = cap_bset;
 
 	/* Inherit USERNS_SETGROUPS_ALLOWED from our parent */
 	mutex_lock(&userns_state_mutex);

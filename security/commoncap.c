@@ -88,11 +88,13 @@ static inline int cap_capable_helper(const struct cred *cred,
 		if (ns->level <= cred_ns->level)
 			return -EPERM;
 
-		/* 
+		/*
 		 * The owner of the user namespace in the parent of the
-		 * user namespace has all caps.
+		 * user namespace has all caps, subject to the bounding
+		 * set of the owned user namespace.
 		 */
-		if ((ns->parent == cred_ns) && uid_eq(ns->owner, cred->euid))
+		if (ns->parent == cred_ns && uid_eq(ns->owner, cred->euid) &&
+		    userns_has_cap(ns, cap))
 			return 0;
 
 		/*
