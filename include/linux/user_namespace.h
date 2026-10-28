@@ -3,6 +3,7 @@
 #define _LINUX_USER_NAMESPACE_H
 
 #include <linux/kref.h>
+#include <linux/capability.h>
 #include <linux/nsproxy.h>
 #include <linux/ns_common.h>
 #include <linux/rculist_nulls.h>
@@ -89,6 +90,11 @@ struct user_namespace {
 	/* parent_could_setfcap: true if the creator if this ns had CAP_SETFCAP
 	 * in its effective capability set at the child ns creation time. */
 	bool			parent_could_setfcap;
+	/*
+	 * Capability bounding set for tasks inside the namespace and for owner
+	 * tasks in the parent namespace.
+	 */
+	kernel_cap_t		cap_bset;
 
 #ifdef CONFIG_KEYS
 	/* List of joinable keyrings in this namespace.  Modification access of
@@ -183,7 +189,12 @@ static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
 	return ns;
 }
 
-extern int create_user_ns(struct cred *new);
+static inline bool userns_has_cap(const struct user_namespace *ns, int cap)
+{
+	return cap_raised(ns->cap_bset, cap);
+}
+
+int create_user_ns(struct cred *new, kernel_cap_t req_bset);
 extern int unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
 extern void __put_user_ns(struct user_namespace *ns);
 
@@ -214,7 +225,12 @@ static inline struct user_namespace *get_user_ns(struct user_namespace *ns)
 	return &init_user_ns;
 }
 
-static inline int create_user_ns(struct cred *new)
+static inline bool userns_has_cap(const struct user_namespace *ns, int cap)
+{
+	return true;
+}
+
+static inline int create_user_ns(struct cred *new, kernel_cap_t req_bset)
 {
 	return -EINVAL;
 }

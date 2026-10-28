@@ -231,6 +231,15 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 		flags |= CLONE_EMPTY_MNTNS;
 	}
 
+	/*
+	 * Convert the 32-bit UNSHARE_NEWNET_LOOPBACK (which aliases
+	 * CLONE_CHILD_CLEARTID) to the unique 64-bit CLONE_NEWNET_LOOPBACK.
+	 */
+	if (flags & UNSHARE_NEWNET_LOOPBACK) {
+		flags &= ~(u64)UNSHARE_NEWNET_LOOPBACK;
+		flags |= CLONE_NEWNET_LOOPBACK;
+	}
+
 	*new_nsp = create_new_namespaces(flags, current, user_ns,
 					 new_fs ? new_fs : current->fs);
 	if (IS_ERR(*new_nsp)) {

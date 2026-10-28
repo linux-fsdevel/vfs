@@ -2168,7 +2168,7 @@ __latent_entropy struct task_struct *copy_process(
 #ifdef CONFIG_PROVE_LOCKING
 	DEBUG_LOCKS_WARN_ON(!p->softirqs_enabled);
 #endif
-	retval = copy_creds(p, clone_flags);
+	retval = copy_creds(p, args);
 	if (retval < 0)
 		goto bad_fork_free;
 
@@ -2729,6 +2729,15 @@ pid_t kernel_clone(struct kernel_clone_args *args)
 	}
 
 	/*
+	 * Set implied CLONE_NEWNET before copy_process() so that
+	 * security_task_alloc() and other clone_flags checks see it.
+	 */
+	if (clone_flags & CLONE_NEWNET_LOOPBACK) {
+		clone_flags |= CLONE_NEWNET;
+		args->flags = clone_flags;
+	}
+
+	/*
 	 * For legacy clone() calls, CLONE_PIDFD uses the parent_tid argument
 	 * to return the pidfd. Hence, CLONE_PIDFD and CLONE_PARENT_SETTID are
 	 * mutually exclusive. With clone3() CLONE_PIDFD has grown a separate
@@ -2923,7 +2932,9 @@ static noinline int copy_clone_args_from_user(struct kernel_clone_args *kargs,
 		     CLONE_ARGS_SIZE_VER1);
 	BUILD_BUG_ON(offsetofend(struct clone_args, cgroup) !=
 		     CLONE_ARGS_SIZE_VER2);
-	BUILD_BUG_ON(sizeof(struct clone_args) != CLONE_ARGS_SIZE_VER2);
+	BUILD_BUG_ON(offsetofend(struct clone_args, cap_bset) !=
+		     CLONE_ARGS_SIZE_VER3);
+	BUILD_BUG_ON(sizeof(struct clone_args) != CLONE_ARGS_SIZE_VER3);
 
 	if (unlikely(usize > PAGE_SIZE))
 		return -E2BIG;
@@ -2953,6 +2964,11 @@ static noinline int copy_clone_args_from_user(struct kernel_clone_args *kargs,
 	    (args.cgroup > INT_MAX || usize < CLONE_ARGS_SIZE_VER2))
 		return -EINVAL;
 
+	if ((args.flags & CLONE_NEWUSER_BSET) && usize < CLONE_ARGS_SIZE_VER3)
+		return -EINVAL;
+	if (!(args.flags & CLONE_NEWUSER_BSET) && args.cap_bset)
+		return -EINVAL;
+
 	*kargs = (struct kernel_clone_args){
 		.flags		= args.flags,
 		.pidfd		= u64_to_user_ptr(args.pidfd),
@@ -2964,6 +2980,7 @@ static noinline int copy_clone_args_from_user(struct kernel_clone_args *kargs,
 		.tls		= args.tls,
 		.set_tid_size	= args.set_tid_size,
 		.cgroup		= args.cgroup,
+		.cap_bset	= args.cap_bset & CAP_VALID_MASK,
 	};
 
 	if (args.set_tid &&
@@ -3010,7 +3027,8 @@ static bool clone3_args_valid(struct kernel_clone_args *kargs)
 	if (kargs->flags &
 	    ~(CLONE_LEGACY_FLAGS | CLONE_CLEAR_SIGHAND |
 	      CLONE_INTO_CGROUP | CLONE_AUTOREAP | CLONE_NNP |
-	      CLONE_PIDFD_AUTOKILL | CLONE_EMPTY_MNTNS))
+	      CLONE_PIDFD_AUTOKILL | CLONE_EMPTY_MNTNS |
+	      CLONE_NEWNET_LOOPBACK | CLONE_NEWUSER_BSET))
 		return false;
 
 	/*
@@ -3026,6 +3044,10 @@ static bool clone3_args_valid(struct kernel_clone_args *kargs)
 
 	if ((kargs->flags & (CLONE_THREAD | CLONE_PARENT)) &&
 	    kargs->exit_signal)
+		return false;
+
+	if ((kargs->flags & CLONE_NEWUSER_BSET) &&
+	    !(kargs->flags & CLONE_NEWUSER))
 		return false;
 
 	if (!clone3_stack_valid(kargs))
@@ -3160,9 +3182,10 @@ void __init proc_caches_init(void)
  */
 static int check_unshare_flags(unsigned long unshare_flags)
 {
-	if (unshare_flags & ~(CLONE_THREAD|CLONE_FS|CLONE_SIGHAND|
-				CLONE_VM|CLONE_FILES|CLONE_SYSVSEM|
-				CLONE_NS_ALL | UNSHARE_EMPTY_MNTNS))
+	if (unshare_flags & ~(CLONE_THREAD | CLONE_FS | CLONE_SIGHAND |
+				CLONE_VM | CLONE_FILES | CLONE_SYSVSEM |
+				CLONE_NS_ALL | UNSHARE_EMPTY_MNTNS |
+				UNSHARE_NEWNET_LOOPBACK))
 		return -EINVAL;
 	/*
 	 * Not implemented, but pretend it works if there is nothing
@@ -3265,6 +3288,9 @@ int ksys_unshare(unsigned long unshare_flags)
 		unshare_flags |= CLONE_NEWNS;
 	if (unshare_flags & CLONE_NEWNS)
 		unshare_flags |= CLONE_FS;
+
+	if (unshare_flags & UNSHARE_NEWNET_LOOPBACK)
+		unshare_flags |= CLONE_NEWNET;
 
 	/* No unsharing with overriden fs state */
 	VFS_WARN_ON_ONCE(unshare_flags & (CLONE_NEWNS | CLONE_FS) &&

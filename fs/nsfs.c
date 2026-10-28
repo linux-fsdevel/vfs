@@ -170,6 +170,17 @@ static int copy_ns_info_to_user(const struct mnt_namespace *mnt_ns,
 	return 0;
 }
 
+static int copy_user_ns_info_to_user(const struct user_namespace *user_ns,
+				     struct user_ns_info __user *uinfo,
+				     size_t usize, struct user_ns_info *kinfo)
+{
+	kinfo->size = min(usize, sizeof(*kinfo));
+	kinfo->spare = 0;
+	kinfo->cap_bset = user_ns->cap_bset.val;
+
+	return copy_struct_to_user(uinfo, usize, kinfo, sizeof(*kinfo), NULL);
+}
+
 static bool nsfs_ioctl_valid(unsigned int cmd)
 {
 	switch (cmd) {
@@ -194,6 +205,8 @@ static bool nsfs_ioctl_valid(unsigned int cmd)
 		return extensible_ioctl_valid(cmd, NS_MNT_GET_NEXT, MNT_NS_INFO_SIZE_VER0);
 	case _IOC_NR(NS_MNT_GET_PREV):
 		return extensible_ioctl_valid(cmd, NS_MNT_GET_PREV, MNT_NS_INFO_SIZE_VER0);
+	case _IOC_NR(NS_USER_GET_INFO):
+		return extensible_ioctl_valid(cmd, NS_USER_GET_INFO, USER_NS_INFO_SIZE_VER0);
 	}
 
 	return false;
@@ -359,6 +372,22 @@ static long ns_ioctl(struct file *filp, unsigned int ioctl,
 			return ret;
 		ret = fd_publish(fdf);
 		break;
+	}
+	case _IOC_NR(NS_USER_GET_INFO): {
+		struct user_ns_info __user *uinfo = (struct user_ns_info __user *)arg;
+		struct user_ns_info kinfo = {};
+		size_t usize = _IOC_SIZE(ioctl);
+
+		if (ns->ns_type != CLONE_NEWUSER)
+			return -EINVAL;
+
+		if (!uinfo)
+			return -EINVAL;
+
+		if (usize < USER_NS_INFO_SIZE_VER0)
+			return -EINVAL;
+
+		return copy_user_ns_info_to_user(to_user_ns(ns), uinfo, usize, &kinfo);
 	}
 	default:
 		ret = -ENOTTY;

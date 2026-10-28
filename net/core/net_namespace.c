@@ -596,6 +596,17 @@ dec_ucounts:
 		dec_net_namespaces(ucounts);
 		return ERR_PTR(rv);
 	}
+
+	if (flags & CLONE_NEWNET_LOOPBACK) {
+		rtnl_net_lock(net);
+		rv = dev_open(net->loopback_dev, NULL);
+		rtnl_net_unlock(net);
+		if (rv < 0) {
+			put_net(net);
+			return ERR_PTR(rv);
+		}
+	}
+
 	return net;
 }
 
