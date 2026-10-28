@@ -260,8 +260,9 @@ struct cred *prepare_exec_creds(void)
  * The new process gets the current process's subjective credentials as its
  * objective and subjective credentials
  */
-int copy_creds(struct task_struct *p, u64 clone_flags)
+int copy_creds(struct task_struct *p, const struct kernel_clone_args *kargs)
 {
+	u64 clone_flags = kargs->flags;
 	struct cred *new;
 	int ret;
 
@@ -288,7 +289,12 @@ int copy_creds(struct task_struct *p, u64 clone_flags)
 		return -ENOMEM;
 
 	if (clone_flags & CLONE_NEWUSER) {
-		ret = create_user_ns(new);
+		kernel_cap_t cap_bset = CAP_FULL_SET;
+
+		if (clone_flags & CLONE_NEWUSER_BSET)
+			cap_bset = (kernel_cap_t){ .val = kargs->cap_bset };
+
+		ret = create_user_ns(new, cap_bset);
 		if (ret < 0)
 			goto error_put;
 		ret = set_cred_ucounts(new);

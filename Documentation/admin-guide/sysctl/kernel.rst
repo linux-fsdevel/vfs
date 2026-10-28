@@ -1709,6 +1709,11 @@ Privileged creators (holding ``CAP_SYS_ADMIN`` in the parent namespace) are
 unaffected by this ceiling and inherit the parent namespace's bounding set
 unmodified.
 
+Regardless of privilege level, a creator using ``clone3(2)`` with the
+``CLONE_NEWUSER_BSET`` flag can further restrict the new namespace's
+bounding set by specifying a ``cap_bset`` mask in ``struct clone_args``,
+which is intersected with the resulting bounding set.
+
 Upon entering a user namespace during creation or via ``setns(2)``,
 the task's permitted, effective, and bounding capability sets are clamped
 to the namespace's bounding set. Tasks inside the namespace cannot exceed

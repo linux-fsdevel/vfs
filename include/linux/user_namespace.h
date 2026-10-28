@@ -194,7 +194,7 @@ static inline bool userns_has_cap(const struct user_namespace *ns, int cap)
 	return cap_raised(ns->cap_bset, cap);
 }
 
-extern int create_user_ns(struct cred *new);
+int create_user_ns(struct cred *new, kernel_cap_t req_bset);
 extern int unshare_userns(unsigned long unshare_flags, struct cred **new_cred);
 extern void __put_user_ns(struct user_namespace *ns);
 
@@ -230,7 +230,7 @@ static inline bool userns_has_cap(const struct user_namespace *ns, int cap)
 	return true;
 }
 
-static inline int create_user_ns(struct cred *new)
+static inline int create_user_ns(struct cred *new, kernel_cap_t req_bset)
 {
 	return -EINVAL;
 }

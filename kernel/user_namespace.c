@@ -143,7 +143,7 @@ static unsigned long enforced_nproc_rlimit(void)
  * This is called by copy_creds(), which will finish setting the target task's
  * credentials.
  */
-int create_user_ns(struct cred *new)
+int create_user_ns(struct cred *new, kernel_cap_t req_bset)
 {
 	struct user_namespace *ns, *parent_ns = new->user_ns;
 	kuid_t owner = new->euid;
@@ -184,15 +184,18 @@ int create_user_ns(struct cred *new)
 		goto fail_dec;
 
 	/*
+	 * Intersect the parent's bounding set with any voluntary
+	 * restrictions requested via clone3().
+	 *
 	 * If the caller has CAP_SYS_ADMIN in the parent namespace,
-	 * they are a privileged creator and inherit the parent's
+	 * they are a privileged creator and inherit this resulting
 	 * bounding set directly.
 	 *
 	 * Otherwise, enforce the unprivileged bounding ceiling, but
 	 * allow the child namespace to retain any capabilities the
 	 * creator already holds.
 	 */
-	cap_bset = parent_ns->cap_bset;
+	cap_bset = cap_intersect(parent_ns->cap_bset, req_bset);
 	if (!ns_capable_noaudit(parent_ns, CAP_SYS_ADMIN)) {
 		kernel_cap_t unpriv_bset = READ_ONCE(sysctl_unpriv_userns_bset);
 		kernel_cap_t allowed = cap_combine(unpriv_bset,
@@ -267,7 +270,7 @@ int unshare_userns(unsigned long unshare_flags, struct cred **new_cred)
 
 	cred = prepare_creds();
 	if (cred) {
-		err = create_user_ns(cred);
+		err = create_user_ns(cred, CAP_FULL_SET);
 		if (err)
 			put_cred(cred);
 		else
