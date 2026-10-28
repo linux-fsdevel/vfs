@@ -44,6 +44,23 @@ struct mnt_ns_info {
 #define NS_GET_MNTNS_ID		_IOR(NSIO, 5,  __u64)
 #define NS_GET_ID		_IOR(NSIO, 13, __u64)
 
+/**
+ * struct user_ns_info - information about a user namespace
+ * @size: size of this structure
+ * @spare: reserved for future use
+ * @cap_bset: capability bounding set of the user namespace
+ */
+struct user_ns_info {
+	__u32 size;
+	__u32 spare;
+	__u64 cap_bset;
+};
+
+#define USER_NS_INFO_SIZE_VER0 16 /* sizeof first published struct */
+
+/* Get information about user namespace. */
+#define NS_USER_GET_INFO	_IOR(NSIO, 14, struct user_ns_info)
+
 enum init_ns_ino {
 	IPC_NS_INIT_INO		= 0xEFFFFFFFU,
 	UTS_NS_INIT_INO		= 0xEFFFFFFEU,
