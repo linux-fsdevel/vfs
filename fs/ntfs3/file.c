@@ -134,17 +134,21 @@ int ntfs_fileattr_set(struct mnt_idmap *idmap, struct dentry *dentry,
 {
 	struct inode *inode = d_inode(dentry);
 	struct ntfs_inode *ni = ntfs_i(inode);
+	struct file_kattr old_fa = {};
 	u32 flags = fa->flags;
 	unsigned int new_fl = 0;
+	int err;
 
-	/* Avoid any operation if inode is bad. */
-	if (unlikely(is_bad_ni(ni)))
-		return -EINVAL;
+	err = ntfs_fileattr_get(dentry, &old_fa);
+	if (err)
+		return err;
 
 	if (fileattr_has_fsx(fa))
 		return -EOPNOTSUPP;
 
-	if (flags & ~(FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL))
+	/* Accept unchanged read-only flags. */
+	if (flags & ~(FS_IMMUTABLE_FL | FS_APPEND_FL | FS_NODUMP_FL |
+		      old_fa.flags))
 		return -EOPNOTSUPP;
 
 	if (flags & FS_IMMUTABLE_FL)
