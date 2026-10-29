@@ -997,6 +997,14 @@ static int vfat_rename(struct inode *old_dir, struct dentry *old_dentry,
 	vfat_update_dir_metadata(old_dir, &ts);
 
 	if (new_inode) {
+		if (is_dir && old_dir == new_dir) {
+			if (old_dir->i_nlink >= 3)
+				drop_nlink(old_dir);
+			else
+				fat_fs_error(old_dir->i_sb,
+					     "parent dir link count too low (%u)",
+					     old_dir->i_nlink);
+		}
 		drop_nlink(new_inode);
 		if (is_dir)
 			drop_nlink(new_inode);
