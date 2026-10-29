@@ -5057,16 +5057,14 @@ int ext4_get_inode_loc(struct inode *inode, struct ext4_iloc *iloc)
 }
 
 /*
- * ext4_get_inode_loc_noio() is a best-effort variant of ext4_get_inode_loc().
- * It looks up the inode table block in the buffer cache and returns -EAGAIN if
- * the block is not present or not uptodate, without starting any I/O.
+ * Find the inode table block that holds @inode without looking at the block
+ * itself. Fills in iloc->block_group and iloc->offset.
  */
-int ext4_get_inode_loc_noio(struct inode *inode, struct ext4_iloc *iloc)
+static int ext4_inode_loc_block(struct inode *inode, struct ext4_iloc *iloc,
+				ext4_fsblk_t *block)
 {
 	struct super_block *sb = inode->i_sb;
 	struct ext4_group_desc *gdp;
-	struct buffer_head *bh;
-	ext4_fsblk_t block;
 	int inodes_per_block, inode_offset;
 	unsigned long ino = inode->i_ino;
 
@@ -5085,15 +5083,33 @@ int ext4_get_inode_loc_noio(struct inode *inode, struct ext4_iloc *iloc)
 	inode_offset = ((ino - 1) % EXT4_INODES_PER_GROUP(sb));
 	iloc->offset = (inode_offset % inodes_per_block) * EXT4_INODE_SIZE(sb);
 
-	block = ext4_inode_table(sb, gdp);
-	if (block <= le32_to_cpu(EXT4_SB(sb)->s_es->s_first_data_block) ||
-	    block >= ext4_blocks_count(EXT4_SB(sb)->s_es)) {
+	*block = ext4_inode_table(sb, gdp);
+	if (*block <= le32_to_cpu(EXT4_SB(sb)->s_es->s_first_data_block) ||
+	    *block >= ext4_blocks_count(EXT4_SB(sb)->s_es)) {
 		ext4_error(sb,
 			   "Invalid inode table block %llu in block_group %u",
-			   block, iloc->block_group);
+			   *block, iloc->block_group);
 		return -EFSCORRUPTED;
 	}
-	block += inode_offset / inodes_per_block;
+	*block += inode_offset / inodes_per_block;
+	return 0;
+}
+
+/*
+ * ext4_get_inode_loc_noio() is a best-effort variant of ext4_get_inode_loc().
+ * It looks up the inode table block in the buffer cache and returns -EAGAIN if
+ * the block is not present or not uptodate, without starting any I/O.
+ */
+int ext4_get_inode_loc_noio(struct inode *inode, struct ext4_iloc *iloc)
+{
+	struct super_block *sb = inode->i_sb;
+	struct buffer_head *bh;
+	ext4_fsblk_t block;
+	int err;
+
+	err = ext4_inode_loc_block(inode, iloc, &block);
+	if (err)
+		return err;
 
 	bh = sb_find_get_block(sb, block);
 	if (!bh)
@@ -5908,28 +5924,32 @@ int ext4_sync_inode_metadata(struct inode *inode, struct writeback_control *wbc)
 {
 	struct ext4_iloc iloc;
 	struct mapping_metadata_bhs *mmb;
+	ext4_fsblk_t block;
 	int err;
 
 	/* We should only get here in nojournal mode */
 	if (WARN_ON_ONCE(EXT4_SB(inode->i_sb)->s_journal))
 		return -EFSCORRUPTED;
 
-	err = __ext4_get_inode_loc_noinmem(inode, &iloc);
+	err = ext4_inode_loc_block(inode, &iloc, &block);
 	if (err)
 		return err;
 	mmb = READ_ONCE(EXT4_I(inode)->i_metadata_bhs);
 	if (mmb) {
 		err = mmb_sync(mmb);
 		if (err)
-			goto out;
+			return err;
 	}
+	/* A block that isn't cached is neither dirty nor under writeback. */
+	iloc.bh = sb_find_get_block_nonatomic(inode->i_sb, block);
+	if (!iloc.bh)
+		return 0;
 	sync_dirty_buffer(iloc.bh);
 	if (buffer_write_io_error(iloc.bh)) {
 		ext4_error_inode_block(inode, iloc.bh->b_blocknr, EIO,
 				       "IO error syncing inode");
 		err = -EIO;
 	}
-out:
 	brelse(iloc.bh);
 	return err;
 }
