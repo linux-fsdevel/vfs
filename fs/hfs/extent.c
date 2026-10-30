@@ -485,23 +485,9 @@ void hfs_file_truncate(struct inode *inode)
 	hfs_dbg("ino %llu, phys_size %llu -> i_size %llu\n",
 		inode->i_ino, (long long)HFS_I(inode)->phys_size,
 		inode->i_size);
-	if (inode->i_size > HFS_I(inode)->phys_size) {
-		struct address_space *mapping = inode->i_mapping;
-		void *fsdata = NULL;
-		struct folio *folio;
-
-		/* XXX: Can use generic_cont_expand? */
-		size = inode->i_size - 1;
-		res = hfs_write_begin(NULL, mapping, size + 1, 0, &folio,
-				&fsdata);
-		if (!res) {
-			res = generic_write_end(NULL, mapping, size + 1, 0, 0,
-					folio, fsdata);
-		}
-		if (res)
-			inode->i_size = HFS_I(inode)->phys_size;
+	if (WARN_ON_ONCE(inode->i_size > HFS_I(inode)->phys_size))
 		return;
-	} else if (inode->i_size == HFS_I(inode)->phys_size)
+	if (inode->i_size == HFS_I(inode)->phys_size)
 		return;
 	size = inode->i_size + HFS_SB(sb)->alloc_blksz - 1;
 	blk_cnt = size / HFS_SB(sb)->alloc_blksz;
