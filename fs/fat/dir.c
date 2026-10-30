@@ -1318,6 +1318,32 @@ error:
 	return err;
 }
 
+/*
+ * The free slots chosen by fat_add_entries() include the end-of-directory
+ * marker.  Once the new entries are written over it, the slots up to the
+ * next marker become visible, so make sure that none of them is allocated.
+ */
+static int fat_check_after_eod(struct inode *dir, loff_t pos)
+{
+	struct buffer_head *bh = NULL;
+	struct msdos_dir_entry *de = NULL;
+	int err = 0;
+
+	while (fat_get_entry(dir, &pos, &bh, &de) > -1) {
+		if (de->name[0] == 0)
+			break;
+		if (!IS_FREE(de->name)) {
+			fat_fs_error_ratelimit(dir->i_sb,
+				"allocated dir entry found after end-of-directory marker (i_pos %lld)",
+				MSDOS_I(dir)->i_pos);
+			err = -EIO;
+			break;
+		}
+	}
+	brelse(bh);
+	return err;
+}
+
 int fat_add_entries(struct inode *dir, void *slots, int nr_slots,
 		    struct fat_slot_info *sinfo)
 {
@@ -1351,8 +1377,14 @@ int fat_add_entries(struct inode *dir, void *slots, int nr_slots,
 				nr_bhs++;
 			}
 			free_slots++;
-			if (free_slots == nr_slots)
+			if (free_slots == nr_slots) {
+				if (saw_eod) {
+					err = fat_check_after_eod(dir, pos);
+					if (err)
+						goto error;
+				}
 				goto found;
+			}
 		} else {
 			if (saw_eod) {
 				fat_fs_error_ratelimit(sb,
