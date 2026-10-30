@@ -169,6 +169,15 @@ static ssize_t hfsplus_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 		end_page = end_off >> PAGE_SHIFT;
 
 		invalidate_inode_pages2_range(mapping, start_page, end_page);
+	} else if (iov_iter_rw(iter) == WRITE &&
+		   end > HFSPLUS_I(inode)->phys_size) {
+		/*
+		 * blockdev_direct_IO() does not go through ->write_begin(),
+		 * so it neither zeroes the file from phys_size up to the
+		 * write nor keeps phys_size in step with i_size. Return 0,
+		 * so that the write falls back to a buffered write.
+		 */
+		return 0;
 	}
 
 	ret = blockdev_direct_IO(iocb, inode, iter, hfsplus_get_block);
