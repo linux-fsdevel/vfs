@@ -167,6 +167,11 @@ static int fuse_notify_store(struct fuse_conn *fc, unsigned int size,
 		err = -EINVAL;
 		goto out_iput;
 	}
+	/* DAX mappings do not hold page cache folios */
+	if (IS_DAX(inode)) {
+		err = -EINVAL;
+		goto out_iput;
+	}
 
 	mapping = inode->i_mapping;
 	file_size = i_size_read(inode);
