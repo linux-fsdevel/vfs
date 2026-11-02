@@ -1010,12 +1010,18 @@ out:
 	return err;
 
 error_dotdot:
-	/* data cluster is shared, serious corruption */
+	/*
+	 * Complete the remaining rollback. Report corruption only if a
+	 * recovery step cannot be completed.
+	 */
 	corrupt = 1;
 
-	if (dotdot_de) {
+	/* A failed sync write clears BH_Uptodate, leave that buffer alone. */
+	if (dotdot_de && buffer_uptodate(dotdot_bh)) {
 		corrupt |= vfat_update_dotdot_de(old_dir, old_inode, dotdot_bh,
 						 dotdot_de);
+	} else if (dotdot_de) {
+		corrupt = err;
 	}
 error_inode:
 	fat_detach(old_inode);
@@ -1023,10 +1029,27 @@ error_inode:
 	if (new_inode) {
 		fat_attach(new_inode, new_i_pos);
 		if (corrupt) {
-			mark_inode_dirty(new_inode);
-			corrupt |= sync_inode_metadata(new_inode, 1);
+			struct buffer_head *target_bh;
+			sector_t blocknr;
+			int offset;
+
+			/*
+			 * A replaced entry has no slot info. Use its saved
+			 * position for a cache-only lookup so recovery does
+			 * not reread a failed block.
+			 */
+			fat_get_blknr_offset(MSDOS_SB(sb), new_i_pos,
+					     &blocknr, &offset);
+			target_bh = sb_find_get_block_nonatomic(sb, blocknr);
+			if (target_bh && buffer_uptodate(target_bh)) {
+				mark_inode_dirty(new_inode);
+				corrupt |= sync_inode_metadata(new_inode, 1);
+			} else {
+				corrupt = err;
+			}
+			brelse(target_bh);
 		}
-	} else {
+	} else if (buffer_uptodate(sinfo.bh)) {
 		/*
 		 * If new entry was not sharing the data cluster, it
 		 * shouldn't be serious corruption.
@@ -1035,6 +1058,8 @@ error_inode:
 		if (corrupt)
 			corrupt |= err2;
 		sinfo.bh = NULL;
+	} else {
+		corrupt = err;
 	}
 	if (corrupt < 0) {
 		fat_fs_error(new_dir->i_sb,
@@ -1106,13 +1131,13 @@ static int vfat_rename_exchange(struct inode *old_dir, struct dentry *old_dentry
 		err = vfat_update_dotdot_de(new_dir, old_inode, old_dotdot_bh,
 					    old_dotdot_de);
 		if (err)
-			goto error_old_dotdot;
+			goto error_dotdot;
 	}
 	if (new_dotdot_de) {
 		err = vfat_update_dotdot_de(old_dir, new_inode, new_dotdot_bh,
 					    new_dotdot_de);
 		if (err)
-			goto error_new_dotdot;
+			goto error_dotdot;
 	}
 
 	/* if cross directory and only one is a directory, adjust nlink */
@@ -1135,14 +1160,9 @@ out:
 
 	return err;
 
-error_new_dotdot:
-	if (new_dotdot_de) {
-		corrupt |= vfat_update_dotdot_de(new_dir, new_inode,
-						 new_dotdot_bh, new_dotdot_de);
-	}
-
-error_old_dotdot:
-	if (old_dotdot_de) {
+error_dotdot:
+	corrupt = err;
+	if (old_dotdot_de && buffer_uptodate(old_dotdot_bh)) {
 		corrupt |= vfat_update_dotdot_de(old_dir, old_inode,
 						 old_dotdot_bh, old_dotdot_de);
 	}
