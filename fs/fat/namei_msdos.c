@@ -562,14 +562,20 @@ out:
 	return err;
 
 error_dotdot:
-	/* data cluster is shared, serious corruption */
+	/*
+	 * Complete the remaining rollback. Report corruption only if a
+	 * recovery step cannot be completed.
+	 */
 	corrupt = 1;
 
-	if (update_dotdot) {
+	/* A failed sync write clears BH_Uptodate, leave that buffer alone. */
+	if (update_dotdot && buffer_uptodate(dotdot_bh)) {
 		fat_set_start(dotdot_de, MSDOS_I(old_dir)->i_logstart);
 		mmb_mark_buffer_dirty(dotdot_bh,
 				      &MSDOS_I(old_inode)->i_metadata_bhs);
 		corrupt |= sync_dirty_buffer(dotdot_bh);
+	} else if (update_dotdot) {
+		corrupt = err;
 	}
 error_inode:
 	fat_detach(old_inode);
@@ -577,11 +583,13 @@ error_inode:
 	MSDOS_I(old_inode)->i_attrs = old_attrs;
 	if (new_inode) {
 		fat_attach(new_inode, new_i_pos);
-		if (corrupt) {
+		if (corrupt && buffer_uptodate(sinfo.bh)) {
 			mark_inode_dirty(new_inode);
 			corrupt |= sync_inode_metadata(new_inode, 1);
+		} else if (corrupt) {
+			corrupt = err;
 		}
-	} else {
+	} else if (buffer_uptodate(sinfo.bh)) {
 		/*
 		 * If new entry was not sharing the data cluster, it
 		 * shouldn't be serious corruption.
@@ -590,6 +598,8 @@ error_inode:
 		if (corrupt)
 			corrupt |= err2;
 		sinfo.bh = NULL;
+	} else {
+		corrupt = err;
 	}
 	if (corrupt < 0) {
 		fat_fs_error(new_dir->i_sb,
