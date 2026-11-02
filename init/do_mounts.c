@@ -406,10 +406,24 @@ static int __init lookup_root_device(const char *root_device_name, dev_t *dev)
 {
 	int err;
 
-	err = early_lookup_bdev(root_device_name, dev);
+	if (root_device_name[0]) {
+		err = early_lookup_bdev(root_device_name, dev);
+		if (err == -EINVAL && root_wait) {
+			pr_err("VFS: root= is invalid; disabling rootwait.\n");
+			root_wait = 0;
+		}
+		return err;
+	}
+
+	err = early_lookup_dps_root(dev);
 	if (err == -EINVAL && root_wait) {
-		pr_err("VFS: root= is invalid; disabling rootwait.\n");
+		pr_err("VFS: Root discovery is unavailable; disabling rootwait.\n");
 		root_wait = 0;
+	} else if (err == -ENODEV) {
+		pr_err("VFS: No discoverable root partition found; aborting.\n");
+		root_wait = 0;
+		*dev = 0;
+		return 0;
 	}
 	return err;
 }
@@ -422,7 +436,10 @@ static void __init wait_for_root(char *root_device_name)
 	if (ROOT_DEV != 0)
 		return;
 
-	pr_info("Waiting for root device %s...\n", root_device_name);
+	if (root_device_name[0])
+		pr_info("Waiting for root device %s...\n", root_device_name);
+	else if (IS_ENABLED(CONFIG_DPS_ROOT_AUTO_DISCOVERY))
+		pr_info("Waiting for discoverable root partition...\n");
 
 	end = ktime_add_ms(ktime_get_raw(), root_wait);
 
@@ -480,7 +497,7 @@ void __init prepare_namespace(void)
 
 	md_run_setup();
 
-	if (saved_root_name[0])
+	if (saved_root_name[0] || !ROOT_DEV)
 		ROOT_DEV = parse_root_device(saved_root_name);
 
 	initrd_load();
