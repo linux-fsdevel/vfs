@@ -5,6 +5,7 @@
 #ifndef _LINUX_BLKDEV_H
 #define _LINUX_BLKDEV_H
 
+#include <linux/bits.h>
 #include <linux/types.h>
 #include <linux/blk_types.h>
 #include <linux/blk_plug.h>
@@ -65,10 +66,13 @@ extern const struct class block_class;
  */
 #define PARTITION_META_INFO_UUIDLTH	(UUID_STRING_LEN + 1)
 
+#define GPT_ATTR_NO_AUTO_DISCOVERY	BIT_U64(63)
+
 struct partition_meta_info {
 	char uuid[PARTITION_META_INFO_UUIDLTH];
 	char type_uuid[PARTITION_META_INFO_UUIDLTH];
 	u8 volname[PARTITION_META_INFO_VOLNAMELTH];
+	u64 gpt_attr;
 };
 
 /**
