@@ -74,11 +74,11 @@ static int create_files(struct kernfs_node *parent, struct kobject *kobj,
 					continue;
 			}
 
-			WARN(mode & ~(SYSFS_PREALLOC | 0664),
+			WARN(mode & ~(SYSFS_PREALLOC | SYSFS_LOOKUP | 0664),
 			     "Attribute %s: Invalid permissions 0%o\n",
 			     (*attr)->name, mode);
 
-			mode &= SYSFS_PREALLOC | 0664;
+			mode &= SYSFS_PREALLOC | SYSFS_LOOKUP | 0664;
 			error = sysfs_add_file_mode_ns(parent, *attr, mode, uid,
 						       gid, NULL);
 			if (unlikely(error))
@@ -106,6 +106,14 @@ static int create_files(struct kernfs_node *parent, struct kobject *kobj,
 			}
 			if (grp->bin_size)
 				size = grp->bin_size(kobj, *bin_attr, i);
+
+			/* Do not let the mode mask below discard SYSFS_LOOKUP. */
+			if (WARN(mode & SYSFS_LOOKUP,
+				 "Attribute %s: SYSFS_LOOKUP is not supported for binary attributes\n",
+				 (*bin_attr)->attr.name)) {
+				error = -EINVAL;
+				break;
+			}
 
 			WARN(mode & ~(SYSFS_PREALLOC | 0664),
 			     "Attribute %s: Invalid permissions 0%o\n",

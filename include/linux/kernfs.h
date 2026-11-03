@@ -272,6 +272,7 @@ struct kernfs_open_file {
 	char			*prealloc_buf;
 
 	size_t			atomic_write_len;
+	bool			no_splice;
 	bool			mmapped:1;
 	bool			released:1;
 	const struct vm_operations_struct *vm_ops;
@@ -320,6 +321,15 @@ struct kernfs_ops {
 	 * ->prealloc.  Provide ->read and ->write with ->prealloc.
 	 */
 	bool prealloc;
+	/*
+	 * "may_lookup" marks a ->write() which may look up arbitrary
+	 * paths and so wait for userspace, e.g. for an autofs daemon.
+	 * Writable opens refuse splice and get their own lockdep
+	 * classes.  File creation rejects ->mmap or ->prealloc together
+	 * with this flag because either would leave of->mutex or the lock
+	 * around it in a shared class.
+	 */
+	bool may_lookup;
 	ssize_t (*write)(struct kernfs_open_file *of, char *buf, size_t bytes,
 			 loff_t off);
 

@@ -252,6 +252,17 @@ static const struct kernfs_ops sysfs_prealloc_kfops_rw = {
 	.prealloc	= true,
 };
 
+static const struct kernfs_ops sysfs_lookup_kfops_wo = {
+	.write		= sysfs_kf_write,
+	.may_lookup	= true,
+};
+
+static const struct kernfs_ops sysfs_lookup_kfops_rw = {
+	.seq_show	= sysfs_kf_seq_show,
+	.write		= sysfs_kf_write,
+	.may_lookup	= true,
+};
+
 static const struct kernfs_ops sysfs_bin_kfops_ro = {
 	.read		= sysfs_kf_bin_read,
 };
@@ -288,6 +299,11 @@ int sysfs_add_file_mode_ns(struct kernfs_node *parent,
 			"missing sysfs attribute operations for kobject: %s\n",
 			kobject_name(kobj)))
 		return -EINVAL;
+	/* the prealloc ops would silently drop ->may_lookup */
+	if (WARN((mode & SYSFS_PREALLOC) && (mode & SYSFS_LOOKUP),
+		 "Attribute %s: SYSFS_LOOKUP cannot be combined with SYSFS_PREALLOC\n",
+		 attr->name))
+		return -EINVAL;
 
 	if (mode & SYSFS_PREALLOC) {
 		if (sysfs_ops->show && sysfs_ops->store)
@@ -296,6 +312,13 @@ int sysfs_add_file_mode_ns(struct kernfs_node *parent,
 			ops = &sysfs_prealloc_kfops_ro;
 		else if (sysfs_ops->store)
 			ops = &sysfs_prealloc_kfops_wo;
+	} else if (mode & SYSFS_LOOKUP) {
+		if (sysfs_ops->show && sysfs_ops->store)
+			ops = &sysfs_lookup_kfops_rw;
+		else if (sysfs_ops->show)
+			ops = &sysfs_file_kfops_ro;
+		else if (sysfs_ops->store)
+			ops = &sysfs_lookup_kfops_wo;
 	} else {
 		if (sysfs_ops->show && sysfs_ops->store)
 			ops = &sysfs_file_kfops_rw;
@@ -331,6 +354,12 @@ int sysfs_add_bin_file_mode_ns(struct kernfs_node *parent,
 	struct lock_class_key *key = NULL;
 	const struct kernfs_ops *ops;
 	struct kernfs_node *kn;
+
+	/* there are no binary ops with ->may_lookup */
+	if (WARN(mode & SYSFS_LOOKUP,
+		 "Attribute %s: SYSFS_LOOKUP is not supported for binary attributes\n",
+		 attr->name))
+		return -EINVAL;
 
 	if (battr->mmap)
 		ops = &sysfs_bin_kfops_mmap;
