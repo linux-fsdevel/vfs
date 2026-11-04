@@ -235,6 +235,14 @@ struct page *__alloc_frozen_pages_noprof(gfp_t gfp, unsigned int order, int nid,
 	alloc_hooks(__alloc_frozen_pages_noprof(__VA_ARGS__))
 void free_frozen_pages(struct page *page, unsigned int order);
 void free_unref_folios(struct folio_batch *fbatch);
+void rcu_free_sync(void);
+
+/* Whether @zone has pages waiting for a grace period */
+static inline bool zone_rcu_free_waiting(struct zone *zone)
+{
+	return IS_ENABLED(CONFIG_PAGE_RCU_FREE) &&
+	       zone_page_state_snapshot(zone, NR_FREE_RCU_PAGES);
+}
 
 #ifdef CONFIG_NUMA
 struct page *alloc_frozen_pages_noprof(gfp_t, unsigned int order);
