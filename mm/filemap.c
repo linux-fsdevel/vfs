@@ -3078,8 +3078,13 @@ ssize_t filemap_read(struct kiocb *iocb, struct iov_iter *iter,
 	if (fast_read) {
 		already_read += fast_read;
 		last_pos = iocb->ki_pos;
-		if (!iov_iter_count(iter))
-			goto out;
+		if (!iov_iter_count(iter)) {
+			file_accessed(filp);
+			/* Readahead of a random file ignores it: skip the shared store */
+			if (!(filp->f_mode & FMODE_RANDOM))
+				ra->prev_pos = last_pos;
+			return already_read;
+		}
 	}
 
 	do {
@@ -3161,7 +3166,6 @@ put_folios:
 		}
 	} while (iov_iter_count(iter) && iocb->ki_pos < isize && !error);
 
-out:
 	file_accessed(filp);
 	ra->prev_pos = last_pos;
 	return already_read ? already_read : error;
