@@ -715,8 +715,15 @@ static int ovl_make_workdir(struct super_block *sb, struct ovl_fs *ofs,
 		goto out;
 
 	rename_whiteout = err;
-	if (!rename_whiteout)
+	if (!rename_whiteout) {
 		pr_warn("upper fs does not support RENAME_WHITEOUT.\n");
+		if (ofs->config.fsync_mode == OVL_FSYNC_AUTO)
+			pr_warn("...falling back to fsync=on.\n");
+	}
+
+	if (ofs->config.fsync_mode == OVL_FSYNC_AUTO)
+		ofs->config.fsync_mode = rename_whiteout ? OVL_FSYNC_RELAXED :
+							   OVL_FSYNC_ON;
 
 	/*
 	 * Check if upper/work fs supports (trusted|user).overlay.* xattr
@@ -770,9 +777,9 @@ static int ovl_make_workdir(struct super_block *sb, struct ovl_fs *ofs,
 
 	/*
 	 * For volatile mount, create a incompat/volatile/dirty file to keep
-	 * track of it.
+	 * track of it.  fsync=off allows mounting the overlay again.
 	 */
-	if (ovl_is_volatile(&ofs->config)) {
+	if (ofs->config.fsync_mode == OVL_FSYNC_VOLATILE) {
 		err = ovl_create_volatile_dirty(ofs);
 		if (err < 0) {
 			pr_err("Failed to create volatile/dirty file.\n");
