@@ -2772,8 +2772,10 @@ static void filemap_mark_hot(struct folio *folio)
 	if (!IS_ENABLED(CONFIG_PAGE_RCU_FREE))
 		return;
 	if (folio_test_rcu_free(folio) || !folio_test_uptodate(folio) ||
-	    folio_test_readahead(folio) || folio_test_dropbehind(folio) ||
-	    folio_test_unevictable(folio))
+	    folio_test_dropbehind(folio) || folio_test_unevictable(folio))
+		return;
+	/* shmem does no readahead: there the bit is PG_reclaim */
+	if (folio_test_readahead(folio) && !folio_test_swapbacked(folio))
 		return;
 	if (folio_test_set_rcu_free(folio))
 		return;
@@ -2796,8 +2798,7 @@ static void filemap_mark_hot(struct folio *folio)
  * LRU records, or when this open file goes back to data that it has just
  * read.
  */
-static void filemap_read_accessed(struct folio *folio, loff_t pos,
-				  loff_t last_pos)
+void filemap_read_accessed(struct folio *folio, loff_t pos, loff_t last_pos)
 {
 	bool hot;
 
