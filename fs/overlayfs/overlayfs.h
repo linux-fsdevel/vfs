@@ -7,6 +7,7 @@
 #include <linux/kernel.h>
 #include <linux/uuid.h>
 #include <linux/fs.h>
+#include <linux/backing-dev.h>
 #include <linux/fsverity.h>
 #include <linux/namei.h>
 #include <linux/posix_acl.h>
@@ -677,6 +678,23 @@ static inline bool ovl_should_sync_upper_fs(struct ovl_fs *ofs)
 {
 	return ofs->config.fsync_mode == OVL_FSYNC_ON ||
 	       ofs->config.fsync_mode == OVL_FSYNC_STRICT;
+}
+
+/*
+ * Does this overlay track the upper inodes that are modified through it, so
+ * that syncfs() and unmount only have to sync those?
+ *
+ * Only with fsync=relaxed.  In the other modes the overlay never syncs, or it
+ * syncs the entire upper filesystem.  fsync=auto does not count until it has
+ * been resolved.  sync_filesystem() does not write any inodes of a filesystem
+ * that has no writeback, like tmpfs, and nothing ever clears their dirty flags.
+ */
+static inline bool ovl_tracks_dirty(struct ovl_fs *ofs)
+{
+	if (!ovl_upper_mnt(ofs) || ofs->config.fsync_mode != OVL_FSYNC_RELAXED)
+		return false;
+
+	return ovl_upper_mnt(ofs)->mnt_sb->s_bdi != &noop_backing_dev_info;
 }
 
 /*
