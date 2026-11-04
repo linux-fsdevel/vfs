@@ -1457,7 +1457,7 @@ static void rcu_free_defer(struct folio *folio)
  * callers want to allocate the pages next.  A concurrent drain holds the
  * lock until it has freed what it took.
  */
-static void rcu_free_drain(void)
+void rcu_free_drain(void)
 {
 	static DEFINE_MUTEX(lock);
 	LIST_HEAD(list);
