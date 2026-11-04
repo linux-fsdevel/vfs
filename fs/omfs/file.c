@@ -317,6 +317,10 @@ static int omfs_write_begin(const struct kiocb *iocb,
 {
 	int ret;
 
+	/* Initializing a gap between EOF and the write is not supported. */
+	if (pos > i_size_read(mapping->host))
+		return -EOPNOTSUPP;
+
 	ret = block_write_begin(mapping, pos, len, foliop, omfs_get_block);
 	if (unlikely(ret))
 		omfs_write_failed(mapping, pos + len);
