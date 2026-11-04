@@ -700,15 +700,13 @@ static int affs_write_end_ofs(const struct kiocb *iocb,
 	u32 bidx, boff, bsize;
 	unsigned from, to;
 	u32 tmp;
-	int written;
+	int written = 0;
+
+	if (!copied)
+		goto err_first_bh;
 
 	from = pos & (PAGE_SIZE - 1);
-	to = from + len;
-	/*
-	 * XXX: not sure if this can handle short copies (len < copied), but
-	 * we don't have to, because the folio should always be uptodate here,
-	 * due to write_begin.
-	 */
+	to = from + copied;
 
 	pr_debug("%s(%llu, %llu, %llu)\n", __func__, inode->i_ino, pos,
 		 pos + len);
@@ -716,7 +714,6 @@ static int affs_write_end_ofs(const struct kiocb *iocb,
 	data = folio_address(folio);
 
 	bh = NULL;
-	written = 0;
 	tmp = (folio->index << PAGE_SHIFT) + from;
 	bidx = tmp / bsize;
 	boff = tmp % bsize;
