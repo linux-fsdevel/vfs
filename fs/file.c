@@ -1188,10 +1188,12 @@ static inline struct fd __fget_light(unsigned int fd, fmode_t mask)
 	 * entry combined with the new refcount - otherwise we could
 	 * return a file that is concurrently being freed.
 	 *
-	 * atomic_read_acquire() pairs with atomic_dec_and_test() in
-	 * put_files_struct().
+	 * The acquire on the single-owner path pairs with
+	 * atomic_dec_and_test() in put_files_struct(). The shared-table
+	 * path obtains its own file reference under RCU.
 	 */
-	if (likely(atomic_read_acquire(&files->count) == 1)) {
+	if (likely(atomic_read(&files->count) == 1)) {
+		smp_acquire__after_ctrl_dep();
 		file = files_lookup_fd_raw(files, fd);
 		if (!file || unlikely(file->f_mode & mask))
 			return EMPTY_FD;
