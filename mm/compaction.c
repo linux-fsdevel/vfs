@@ -2760,6 +2760,14 @@ check_drain:
 				block_start_pfn(cc->migrate_pfn, cc->order);
 
 			if (last_migrated_pfn < current_block_start) {
+				/*
+				 * Folios migrated away from lockless readers
+				 * are freed after a grace period.  Async
+				 * compaction does not wait for it.
+				 */
+				if (cc->mode != MIGRATE_ASYNC &&
+				    zone_rcu_free_waiting(cc->zone))
+					rcu_free_drain();
 				lru_add_drain_cpu_zone(cc->zone);
 				/* No more flushing until we migrate again */
 				last_migrated_pfn = 0;
