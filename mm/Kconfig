@@ -733,6 +733,9 @@ config PAGE_RCU_FREE
 	  32-bit.  Not on PREEMPT_RT, where expedited grace periods are
 	  normal ones, so freeing the waiting pages on demand would stall.
 
+	  Writing 0 to lockless_page_cache_read in debugfs turns these
+	  reads off.
+
 config PHYS_ADDR_T_64BIT
 	def_bool 64BIT
 
