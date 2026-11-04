@@ -353,6 +353,9 @@ static int omfs_setattr(struct mnt_idmap *idmap,
 		error = inode_newsize_ok(inode, attr->ia_size);
 		if (error)
 			return error;
+		/* Only truncation to zero is implemented. */
+		if (attr->ia_size)
+			return -EOPNOTSUPP;
 		truncate_setsize(inode, attr->ia_size);
 		omfs_truncate(inode);
 	}
