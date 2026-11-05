@@ -5703,8 +5703,14 @@ static int grab_requested_root(struct mnt_namespace *ns, struct path *root)
 		if (child != first && child->mnt_parent == first)
 			break;
 	}
+	/*
+	 * Nothing mounted on the root of the namespace: an empty mount
+	 * namespace (CLONE_EMPTY_MNTNS) or an anonymous namespace from
+	 * fsmount()/open_tree(OPEN_TREE_CLONE).  Use the namespace root
+	 * itself as the anchor then; there is no child covering it.
+	 */
 	if (!child)
-		return -ENOENT;
+		child = first;
 
 	root->mnt = mntget(&child->mnt);
 	root->dentry = dget(root->mnt->mnt_root);
