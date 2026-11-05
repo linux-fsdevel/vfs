@@ -10,7 +10,9 @@
 #include <linux/hex.h>
 #include <linux/init.h>
 #include <linux/init_syscalls.h>
+#include <linux/initramfs.h>
 #include <linux/kstrtox.h>
+#include <linux/limits.h>
 #include <linux/memblock.h>
 #include <linux/mm.h>
 #include <linux/namei.h>
@@ -22,6 +24,7 @@
 #include <linux/types.h>
 #include <linux/umh.h>
 #include <linux/utime.h>
+#include <linux/xattr.h>
 
 #include <asm/byteorder.h>
 
@@ -30,6 +33,17 @@
 
 static __initdata bool csum_present;
 static __initdata u32 io_csum;
+
+static void __init update_csum(const unsigned char *buf, size_t len)
+{
+	size_t i;
+
+	if (!csum_present)
+		return;
+
+	for (i = 0; i < len; i++)
+		io_csum += buf[i];
+}
 
 static ssize_t __init xwrite(struct file *file, const unsigned char *p,
 		size_t count, loff_t *pos)
@@ -47,12 +61,7 @@ static ssize_t __init xwrite(struct file *file, const unsigned char *p,
 		} else if (rv == 0)
 			break;
 
-		if (csum_present) {
-			ssize_t i;
-
-			for (i = 0; i < rv; i++)
-				io_csum += p[i];
-		}
+		update_csum(p, rv);
 
 		p += rv;
 		out += rv;
@@ -188,7 +197,7 @@ static __initdata time64_t mtime;
 
 static __initdata unsigned long ino, major, minor, nlink;
 static __initdata umode_t mode;
-static __initdata unsigned long body_len, name_len;
+static __initdata unsigned long body_len, name_len, metadata_len;
 static __initdata uid_t uid;
 static __initdata gid_t gid;
 static __initdata unsigned rdev;
@@ -229,6 +238,7 @@ static __initdata enum state {
 	SkipIt,
 	GotName,
 	CopyFile,
+	CollectMetadata,
 	GotSymlink,
 	Reset
 } state, next_state;
@@ -262,7 +272,8 @@ static void __init read_into(char *buf, unsigned size, enum state next)
 	}
 }
 
-static __initdata char *header_buf, *symlink_buf, *name_buf;
+static __initdata char *header_buf, *symlink_buf, *name_buf, *previous_name_buf;
+static __initdata char *metadata_buf;
 
 static int __init do_start(void)
 {
@@ -303,10 +314,10 @@ static int __init do_header(void)
 	next_header = (next_header + 3) & ~3;
 	state = SkipIt;
 	if (name_len <= 0 || name_len > PATH_MAX)
-		return 0;
+		goto skip;
 	if (S_ISLNK(mode)) {
 		if (body_len > PATH_MAX)
-			return 0;
+			goto skip;
 		collect = collected = symlink_buf;
 		remains = N_ALIGN(name_len) + body_len;
 		next_state = GotSymlink;
@@ -315,6 +326,11 @@ static int __init do_header(void)
 	}
 	if (S_ISREG(mode) || !body_len)
 		read_into(name_buf, N_ALIGN(name_len), GotName);
+	else
+		goto skip;
+	return 0;
+skip:
+	previous_name_buf[0] = '\0';
 	return 0;
 }
 
@@ -364,11 +380,110 @@ static int __init maybe_link(void)
 	return 0;
 }
 
+static int __init do_setxattrs(char *pathname, char *buf, size_t size)
+{
+	struct path path;
+	char *xattr_name, *xattr_value;
+	u32 xattr_name_size, xattr_value_size;
+	int ret;
+
+	xattr_name = buf;
+	xattr_name_size = strnlen(xattr_name, size);
+	if (xattr_name_size == size) {
+		error("malformed xattrs");
+		return -EINVAL;
+	}
+
+	if (!xattr_name_size || xattr_name_size > XATTR_NAME_MAX) {
+		error("invalid xattr name length");
+		return -EINVAL;
+	}
+
+	xattr_value = xattr_name + xattr_name_size + 1;
+	xattr_value_size = buf + size - xattr_value;
+	if (xattr_value_size > XATTR_SIZE_MAX) {
+		error("xattr value exceeds size limit");
+		return -EINVAL;
+	}
+
+	ret = kern_path(pathname, 0, &path);
+	if (!ret) {
+		/*
+		 * POSIX ACL restoration is currently unsupported.
+		 * vfs_setxattr() rejects POSIX ACL xattrs with -EOPNOTSUPP.
+		 */
+		ret = vfs_setxattr(&nop_mnt_idmap, path.dentry, xattr_name, xattr_value,
+				   xattr_value_size, 0);
+
+		path_put(&path);
+	}
+
+	pr_debug("%s: %s size: %u (ret: %d)\n", pathname, xattr_name,
+		 xattr_value_size, ret);
+	print_hex_dump_debug("xattr value: ", DUMP_PREFIX_OFFSET,
+			     16, 1, xattr_value, xattr_value_size, false);
+
+	return ret;
+}
+
+static int __init __maybe_unused do_parse_metadata(char *pathname)
+{
+	char *buf = metadata_buf;
+	char *bufend = metadata_buf + metadata_len;
+	struct metadata_hdr *hdr;
+	char str[sizeof(hdr->c_size) + 1];
+	u32 entry_size;
+
+	if (!metadata_len)
+		return 0;
+
+	str[sizeof(hdr->c_size)] = 0;
+
+	while (buf < bufend) {
+		int ret;
+
+		if (bufend - buf < sizeof(*hdr)) {
+			error("malformed metadata");
+			break;
+		}
+
+		hdr = (struct metadata_hdr *)buf;
+		if (hdr->c_version != 1) {
+			pr_debug("Unsupported header version\n");
+			break;
+		}
+
+		memcpy(str, hdr->c_size, sizeof(hdr->c_size));
+		ret = kstrtou32(str, 16, &entry_size);
+		if (ret || entry_size < sizeof(*hdr) ||
+		    entry_size > bufend - buf) {
+			error("malformed xattrs");
+			break;
+		}
+
+		switch (hdr->c_type) {
+		case TYPE_XATTR:
+			do_setxattrs(pathname, buf + sizeof(*hdr),
+				     entry_size - sizeof(*hdr));
+			break;
+		default:
+			pr_debug("Unsupported metadata type\n");
+			break;
+		}
+
+		buf += entry_size;
+	}
+
+	return 0;
+}
+
 static __initdata struct file *wfile;
 static __initdata loff_t wfile_pos;
 
 static int __init do_name(void)
 {
+	bool target_ready = false;
+
 	state = SkipIt;
 	next_state = Reset;
 
@@ -380,6 +495,19 @@ static int __init do_name(void)
 		return 1;
 	}
 
+	if (S_ISREG(mode) && strcmp(collected, METADATA_FILENAME) == 0) {
+		metadata_len = body_len;
+		if (metadata_len)
+			metadata_buf = kmalloc(metadata_len, GFP_KERNEL);
+		else
+			metadata_buf = NULL;
+		io_csum = 0;
+		state = CollectMetadata;
+		return 0;
+	}
+
+	/* Clear metadata target only after checking entry is not metadata */
+	previous_name_buf[0] = '\0';
 	if (strcmp(collected, "TRAILER!!!") == 0) {
 		free_hash();
 		return 0;
@@ -402,22 +530,63 @@ static int __init do_name(void)
 			if (body_len)
 				vfs_truncate(&wfile->f_path, body_len);
 			state = CopyFile;
+			target_ready = true;
 		}
 	} else if (S_ISDIR(mode)) {
-		init_mkdir(collected, mode);
+		int ret = init_mkdir(collected, mode);
+
+		target_ready = !ret || ret == -EEXIST;
 		init_chown(collected, uid, gid, 0);
 		init_chmod(collected, mode);
 		dir_add(collected, name_len, mtime);
 	} else if (S_ISBLK(mode) || S_ISCHR(mode) ||
 		   S_ISFIFO(mode) || S_ISSOCK(mode)) {
-		if (maybe_link() == 0) {
-			init_mknod(collected, mode, rdev);
+		int ml = maybe_link();
+
+		if (ml == 0) {
+			int ret = init_mknod(collected, mode, rdev);
+
+			target_ready = !ret || ret == -EEXIST;
 			init_chown(collected, uid, gid, 0);
 			init_chmod(collected, mode);
 			do_utime(collected, mtime);
+		} else if (ml == 1) {
+			target_ready = true;
 		}
 	}
+	if (target_ready)
+		memcpy(previous_name_buf, collected, strlen(collected) + 1);
 	return 0;
+}
+
+static void __init do_process_metadata(const char *buf, size_t len)
+{
+	/* Still checksum the body if allocation failed. */
+	update_csum((const unsigned char *)buf, len);
+	if (metadata_buf)
+		memcpy(metadata_buf + (metadata_len - body_len), buf, len);
+}
+
+static int __init do_collect_metadata(void)
+{
+	if (byte_count >= body_len) {
+		do_process_metadata(victim, body_len);
+		if (csum_present && io_csum != hdr_csum)
+			error("bad data checksum");
+		else if (metadata_buf && previous_name_buf[0])
+			do_parse_metadata(previous_name_buf);
+		kfree(metadata_buf);
+		metadata_buf = NULL;
+		metadata_len = 0;
+		eat(body_len);
+		state = SkipIt;
+		return 0;
+	}
+
+	do_process_metadata(victim, byte_count);
+	body_len -= byte_count;
+	eat(byte_count);
+	return 1;
 }
 
 static int __init do_copy(void)
@@ -444,6 +613,7 @@ static int __init do_copy(void)
 
 static int __init do_symlink(void)
 {
+	previous_name_buf[0] = '\0';
 	if (collected[name_len - 1] != '\0') {
 		pr_err("initramfs symlink without nulterm: %.*s\n",
 		       (int)name_len, collected);
@@ -452,7 +622,8 @@ static int __init do_symlink(void)
 	}
 	collected[N_ALIGN(name_len) + body_len] = '\0';
 	clean_path(collected, 0);
-	init_symlink(collected + N_ALIGN(name_len), collected);
+	if (!init_symlink(collected + N_ALIGN(name_len), collected))
+		memcpy(previous_name_buf, collected, strlen(collected) + 1);
 	init_chown(collected, uid, gid, AT_SYMLINK_NOFOLLOW);
 	do_utime(collected, mtime);
 	state = SkipIt;
@@ -467,6 +638,7 @@ static __initdata int (*actions[])(void) = {
 	[SkipIt]	= do_skip,
 	[GotName]	= do_name,
 	[CopyFile]	= do_copy,
+	[CollectMetadata] = do_collect_metadata,
 	[GotSymlink]	= do_symlink,
 	[Reset]		= do_reset,
 };
@@ -526,6 +698,7 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 		char header[CPIO_HDRLEN];
 		char symlink[PATH_MAX + N_ALIGN(PATH_MAX) + 1];
 		char name[N_ALIGN(PATH_MAX)];
+		char prev_name[PATH_MAX + N_ALIGN(PATH_MAX) + 1];
 	} *bufs = kmalloc_obj(*bufs);
 
 	if (!bufs)
@@ -534,6 +707,8 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 	header_buf = bufs->header;
 	symlink_buf = bufs->symlink;
 	name_buf = bufs->name;
+	previous_name_buf = bufs->prev_name;
+	previous_name_buf[0] = '\0';
 
 	state = Start;
 	this_header = 0;
@@ -576,6 +751,9 @@ char * __init unpack_to_rootfs(char *buf, unsigned long len)
 	dir_utime();
 	/* free any hardlink state collected without optional TRAILER!!! */
 	free_hash();
+	kfree(metadata_buf);
+	metadata_buf = NULL;
+	metadata_len = 0;
 	kfree(bufs);
 	return message;
 }
