@@ -1495,7 +1495,21 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 	struct eventpoll *ep = epi->ep;
 	__poll_t pollflags = key_to_poll(key);
 	unsigned long flags;
+	__poll_t events;
 	int ewake = 0;
+
+	/*
+	 * epi->event.events is updated under ep->mtx, not ep->lock, so an
+	 * event nobody asked for can be dropped without taking ep->lock.
+	 */
+	events = READ_ONCE(epi->event.events);
+	if (pollflags && !(pollflags & (events | POLLFREE))) {
+		/* Pairs with smp_mb() in ep_modify(). */
+		smp_mb();
+		events = READ_ONCE(epi->event.events);
+		if (!(pollflags & events))
+			return !(events & EPOLLEXCLUSIVE);
+	}
 
 	spin_lock_irqsave(&ep->lock, flags);
 
