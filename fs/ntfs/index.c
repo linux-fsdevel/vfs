@@ -97,11 +97,24 @@ static s64 ntfs_ib_pos_to_vcn(struct ntfs_index_context *icx, s64 pos)
 	return pos >> icx->vcn_size_bits;
 }
 
+/* Open the index allocation inode if no earlier step of the operation did. */
+static int ntfs_icx_ia_ensure(struct ntfs_index_context *icx)
+{
+	if (icx->ia_ni)
+		return 0;
+	icx->ia_ni = ntfs_ia_open(icx, icx->idx_ni);
+	return icx->ia_ni ? 0 : -EIO;
+}
+
 static int ntfs_ib_write(struct ntfs_index_context *icx, struct index_block *ib)
 {
 	s64 ret, vcn = le64_to_cpu(ib->index_block_vcn);
 
 	ntfs_debug("vcn: %lld\n", vcn);
+
+	ret = ntfs_icx_ia_ensure(icx);
+	if (ret)
+		return ret;
 
 	ret = pre_write_mst_fixup((struct ntfs_record *)ib, icx->block_size);
 	if (ret)
@@ -749,6 +762,10 @@ static int ntfs_ib_read(struct ntfs_index_context *icx, s64 vcn, struct index_bl
 	s64 pos, ret;
 
 	ntfs_debug("vcn: %lld\n", vcn);
+
+	ret = ntfs_icx_ia_ensure(icx);
+	if (ret)
+		return ret;
 
 	pos = ntfs_ib_vcn_to_pos(icx, vcn);
 
