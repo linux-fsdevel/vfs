@@ -25,7 +25,7 @@
 #include "xfs_iomap.h"
 #include "xfs_reflink.h"
 #include "xfs_file.h"
-#include "xfs_aops.h"
+#include "xfs_ioend.h"
 #include "xfs_zone_alloc.h"
 #include "xfs_error.h"
 #include "xfs_errortag.h"
@@ -37,6 +37,7 @@
 #include <linux/fadvise.h>
 #include <linux/mount.h>
 #include <linux/filelock.h>
+#include <linux/bio-integrity.h>
 
 static const struct vm_operations_struct xfs_file_vm_ops;
 
@@ -117,8 +118,7 @@ xfs_fsync_flush_log(
 	if (!seq)
 		return 0;
 
-	return xfs_log_force_seq(ip->i_mount, seq, XFS_LOG_SYNC,
-					  log_flushed);
+	return xfs_log_force_seq(ip->i_mount, seq, XFS_LOG_SYNC, log_flushed);
 }
 
 STATIC int
@@ -129,9 +129,8 @@ xfs_file_fsync(
 	int			datasync)
 {
 	struct xfs_inode	*ip = XFS_I(file->f_mapping->host);
-	struct xfs_mount	*mp = ip->i_mount;
-	int			error, err2;
 	int			log_flushed = 0;
+	int			error;
 
 	trace_xfs_file_fsync(ip);
 
@@ -139,30 +138,22 @@ xfs_file_fsync(
 	if (error)
 		return error;
 
-	if (xfs_is_shutdown(mp))
+	if (xfs_is_shutdown(ip->i_mount))
 		return -EIO;
 
 	xfs_iflags_clear(ip, XFS_ITRUNCATED);
 
 	/*
-	 * If we have an RT and/or log subvolume we need to make sure to flush
-	 * the write cache the device used for file data first.  This is to
-	 * ensure newly written file data make it to disk before logging the new
-	 * inode size in case of an extending write.
-	 */
-	if (XFS_IS_REALTIME_INODE(ip) && mp->m_rtdev_targp != mp->m_ddev_targp)
-		error = blkdev_issue_flush(mp->m_rtdev_targp->bt_bdev);
-	else if (mp->m_logdev_targp != mp->m_ddev_targp)
-		error = blkdev_issue_flush(mp->m_ddev_targp->bt_bdev);
-
-	/*
-	 * If the inode has a inode log item attached, it may need the journal
-	 * flushed to persist any changes the log item might be tracking.
+	 * If the inode has a log item attached, we must force the log up to the
+	 * last LSN in which the inode was modified to ensure all metadata is
+	 * persisted.  The log force will flush the caches for all devices
+	 * before writing the log records unless it is a no-op because there are
+	 * no modifications to this inode that need to be pushed out.
 	 */
 	if (ip->i_itemp) {
-		err2 = xfs_fsync_flush_log(ip, datasync, &log_flushed);
-		if (err2 && !error)
-			error = err2;
+		error = xfs_fsync_flush_log(ip, datasync, &log_flushed);
+		if (error)
+			return error;
 	}
 
 	/*
@@ -171,21 +162,11 @@ xfs_file_fsync(
 	 * when no metadata needed to be committed.
 	 *
 	 * Use the inode's actual file data target rather than assuming the
-	 * main data device. Realtime inodes with a separate realtime device
-	 * are flushed before the log force, so this fallback only applies
-	 * when the file data target is the same as the log target.
+	 * main data device.
 	 */
-	if (!log_flushed) {
-		struct xfs_buftarg *file_targp = xfs_inode_buftarg(ip);
-
-		if (mp->m_logdev_targp == file_targp) {
-			err2 = blkdev_issue_flush(file_targp->bt_bdev);
-			if (err2 && !error)
-				error = err2;
-		}
-	}
-
-	return error;
+	if (!log_flushed)
+		return blkdev_issue_flush(xfs_inode_buftarg(ip)->bt_bdev);
+	return 0;
 }
 
 static int
@@ -241,9 +222,8 @@ xfs_dio_read_bounce_submit_io(
 	struct bio		*bio,
 	loff_t			file_offset)
 {
-	iomap_init_ioend(iter->inode, bio, file_offset, IOMAP_IOEND_DIRECT);
-	bio->bi_end_io = xfs_end_bio;
-	submit_bio(bio);
+	xfs_ioend_submit_read(iter->inode, bio, file_offset,
+			iomap_ioend_flags(&iter->iomap) | IOMAP_IOEND_DIRECT);
 }
 
 static const struct iomap_dio_ops xfs_dio_read_bounce_ops = {
@@ -270,13 +250,12 @@ xfs_file_dio_read(
 	if (ret)
 		return ret;
 	if (mapping_stable_writes(iocb->ki_filp->f_mapping)) {
-		ret = iomap_dio_rw(iocb, to, &xfs_read_iomap_ops,
-				&xfs_dio_read_bounce_ops, IOMAP_DIO_BOUNCE,
-				NULL, 0);
+		ret = iomap_dio_rw(iocb, to, xfs_read_iomap_next,
+				&xfs_dio_read_bounce_ops, 0, NULL, 0);
 	} else {
 		ret = iomap_dio_read_simple(iocb, to, xfs_read_iomap_begin);
 		if (ret == -ENOTBLK)
-			ret = iomap_dio_rw(iocb, to, &xfs_read_iomap_ops, NULL,
+			ret = iomap_dio_rw(iocb, to, xfs_read_iomap_next, NULL,
 					0, NULL, 0);
 	}
 	xfs_iunlock(ip, XFS_IOLOCK_SHARED);
@@ -300,7 +279,7 @@ xfs_file_dax_read(
 	ret = xfs_ilock_iocb(iocb, XFS_IOLOCK_SHARED);
 	if (ret)
 		return ret;
-	ret = dax_iomap_rw(iocb, to, &xfs_read_iomap_ops);
+	ret = dax_iomap_rw(iocb, to, xfs_read_iomap_next);
 	xfs_iunlock(ip, XFS_IOLOCK_SHARED);
 
 	file_accessed(iocb->ki_filp);
@@ -732,7 +711,7 @@ xfs_dio_zoned_submit_io(
 
 	bio->bi_end_io = xfs_end_bio;
 	ioend = iomap_init_ioend(iter->inode, bio, file_offset,
-			IOMAP_IOEND_DIRECT);
+			iomap_ioend_flags(&iter->iomap) | IOMAP_IOEND_DIRECT);
 	xfs_zone_alloc_and_submit(ioend, &ac->open_zone);
 }
 
@@ -750,7 +729,7 @@ xfs_file_dio_write_aligned(
 	struct xfs_inode	*ip,
 	struct kiocb		*iocb,
 	struct iov_iter		*from,
-	const struct iomap_ops	*ops,
+	iomap_iter_next_fn	next,
 	const struct iomap_dio_ops *dops,
 	struct xfs_zone_alloc_ctx *ac)
 {
@@ -785,7 +764,7 @@ xfs_file_dio_write_aligned(
 	if (mapping_stable_writes(iocb->ki_filp->f_mapping))
 		dio_flags |= IOMAP_DIO_BOUNCE;
 	trace_xfs_file_direct_write(iocb, from);
-	ret = iomap_dio_rw(iocb, from, ops, dops, dio_flags, ac, 0);
+	ret = iomap_dio_rw(iocb, from, next, dops, dio_flags, ac, 0);
 out_unlock:
 	xfs_iunlock(ip, iolock);
 	return ret;
@@ -807,7 +786,7 @@ xfs_file_dio_write_zoned(
 	if (ret < 0)
 		return ret;
 	ret = xfs_file_dio_write_aligned(ip, iocb, from,
-			&xfs_zoned_direct_write_iomap_ops,
+			xfs_zoned_direct_write_iomap_next,
 			&xfs_dio_zoned_write_ops, &ac);
 	xfs_zoned_space_unreserve(ip->i_mount, &ac);
 	return ret;
@@ -832,16 +811,16 @@ xfs_file_dio_write_atomic(
 	unsigned int		iolock = XFS_IOLOCK_SHARED;
 	ssize_t			ret, ocount = iov_iter_count(from);
 	unsigned int		dio_flags = 0;
-	const struct iomap_ops	*dops;
+	iomap_iter_next_fn	next;
 
 	/*
 	 * HW offload should be faster, so try that first if it is already
 	 * known that the write length is not too large.
 	 */
 	if (ocount > xfs_inode_buftarg(ip)->bt_awu_max)
-		dops = &xfs_atomic_write_cow_iomap_ops;
+		next = xfs_atomic_write_cow_iomap_next;
 	else
-		dops = &xfs_direct_write_iomap_ops;
+		next = xfs_direct_write_iomap_next;
 
 retry:
 	ret = xfs_ilock_iocb_for_write(iocb, &iolock);
@@ -861,18 +840,19 @@ retry:
 	trace_xfs_file_direct_write(iocb, from);
 	if (mapping_stable_writes(iocb->ki_filp->f_mapping))
 		dio_flags |= IOMAP_DIO_BOUNCE;
-	ret = iomap_dio_rw(iocb, from, dops, &xfs_dio_write_ops, dio_flags,
+	ret = iomap_dio_rw(iocb, from, next, &xfs_dio_write_ops, dio_flags,
 			NULL, 0);
 
 	/*
-	 * The retry mechanism is based on the ->iomap_next method returning
-	 * -ENOPROTOOPT, which would be when the REQ_ATOMIC-based write is not
-	 * possible. The REQ_ATOMIC-based method is typically not possible if
-	 * the write spans multiple extents or the disk blocks are misaligned.
+	 * The retry mechanism is based on the iomap_iter_next_fn callback
+	 * returning -ENOPROTOOPT, which would be when the REQ_ATOMIC-based
+	 * write is not possible. The REQ_ATOMIC-based method is typically not
+	 * possible if the write spans multiple extents or the disk blocks are
+	 * misaligned.
 	 */
-	if (ret == -ENOPROTOOPT && dops == &xfs_direct_write_iomap_ops) {
+	if (ret == -ENOPROTOOPT && next == xfs_direct_write_iomap_next) {
 		xfs_iunlock(ip, iolock);
-		dops = &xfs_atomic_write_cow_iomap_ops;
+		next = xfs_atomic_write_cow_iomap_next;
 		goto retry;
 	}
 
@@ -955,7 +935,7 @@ retry_exclusive:
 		flags |= IOMAP_DIO_BOUNCE;
 
 	trace_xfs_file_direct_write(iocb, from);
-	ret = iomap_dio_rw(iocb, from, &xfs_direct_write_iomap_ops,
+	ret = iomap_dio_rw(iocb, from, xfs_direct_write_iomap_next,
 			   &xfs_dio_write_ops, flags, NULL, 0);
 
 	/*
@@ -995,7 +975,7 @@ xfs_file_dio_write(
 	if (iocb->ki_flags & IOCB_ATOMIC)
 		return xfs_file_dio_write_atomic(ip, iocb, from);
 	return xfs_file_dio_write_aligned(ip, iocb, from,
-			&xfs_direct_write_iomap_ops, &xfs_dio_write_ops, NULL);
+			xfs_direct_write_iomap_next, &xfs_dio_write_ops, NULL);
 }
 
 static noinline ssize_t
@@ -1019,7 +999,7 @@ xfs_file_dax_write(
 	pos = iocb->ki_pos;
 
 	trace_xfs_file_dax_write(iocb, from);
-	ret = dax_iomap_rw(iocb, from, &xfs_dax_write_iomap_ops);
+	ret = dax_iomap_rw(iocb, from, xfs_dax_write_iomap_next);
 	if (ret > 0 && iocb->ki_pos > i_size_read(inode)) {
 		i_size_write(inode, iocb->ki_pos);
 		error = xfs_setfilesize(ip, pos, ret);
@@ -1062,7 +1042,7 @@ write_retry:
 
 	trace_xfs_file_buffered_write(iocb, from);
 	ret = iomap_file_buffered_write(iocb, from,
-			&xfs_buffered_write_iomap_ops, &xfs_iomap_write_ops,
+			xfs_buffered_write_iomap_next, &xfs_iomap_write_ops,
 			NULL);
 
 	/*
@@ -1143,7 +1123,7 @@ xfs_file_buffered_write_zoned(
 retry:
 	trace_xfs_file_buffered_write(iocb, from);
 	ret = iomap_file_buffered_write(iocb, from,
-			&xfs_buffered_write_iomap_ops, &xfs_iomap_write_ops,
+			xfs_buffered_write_iomap_next, &xfs_iomap_write_ops,
 			&ac);
 	if (ret == -ENOSPC && !cleared_space) {
 		/*
@@ -1891,17 +1871,21 @@ xfs_file_release(
 		return 0;
 
 	/*
-	 * If we can't get the iolock just skip truncating the blocks past EOF
-	 * because we could deadlock with the mmap_lock otherwise. We'll get
-	 * another chance to drop them once the last reference to the inode is
-	 * dropped, so we'll never leak blocks permanently.
+	 * If we can't get the iolock or if the filesystem is frozen, just skip
+	 * truncating the blocks past EOF because we could deadlock with the
+	 * mmap_lock or hang the close() call. We'll get another chance to drop
+	 * them once the last reference to the inode is dropped, so we'll never
+	 * leak blocks permanently.
 	 */
 	if (!xfs_iflags_test(ip, XFS_EOFBLOCKS_RELEASED) &&
-	    xfs_ilock_nowait(ip, XFS_IOLOCK_EXCL)) {
-		if (xfs_can_free_eofblocks(ip) &&
-		    !xfs_iflags_test_and_set(ip, XFS_EOFBLOCKS_RELEASED))
-			xfs_free_eofblocks(ip);
-		xfs_iunlock(ip, XFS_IOLOCK_EXCL);
+	    sb_start_write_trylock(mp->m_super)) {
+		if (xfs_ilock_nowait(ip, XFS_IOLOCK_EXCL)) {
+			if (xfs_can_free_eofblocks(ip) &&
+			    !xfs_iflags_test_and_set(ip, XFS_EOFBLOCKS_RELEASED))
+				xfs_free_eofblocks(ip);
+			xfs_iunlock(ip, XFS_IOLOCK_EXCL);
+		}
+		sb_end_write(mp->m_super);
 	}
 
 	return 0;
@@ -1948,10 +1932,10 @@ xfs_file_llseek(
 	default:
 		return generic_file_llseek(file, offset, whence);
 	case SEEK_HOLE:
-		offset = iomap_seek_hole(inode, offset, &xfs_seek_iomap_ops);
+		offset = iomap_seek_hole(inode, offset, xfs_seek_iomap_next);
 		break;
 	case SEEK_DATA:
-		offset = iomap_seek_data(inode, offset, &xfs_seek_iomap_ops);
+		offset = iomap_seek_data(inode, offset, xfs_seek_iomap_next);
 		break;
 	}
 
@@ -1975,8 +1959,8 @@ xfs_dax_fault_locked(
 	}
 	ret = dax_iomap_fault(vmf, order, &pfn, NULL,
 			(write_fault && !vmf->cow_page) ?
-				&xfs_dax_write_iomap_ops :
-				&xfs_read_iomap_ops);
+				xfs_dax_write_iomap_next :
+				xfs_read_iomap_next);
 	if (ret & VM_FAULT_NEEDDSYNC)
 		ret = dax_finish_sync_fault(vmf, order, pfn);
 	return ret;
@@ -2040,7 +2024,7 @@ __xfs_write_fault(
 	if (IS_DAX(inode))
 		ret = xfs_dax_fault_locked(vmf, order, true);
 	else
-		ret = iomap_page_mkwrite(vmf, &xfs_buffered_write_iomap_ops,
+		ret = iomap_page_mkwrite(vmf, xfs_buffered_write_iomap_next,
 				ac);
 	xfs_iunlock(ip, lock_mode);
 

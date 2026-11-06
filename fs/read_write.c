@@ -274,7 +274,7 @@ loff_t fixed_size_llseek(struct file *file, loff_t offset, int whence, loff_t si
 EXPORT_SYMBOL(fixed_size_llseek);
 
 /**
- * no_seek_end_llseek - llseek implementation for fixed-sized devices
+ * no_seek_end_llseek - llseek implementation for files without SEEK_END
  * @file:	file structure to seek on
  * @offset:	file offset to seek to
  * @whence:	type of seek
@@ -293,7 +293,7 @@ loff_t no_seek_end_llseek(struct file *file, loff_t offset, int whence)
 EXPORT_SYMBOL(no_seek_end_llseek);
 
 /**
- * no_seek_end_llseek_size - llseek implementation for fixed-sized devices
+ * no_seek_end_llseek_size - llseek implementation for files without SEEK_END
  * @file:	file structure to seek on
  * @offset:	file offset to seek to
  * @whence:	type of seek
@@ -333,45 +333,25 @@ loff_t default_llseek(struct file *file, loff_t offset, int whence)
 {
 	struct inode *inode = file_inode(file);
 	loff_t retval;
+	int ret;
 
 	retval = inode_lock_killable(inode);
 	if (retval)
 		return retval;
-	switch (whence) {
-		case SEEK_END:
-			offset += i_size_read(inode);
-			break;
-		case SEEK_CUR:
-			if (offset == 0) {
-				retval = file->f_pos;
-				goto out;
-			}
-			offset += file->f_pos;
-			break;
-		case SEEK_DATA:
-			/*
-			 * In the generic case the entire file is data, so as
-			 * long as offset isn't at the end of the file then the
-			 * offset is data.
-			 */
-			if (offset >= inode->i_size) {
-				retval = -ENXIO;
-				goto out;
-			}
-			break;
-		case SEEK_HOLE:
-			/*
-			 * There is a virtual hole at the end of the file, so
-			 * as long as offset isn't i_size or larger, return
-			 * i_size.
-			 */
-			if (offset >= inode->i_size) {
-				retval = -ENXIO;
-				goto out;
-			}
-			offset = inode->i_size;
-			break;
+
+	ret = must_set_pos(file, &offset, whence, i_size_read(inode));
+	if (ret < 0) {
+		retval = ret;
+		goto out;
 	}
+	if (ret == 0) {
+		retval = offset;
+		goto out;
+	}
+
+	if (whence == SEEK_CUR)
+		offset += file->f_pos;
+
 	retval = -EINVAL;
 	if (offset >= 0 || unsigned_offsets(file)) {
 		if (offset != file->f_pos)
@@ -441,7 +421,7 @@ SYSCALL_DEFINE5(llseek, unsigned int, fd, unsigned long, offset_high,
 			whence);
 
 	retval = (int)offset;
-	if (offset >= 0) {
+	if (offset >= 0 || (unsigned_offsets(fd_file(f)) && offset < -MAX_ERRNO)) {
 		retval = -EFAULT;
 		if (!copy_to_user(result, &offset, sizeof(offset)))
 			retval = 0;
@@ -753,12 +733,12 @@ SYSCALL_DEFINE3(write, unsigned int, fd, const char __user *, buf,
 ssize_t ksys_pread64(unsigned int fd, char __user *buf, size_t count,
 		     loff_t pos)
 {
-	if (pos < 0)
-		return -EINVAL;
-
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+
+	if (pos < 0 && !unsigned_offsets(fd_file(f)))
+		return -EINVAL;
 
 	if (fd_file(f)->f_mode & FMODE_PREAD)
 		return vfs_read(fd_file(f), buf, count, &pos);
@@ -783,12 +763,12 @@ COMPAT_SYSCALL_DEFINE5(pread64, unsigned int, fd, char __user *, buf,
 ssize_t ksys_pwrite64(unsigned int fd, const char __user *buf,
 		      size_t count, loff_t pos)
 {
-	if (pos < 0)
-		return -EINVAL;
-
 	CLASS(fd, f)(fd);
 	if (fd_empty(f))
 		return -EBADF;
+
+	if (pos < 0 && !unsigned_offsets(fd_file(f)))
+		return -EINVAL;
 
 	if (fd_file(f)->f_mode & FMODE_PWRITE)
 		return vfs_write(fd_file(f), buf, count, &pos);
@@ -1123,14 +1103,14 @@ static ssize_t do_preadv(unsigned long fd, const struct iovec __user *vec,
 {
 	ssize_t ret = -EBADF;
 
-	if (pos < 0)
-		return -EINVAL;
-
 	CLASS(fd, f)(fd);
 	if (!fd_empty(f)) {
-		ret = -ESPIPE;
-		if (fd_file(f)->f_mode & FMODE_PREAD)
-			ret = vfs_readv(fd_file(f), vec, vlen, &pos, flags);
+		ret = -EINVAL;
+		if (pos >= 0 || unsigned_offsets(fd_file(f))) {
+			ret = -ESPIPE;
+			if (fd_file(f)->f_mode & FMODE_PREAD)
+				ret = vfs_readv(fd_file(f), vec, vlen, &pos, flags);
+		}
 	}
 
 	if (ret > 0)
@@ -1144,14 +1124,14 @@ static ssize_t do_pwritev(unsigned long fd, const struct iovec __user *vec,
 {
 	ssize_t ret = -EBADF;
 
-	if (pos < 0)
-		return -EINVAL;
-
 	CLASS(fd, f)(fd);
 	if (!fd_empty(f)) {
-		ret = -ESPIPE;
-		if (fd_file(f)->f_mode & FMODE_PWRITE)
-			ret = vfs_writev(fd_file(f), vec, vlen, &pos, flags);
+		ret = -EINVAL;
+		if (pos >= 0 || unsigned_offsets(fd_file(f))) {
+			ret = -ESPIPE;
+			if (fd_file(f)->f_mode & FMODE_PWRITE)
+				ret = vfs_writev(fd_file(f), vec, vlen, &pos, flags);
+		}
 	}
 
 	if (ret > 0)
@@ -1319,7 +1299,8 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 	if (!(fd_file(in)->f_mode & FMODE_READ))
 		return -EBADF;
 	if (!ppos) {
-		pos = fd_file(in)->f_pos;
+		/* f_pos is not locked here; racing updates are benign */
+		pos = data_race(fd_file(in)->f_pos);
 	} else {
 		pos = *ppos;
 		if (!(fd_file(in)->f_mode & FMODE_PREAD))
@@ -1341,7 +1322,8 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		return -EBADF;
 	in_inode = file_inode(fd_file(in));
 	out_inode = file_inode(fd_file(out));
-	out_pos = fd_file(out)->f_pos;
+	/* see above */
+	out_pos = data_race(fd_file(out)->f_pos);
 
 	if (!max)
 		max = min(in_inode->i_sb->s_maxbytes, out_inode->i_sb->s_maxbytes);
@@ -1382,11 +1364,12 @@ static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
 		add_wchar(current, retval);
 		fsnotify_access(fd_file(in));
 		fsnotify_modify(fd_file(out));
-		fd_file(out)->f_pos = out_pos;
+		/* see above */
+		data_race(fd_file(out)->f_pos = out_pos);
 		if (ppos)
 			*ppos = pos;
 		else
-			fd_file(in)->f_pos = pos;
+			data_race(fd_file(in)->f_pos = pos); /* see above */
 	}
 
 	inc_syscr(current);
@@ -1531,9 +1514,11 @@ static int generic_copy_file_checks(struct file *file_in, loff_t pos_in,
 	else
 		count = min(count, size_in - (uint64_t)pos_in);
 
-	ret = generic_write_check_limits(file_out, pos_out, &count);
-	if (ret)
-		return ret;
+	if (count) {
+		ret = generic_write_check_limits(file_out, pos_out, &count);
+		if (ret)
+			return ret;
+	}
 
 	/* Don't allow overlapped copying within the same file. */
 	if (inode_in == inode_out &&
@@ -1761,8 +1746,8 @@ EXPORT_SYMBOL(generic_write_checks_count);
  * Performs necessary checks before doing a write
  *
  * Can adjust writing position or amount of bytes to write.
- * Returns appropriate error code that caller should return or
- * zero in case that write should be allowed.
+ * Returns the number of bytes that may be written on success (which
+ * may be less than requested if truncated), or a negative error code.
  */
 ssize_t generic_write_checks(struct kiocb *iocb, struct iov_iter *from)
 {

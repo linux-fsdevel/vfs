@@ -308,7 +308,7 @@ static struct dentry *proc_tgid_net_lookup(struct inode *dir,
 	return de;
 }
 
-static int proc_tgid_net_getattr(struct mnt_idmap *idmap,
+static int proc_tgid_net_getattr(const struct mnt_idmap *idmap,
 				 const struct path *path, struct kstat *stat,
 				 u32 request_mask, unsigned int query_flags)
 {
@@ -420,7 +420,7 @@ static struct pernet_operations __net_initdata proc_net_ns_ops = {
 
 int __init proc_net_init(void)
 {
-	proc_symlink("net", NULL, "self/net");
+	proc_self_symlink("net", NULL, "self/net");
 
 	return register_pernet_subsys(&proc_net_ns_ops);
 }

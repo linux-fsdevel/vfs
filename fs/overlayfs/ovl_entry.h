@@ -92,6 +92,8 @@ struct ovl_fs {
 	/* r/o snapshot of upperdir sb's only taken on volatile mounts */
 	errseq_t errseq;
 	bool casefold;
+	/* ->layers, ->fs and ->creator_cred are read by rcu pathwalks */
+	struct rcu_head rcu;
 };
 
 /* Number of lower layers, not including data-only layers */
@@ -105,7 +107,7 @@ static inline struct vfsmount *ovl_upper_mnt(struct ovl_fs *ofs)
 	return ofs->layers[0].mnt;
 }
 
-static inline struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
+static inline const struct mnt_idmap *ovl_upper_mnt_idmap(struct ovl_fs *ofs)
 {
 	return mnt_idmap(ovl_upper_mnt(ofs));
 }

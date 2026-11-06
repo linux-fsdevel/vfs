@@ -1051,7 +1051,7 @@ static int ufs_alloc_lastblock(struct inode *inode, loff_t size)
 
 	folio = ufs_get_locked_folio(mapping, lastfrag >>
 				       (PAGE_SHIFT - inode->i_blkbits));
-	if (IS_ERR(folio)) {
+	if (IS_ERR_OR_NULL(folio)) {
 		err = -EIO;
 		goto out;
 	}
@@ -1195,7 +1195,7 @@ out:
 	return err;
 }
 
-int ufs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int ufs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
