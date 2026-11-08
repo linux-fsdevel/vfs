@@ -6,6 +6,7 @@
 obj-$(CONFIG_NLS)		+= nls_base.o
 
 obj-$(CONFIG_NLS_CODEPAGE_437)	+= nls_cp437.o
+obj-$(CONFIG_NLS_CODEPAGE_720)	+= nls_cp720.o
 obj-$(CONFIG_NLS_CODEPAGE_737)	+= nls_cp737.o
 obj-$(CONFIG_NLS_CODEPAGE_775)	+= nls_cp775.o
 obj-$(CONFIG_NLS_CODEPAGE_850)	+= nls_cp850.o
