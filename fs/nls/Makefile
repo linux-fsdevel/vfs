@@ -6,6 +6,7 @@
 obj-$(CONFIG_NLS)		+= nls_base.o
 
 obj-$(CONFIG_NLS_CODEPAGE_437)	+= nls_cp437.o
+obj-$(CONFIG_NLS_CODEPAGE_720)	+= nls_cp720.o
 obj-$(CONFIG_NLS_CODEPAGE_737)	+= nls_cp737.o
 obj-$(CONFIG_NLS_CODEPAGE_775)	+= nls_cp775.o
 obj-$(CONFIG_NLS_CODEPAGE_850)	+= nls_cp850.o
@@ -27,6 +28,7 @@ obj-$(CONFIG_NLS_CODEPAGE_949)	+= nls_cp949.o
 obj-$(CONFIG_NLS_CODEPAGE_950)	+= nls_cp950.o
 obj-$(CONFIG_NLS_CODEPAGE_1250) += nls_cp1250.o
 obj-$(CONFIG_NLS_CODEPAGE_1251)	+= nls_cp1251.o
+obj-$(CONFIG_NLS_CODEPAGE_1256)	+= nls_cp1256.o
 obj-$(CONFIG_NLS_ASCII)		+= nls_ascii.o
 obj-$(CONFIG_NLS_ISO8859_1)	+= nls_iso8859-1.o
 obj-$(CONFIG_NLS_ISO8859_2)	+= nls_iso8859-2.o
