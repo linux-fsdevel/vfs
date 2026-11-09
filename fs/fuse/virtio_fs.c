@@ -55,6 +55,7 @@ struct virtio_fs_vq {
 	struct work_struct dispatch_work;
 	struct fuse_dev *fud;
 	bool connected;
+	bool aborting; /* reject new requests except FUSE_DESTROY */
 	long in_flight;
 	struct completion in_flight_zero; /* No inflight requests */
 	struct kobject *kobj;
@@ -95,6 +96,11 @@ struct virtio_fs_req_work {
 	struct fuse_req *req;
 	struct virtio_fs_vq *fsvq;
 	struct work_struct done_work;
+};
+
+struct virtio_fs_end_work {
+	struct work_struct work;
+	struct fuse_req *req;
 };
 
 static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
@@ -348,6 +354,7 @@ static void virtio_fs_start_all_queues(struct virtio_fs *fs)
 		fsvq = &fs->vqs[i];
 		spin_lock(&fsvq->lock);
 		fsvq->connected = true;
+		fsvq->aborting = false;
 		spin_unlock(&fsvq->lock);
 	}
 }
@@ -554,6 +561,39 @@ static void virtio_fs_hiprio_done_work(struct work_struct *work)
 	spin_unlock(&fsvq->lock);
 }
 
+static void virtio_fs_end_req_work(struct work_struct *work)
+{
+	struct virtio_fs_end_work *w =
+		container_of(work, typeof(*w), work);
+
+	fuse_request_end(w->req);
+	kfree(w);
+}
+
+/*
+ * A request rejected during teardown can have an end callback that may
+ * block (DAX release).  Ending it inline in virtio_fs_request_dispatch_work()
+ * can deadlock: the callback may issue a synchronous request whose
+ * completion needs the same dispatch_work that is currently blocked.
+ * Offload it, like the device completion path does.
+ *
+ * virtio_fs_request_complete() cannot be reused here: it also consumes
+ * argbuf and drops in_flight, while a rejected request has neither.
+ */
+static void virtio_fs_end_req(struct fuse_req *req)
+{
+	if (req->args->may_block) {
+		struct virtio_fs_end_work *w;
+
+		w = kzalloc_obj(*w, GFP_NOFS | __GFP_NOFAIL);
+		INIT_WORK(&w->work, virtio_fs_end_req_work);
+		w->req = req;
+		schedule_work(&w->work);
+	} else {
+		fuse_request_end(req);
+	}
+}
+
 static void virtio_fs_request_dispatch_work(struct work_struct *work)
 {
 	struct fuse_req *req;
@@ -573,7 +613,7 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 
 		list_del_init(&req->list);
 		spin_unlock(&fsvq->lock);
-		fuse_request_end(req);
+		virtio_fs_end_req(req);
 	}
 
 	/* Dispatch pending requests */
@@ -596,9 +636,17 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 		if (ret < 0) {
 			if (ret == -ENOSPC) {
 				spin_lock(&fsvq->lock);
-				list_add_tail(&req->list, &fsvq->queued_reqs);
-				spin_unlock(&fsvq->lock);
-				return;
+				if (!fsvq->connected ||
+				    (fsvq->aborting &&
+				     req->in.h.opcode != FUSE_DESTROY)) {
+					spin_unlock(&fsvq->lock);
+					ret = -ENOTCONN;
+				} else {
+					list_add_tail(&req->list,
+						      &fsvq->queued_reqs);
+					spin_unlock(&fsvq->lock);
+					return;
+				}
 			}
 			req->out.h.error = ret;
 			spin_lock(&fsvq->lock);
@@ -606,7 +654,7 @@ static void virtio_fs_request_dispatch_work(struct work_struct *work)
 			spin_unlock(&fsvq->lock);
 			pr_err("virtio-fs: virtio_fs_enqueue_req() failed %d\n",
 			       ret);
-			fuse_request_end(req);
+			virtio_fs_end_req(req);
 		}
 	}
 }
@@ -1197,6 +1245,28 @@ static void virtio_fs_stop_all_queues(struct virtio_fs *fs)
 	}
 }
 
+/*
+ * Stop admitting new requests before draining the queues.  Admission and
+ * virtqueue submission are serialized by fsvq->lock, so a request is
+ * either rejected before reaching the device or accounted in in_flight
+ * and covered by the drain.
+ *
+ * FUSE_DESTROY is exempt because fuse_conn_destroy() sends it after the
+ * first drain and waits for its completion before aborting the channel.
+ */
+static void virtio_fs_stop_new_requests(struct virtio_fs *fs)
+{
+	struct virtio_fs_vq *fsvq;
+	int i;
+
+	for (i = 0; i < fs->nvqs; i++) {
+		fsvq = &fs->vqs[i];
+		spin_lock(&fsvq->lock);
+		fsvq->aborting = true;
+		spin_unlock(&fsvq->lock);
+	}
+}
+
 static void virtio_fs_remove(struct virtio_device *vdev)
 {
 	struct virtio_fs *fs = vdev->priv;
@@ -1450,7 +1520,8 @@ static int virtio_fs_enqueue_req(struct virtio_fs_vq *fsvq,
 
 	spin_lock(&fsvq->lock);
 
-	if (!fsvq->connected) {
+	if (!fsvq->connected ||
+	    (fsvq->aborting && req->in.h.opcode != FUSE_DESTROY)) {
 		spin_unlock(&fsvq->lock);
 		ret = -ENOTCONN;
 		goto out;
@@ -1522,12 +1593,22 @@ static void virtio_fs_send_req(struct fuse_iqueue *fiq, struct fuse_req *req)
 			/*
 			 * Virtqueue full. Retry submission from worker
 			 * context as we might be holding fc->chan->bg_lock.
+			 * Re-check admission under the same lock that
+			 * increments in_flight: teardown may have started
+			 * between enqueue_req() dropping its lock and here.
 			 */
 			spin_lock(&fsvq->lock);
-			list_add_tail(&req->list, &fsvq->queued_reqs);
-			inc_in_flight_req(fsvq);
-			spin_unlock(&fsvq->lock);
-			return;
+			if (!fsvq->connected ||
+			    (fsvq->aborting &&
+			     req->in.h.opcode != FUSE_DESTROY)) {
+				spin_unlock(&fsvq->lock);
+				ret = -ENOTCONN;
+			} else {
+				list_add_tail(&req->list, &fsvq->queued_reqs);
+				inc_in_flight_req(fsvq);
+				spin_unlock(&fsvq->lock);
+				return;
+			}
 		}
 		req->out.h.error = ret;
 		pr_err("virtio-fs: virtio_fs_enqueue_req() failed %d\n", ret);
@@ -1640,6 +1721,9 @@ static void virtio_fs_conn_destroy(struct fuse_mount *fm)
 	spin_lock(&fsvq->lock);
 	fsvq->connected = false;
 	spin_unlock(&fsvq->lock);
+
+	/* Nothing may be queued after the drain below */
+	virtio_fs_stop_new_requests(vfs);
 	virtio_fs_drain_all_queues(vfs);
 
 	fuse_conn_destroy(fm);
