@@ -743,9 +743,13 @@ pipe_poll(struct file *filp, poll_table *wait)
 	 * and the ->pseudo_edgetrigger check in anon_pipe_write().
 	 * Currently io_uring sets EPOLLET for multishot polls, so it gets the
 	 * same behaviour.
+	 *
+	 * EPOLLEXCLUSIVE needs them too.  Its entry is an exclusive waiter on
+	 * ->rd_wait that can take the wakeup meant for a blocked reader, and
+	 * unlike a woken reader in anon_pipe_read() it doesn't pass it on.
 	 */
 	if ((filp->f_mode & FMODE_READ) &&
-	    wait && (wait->_key & EPOLLET) &&
+	    wait && (wait->_key & (EPOLLET | EPOLLEXCLUSIVE)) &&
 	    unlikely(!READ_ONCE(pipe->pseudo_edgetrigger)))
 		WRITE_ONCE(pipe->pseudo_edgetrigger, true);
 
