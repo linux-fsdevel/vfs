@@ -36,7 +36,7 @@
 
 #include "internal.h"
 
-int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
+int do_truncate(const struct mnt_idmap *idmap, struct dentry *dentry,
 		loff_t length, unsigned int time_attrs, struct file *filp)
 {
 	int ret;
@@ -72,7 +72,7 @@ int do_truncate(struct mnt_idmap *idmap, struct dentry *dentry,
 
 int vfs_truncate(const struct path *path, loff_t length)
 {
-	struct mnt_idmap *idmap;
+	const struct mnt_idmap *idmap;
 	struct inode *inode;
 	int error;
 
@@ -787,7 +787,7 @@ static inline bool setattr_vfsgid(struct iattr *attr, kgid_t kgid)
 
 int chown_common(const struct path *path, uid_t user, gid_t group)
 {
-	struct mnt_idmap *idmap;
+	const struct mnt_idmap *idmap;
 	struct user_namespace *fs_userns;
 	struct inode *inode = path->dentry->d_inode;
 	struct delegated_inode delegated_inode = { };
@@ -931,6 +931,11 @@ cleanup_inode:
 	return error;
 }
 
+/*
+ * Populate struct file
+ *
+ * NOTE: it assumes f_path is populated and consumes the caller's reference.
+ */
 static int do_dentry_open(struct file *f,
 			  int (*open)(struct inode *, struct file *))
 {
@@ -938,7 +943,6 @@ static int do_dentry_open(struct file *f,
 	struct inode *inode = f->f_path.dentry->d_inode;
 	int error;
 
-	path_get(&f->f_path);
 	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
 	f->f_wb_err = filemap_sample_wb_err(f->f_mapping);
@@ -1055,6 +1059,7 @@ int finish_open(struct file *file, struct dentry *dentry,
 	BUG_ON(file->f_mode & FMODE_OPENED); /* once it's opened, it's opened */
 
 	file->__f_path.dentry = dentry;
+	path_get(&file->f_path);
 	return do_dentry_open(file, open);
 }
 EXPORT_SYMBOL(finish_open);
@@ -1098,6 +1103,7 @@ int vfs_open(const struct path *path, struct file *file)
 	int ret;
 
 	file->__f_path = *path;
+	path_get(&file->f_path);
 	ret = do_dentry_open(file, NULL);
 	if (!ret) {
 		/*
@@ -1105,6 +1111,25 @@ int vfs_open(const struct path *path, struct file *file)
 		 * fsnotify_close(), so we need fsnotify_open() here for
 		 * symmetry.
 		 */
+		fsnotify_open(file);
+	}
+	return ret;
+}
+
+/**
+ * vfs_open_consume - open the file at the given path and consume the reference
+ * @path: path to open
+ * @file: newly allocated file with f_flag initialized
+ */
+int vfs_open_consume(struct path *path, struct file *file)
+{
+	int ret;
+
+	file->__f_path = *path;
+	path->mnt = NULL;
+	path->dentry = NULL;
+	ret = do_dentry_open(file, NULL);
+	if (!ret) {
 		fsnotify_open(file);
 	}
 	return ret;
@@ -1130,6 +1155,36 @@ struct file *dentry_open(const struct path *path, int flags,
 	return f;
 }
 EXPORT_SYMBOL(dentry_open);
+
+/**
+ * task_path_open - open a path handed out by a task
+ * @path: the task's path
+ *
+ * Open a task's exe, cwd or root for the caller. The path wasn't found by
+ * a lookup, it's handed out directly, the same way a /proc/<pid>/{exe,cwd,root}
+ * jump lands on it. So give the filesystem the chance to refuse it that
+ * complete_walk() gives it for a jumped dentry.
+ *
+ * Only O_PATH opens are supported. Anything else would need the permission
+ * checks a lookup performs before the open.
+ *
+ * Return: An O_PATH file on success, an error pointer on failure.
+ */
+struct file *task_path_open(const struct path *path)
+{
+	struct dentry *dentry = path->dentry;
+
+	if (unlikely(dentry->d_flags & DCACHE_OP_WEAK_REVALIDATE)) {
+		int status = dentry->d_op->d_weak_revalidate(dentry, 0);
+
+		if (status < 0)
+			return ERR_PTR(status);
+		if (!status)
+			return ERR_PTR(-ESTALE);
+	}
+
+	return dentry_open(path, O_PATH, current_cred());
+}
 
 struct file *dentry_open_nonotify(const struct path *path, int flags,
 				  const struct cred *cred)
@@ -1239,29 +1294,31 @@ inline int build_open_flags(const struct open_how *how, struct open_flags *op)
 	if (WILL_CREATE(flags)) {
 		if (how->mode & ~S_IALLUGO)
 			return -EINVAL;
-		op->mode = how->mode | S_IFREG;
+		/* Like mkdir(2), ignore the setuid and setgid bits. */
+		if (O_IS_MKDIR(flags))
+			op->mode = (how->mode & (S_IRWXUGO | S_ISVTX)) | S_IFDIR;
+		else
+			op->mode = how->mode | S_IFREG;
 	} else {
 		if (how->mode != 0)
 			return -EINVAL;
 		op->mode = 0;
 	}
 
-	/*
-	 * Block bugs where O_DIRECTORY | O_CREAT created regular files.
-	 * Note, that blocking O_DIRECTORY | O_CREAT here also protects
-	 * O_TMPFILE below which requires O_DIRECTORY being raised.
-	 */
-	if ((flags & (O_DIRECTORY | O_CREAT)) == (O_DIRECTORY | O_CREAT))
-		return -EINVAL;
-
 	/* Now handle the creative implementation of O_TMPFILE. */
 	if (flags & __O_TMPFILE) {
 		/*
 		 * In order to ensure programs get explicit errors when trying
 		 * to use O_TMPFILE on old kernels we enforce that O_DIRECTORY
-		 * is raised alongside __O_TMPFILE.
+		 * is raised alongside __O_TMPFILE, but without O_CREAT. The
+		 * reason for disallowing O_CREAT|O_TMPFILE is that
+		 * O_DIRECTORY|O_CREAT used to work and created a regular file
+		 * if nothing existed at the open path. Hence, allowing the
+		 * combination would have caused O_CREAT|O_TMPFILE to create a
+		 * regular (non-temporary) file on old kernels, while the caller
+		 * would believe they created an actual O_TMPFILE.
 		 */
-		if (!(flags & O_DIRECTORY))
+		if (!(flags & O_DIRECTORY) || (flags & O_CREAT))
 			return -EINVAL;
 		if (!(acc_mode & MAY_WRITE))
 			return -EINVAL;
@@ -1318,12 +1375,29 @@ inline int build_open_flags(const struct open_how *how, struct open_flags *op)
 
 	op->intent = flags & O_PATH ? 0 : LOOKUP_OPEN;
 
+	/*
+	 * Requesting write access on a directory can never succeed. Rather
+	 * than performing a path-walk to determine whether the target is
+	 * actually a directory (-EISDIR) or not (-ENOTDIR), we short-circuit
+	 * to -ENOTDIR.
+	 */
+	if ((flags & O_DIRECTORY) && !(flags & __O_TMPFILE) && (acc_mode & MAY_WRITE))
+		return -ENOTDIR;
+
 	if (flags & O_CREAT) {
-		op->intent |= LOOKUP_CREATE;
+		if (flags & O_DIRECTORY) {
+			/*
+			 * O_CREAT|O_DIRECTORY is provided to prevent TOCTOUs, so
+			 * it makes little sense to allow it without O_EXCL.
+			 */
+			if (!(flags & O_EXCL))
+				return -EINVAL;
+		}
 		if (flags & O_EXCL) {
 			op->intent |= LOOKUP_EXCL;
 			flags |= O_NOFOLLOW;
 		}
+		op->intent |= LOOKUP_CREATE;
 	}
 
 	if (flags & O_DIRECTORY)
@@ -1537,6 +1611,19 @@ int filp_close(struct file *filp, fl_owner_t id)
 }
 EXPORT_SYMBOL(filp_close);
 
+/* Like filp_close() but the last reference is put right here. */
+int filp_close_sync(struct file *filp, fl_owner_t id)
+{
+	int retval;
+
+	/* Kernel threads must never put their final reference here. */
+	VFS_WARN_ON_ONCE(current->flags & PF_KTHREAD);
+	retval = filp_flush(filp, id);
+	fput_close_sync(filp);
+
+	return retval;
+}
+
 /*
  * Careful here! We test whether the file pointer is NULL before
  * releasing the fd. This ensures that one clone task can't release
@@ -1551,13 +1638,11 @@ SYSCALL_DEFINE1(close, unsigned int, fd)
 	if (!file)
 		return -EBADF;
 
-	retval = filp_flush(file, current->files);
-
 	/*
 	 * We're returning to user space. Don't bother
 	 * with any delayed fput() cases.
 	 */
-	fput_close_sync(file);
+	retval = filp_close_sync(file, current->files);
 
 	if (likely(retval == 0))
 		return 0;

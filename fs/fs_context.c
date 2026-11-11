@@ -315,6 +315,10 @@ struct fs_context *fs_context_for_reconfigure(struct dentry *dentry,
 					unsigned int sb_flags,
 					unsigned int sb_flags_mask)
 {
+	/* kernel-internal superblocks are nobody's to reconfigure */
+	if (dentry->d_sb->s_flags & SB_NOUSER)
+		return ERR_PTR(-EINVAL);
+
 	return alloc_fs_context(dentry->d_sb->s_type, dentry, sb_flags,
 				sb_flags_mask, FS_CONTEXT_FOR_RECONFIGURE);
 }
@@ -540,6 +544,7 @@ void vfs_clean_context(struct fs_context *fc)
 	fc->fs_private = NULL;
 	fc->s_fs_info = NULL;
 	fc->sb_flags = 0;
+	fc->sb_flags_mask = 0;
 	security_free_mnt_opts(&fc->security);
 	kfree(fc->source);
 	fc->source = NULL;

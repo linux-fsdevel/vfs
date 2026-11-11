@@ -685,7 +685,7 @@ static int __rdtgroup_move_task(struct task_struct *tsk,
 
 static bool is_closid_match(struct task_struct *t, struct rdtgroup *r)
 {
-	return (resctrl_arch_alloc_capable() && (r->type == RDTCTRL_GROUP) &&
+	return (r->type == RDTCTRL_GROUP &&
 		resctrl_arch_match_closid(t, r->closid));
 }
 
@@ -732,9 +732,7 @@ static int rdtgroup_task_write_permission(struct task_struct *task,
 	 * Even if we're attaching all tasks in the thread group, we only
 	 * need to check permissions on one of them.
 	 */
-	if (!uid_eq(cred->euid, GLOBAL_ROOT_UID) &&
-	    !uid_eq(cred->euid, tcred->uid) &&
-	    !uid_eq(cred->euid, tcred->suid)) {
+	if (!cred_ids_allow_move(cred, tcred)) {
 		rdt_last_cmd_printf("No permission to move task %d\n", task->pid);
 		ret = -EPERM;
 	}
@@ -2858,7 +2856,7 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 {
 	struct resctrl_schema *s;
 	const char *suffix = "";
-	int ret, cl;
+	int cl;
 
 	s = kzalloc_obj(*s);
 	if (!s)
@@ -2882,13 +2880,11 @@ static int schemata_list_add(struct rdt_resource *r, enum resctrl_conf_type type
 		break;
 	}
 
-	ret = snprintf(s->name, sizeof(s->name), "%s%s", r->name, suffix);
-	if (ret >= sizeof(s->name)) {
+	cl = snprintf(s->name, sizeof(s->name), "%s%s", r->name, suffix);
+	if (cl >= sizeof(s->name)) {
 		kfree(s);
 		return -EINVAL;
 	}
-
-	cl = strlen(s->name);
 
 	/*
 	 * If CDP is supported by this resource, but not enabled,

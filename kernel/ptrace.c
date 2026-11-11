@@ -305,8 +305,7 @@ static bool task_still_dumpable(struct task_struct *task, unsigned int mode)
 static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 {
 	const struct cred *cred = current_cred(), *tcred;
-	kuid_t caller_uid;
-	kgid_t caller_gid;
+	enum cred_ids caller_ids;
 
 	if (!(mode & PTRACE_MODE_FSCREDS) == !(mode & PTRACE_MODE_REALCREDS)) {
 		WARN(1, "denying ptrace access check without PTRACE_MODE_*CREDS\n");
@@ -327,8 +326,7 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		return 0;
 	rcu_read_lock();
 	if (mode & PTRACE_MODE_FSCREDS) {
-		caller_uid = cred->fsuid;
-		caller_gid = cred->fsgid;
+		caller_ids = CRED_IDS_FS;
 	} else {
 		/*
 		 * Using the euid would make more sense here, but something
@@ -338,16 +336,10 @@ static int __ptrace_may_access(struct task_struct *task, unsigned int mode)
 		 * used a syscall that requests access to another process
 		 * (and not a filesystem syscall to procfs).
 		 */
-		caller_uid = cred->uid;
-		caller_gid = cred->gid;
+		caller_ids = CRED_IDS_REAL;
 	}
 	tcred = __task_cred(task);
-	if (uid_eq(caller_uid, tcred->euid) &&
-	    uid_eq(caller_uid, tcred->suid) &&
-	    uid_eq(caller_uid, tcred->uid)  &&
-	    gid_eq(caller_gid, tcred->egid) &&
-	    gid_eq(caller_gid, tcred->sgid) &&
-	    gid_eq(caller_gid, tcred->gid))
+	if (cred_ids_allow_control(cred, caller_ids, tcred))
 		goto ok;
 	if (ptrace_has_cap(tcred->user_ns, mode))
 		goto ok;
@@ -1227,6 +1219,12 @@ int ptrace_request(struct task_struct *child, long request,
 	case PTRACE_SETSIGMASK: {
 		sigset_t new_set;
 
+		/* A user worker only ever takes SIGKILL and SIGSTOP. */
+		if (child->flags & PF_USER_WORKER) {
+			ret = -EPERM;
+			break;
+		}
+
 		if (addr != sizeof(sigset_t)) {
 			ret = -EINVAL;
 			break;
@@ -1359,16 +1357,13 @@ int ptrace_request(struct task_struct *child, long request,
 		struct iovec kiov;
 		struct iovec __user *uiov = datavp;
 
-		if (!access_ok(uiov, sizeof(*uiov)))
-			return -EFAULT;
-
-		if (__get_user(kiov.iov_base, &uiov->iov_base) ||
-		    __get_user(kiov.iov_len, &uiov->iov_len))
+		if (get_user(kiov.iov_base, &uiov->iov_base) ||
+		    get_user(kiov.iov_len, &uiov->iov_len))
 			return -EFAULT;
 
 		ret = ptrace_regset(child, request, addr, &kiov);
 		if (!ret)
-			ret = __put_user(kiov.iov_len, &uiov->iov_len);
+			ret = put_user(kiov.iov_len, &uiov->iov_len);
 		break;
 	}
 
@@ -1525,11 +1520,8 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
 		compat_uptr_t ptr;
 		compat_size_t len;
 
-		if (!access_ok(uiov, sizeof(*uiov)))
-			return -EFAULT;
-
-		if (__get_user(ptr, &uiov->iov_base) ||
-		    __get_user(len, &uiov->iov_len))
+		if (get_user(ptr, &uiov->iov_base) ||
+		    get_user(len, &uiov->iov_len))
 			return -EFAULT;
 
 		kiov.iov_base = compat_ptr(ptr);
@@ -1537,7 +1529,7 @@ int compat_ptrace_request(struct task_struct *child, compat_long_t request,
 
 		ret = ptrace_regset(child, request, addr, &kiov);
 		if (!ret)
-			ret = __put_user(kiov.iov_len, &uiov->iov_len);
+			ret = put_user(kiov.iov_len, &uiov->iov_len);
 		break;
 	}
 #endif

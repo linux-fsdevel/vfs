@@ -58,7 +58,6 @@
 #include <linux/rcupdate.h>
 
 #include <linux/uaccess.h>
-#include <linux/nfs_ssc.h>
 
 #include <uapi/linux/tls.h>
 
@@ -92,12 +91,6 @@ const struct super_operations nfs_sops = {
 };
 EXPORT_SYMBOL_GPL(nfs_sops);
 
-#ifdef CONFIG_NFS_V4_2
-static const struct nfs_ssc_client_ops nfs_ssc_clnt_ops_tbl = {
-	.sco_sb_deactive = nfs_sb_deactive,
-};
-#endif
-
 #if IS_ENABLED(CONFIG_NFS_V4)
 static int __init register_nfs4_fs(void)
 {
@@ -118,18 +111,6 @@ static void unregister_nfs4_fs(void)
 {
 }
 #endif
-
-#ifdef CONFIG_NFS_V4_2
-static void nfs_ssc_register_ops(void)
-{
-	nfs_ssc_register(&nfs_ssc_clnt_ops_tbl);
-}
-
-static void nfs_ssc_unregister_ops(void)
-{
-	nfs_ssc_unregister(&nfs_ssc_clnt_ops_tbl);
-}
-#endif /* CONFIG_NFS_V4_2 */
 
 static struct shrinker *acl_shrinker;
 
@@ -163,9 +144,6 @@ int __init register_nfs_fs(void)
 
 	shrinker_register(acl_shrinker);
 
-#ifdef CONFIG_NFS_V4_2
-	nfs_ssc_register_ops();
-#endif
 	return 0;
 error_3:
 	nfs_unregister_sysctl();
@@ -185,9 +163,6 @@ void __exit unregister_nfs_fs(void)
 	shrinker_free(acl_shrinker);
 	nfs_unregister_sysctl();
 	unregister_nfs4_fs();
-#ifdef CONFIG_NFS_V4_2
-	nfs_ssc_unregister_ops();
-#endif
 	unregister_filesystem(&nfs_fs_type);
 }
 
@@ -1077,6 +1052,7 @@ static void nfs_fill_super(struct super_block *sb, struct nfs_fs_context *ctx)
 	sb->s_blocksize = 0;
 	sb->s_xattr = server->nfs_client->cl_nfs_mod->xattr;
 	sb->s_op = server->nfs_client->cl_nfs_mod->sops;
+	sb->s_iflags |= SB_I_NO_ATOMIC_MKDIR;
 	if (server->bsize)
 		sb->s_blocksize =
 			nfs_block_size(server->bsize, &sb->s_blocksize_bits);
