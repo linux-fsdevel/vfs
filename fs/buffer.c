@@ -1433,7 +1433,8 @@ bool has_bh_in_lru(int cpu, void *dummy)
 	int i;
 	
 	for (i = 0; i < BH_LRU_SIZE; i++) {
-		if (b->bhs[i])
+		/* Only test occupancy; the remote CPU owns the references. */
+		if (data_race(READ_ONCE(b->bhs[i])))
 			return true;
 	}
 
