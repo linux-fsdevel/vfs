@@ -87,14 +87,16 @@ static int pipe_lock_cmp_fn(const struct lockdep_map *a,
 
 void pipe_lock(struct pipe_inode_info *pipe)
 {
-	if (pipe->files)
+	/* A file reference keeps this nonzero; internal splice pipes stay zero. */
+	if (data_race(READ_ONCE(pipe->files)))
 		mutex_lock(&pipe->mutex);
 }
 EXPORT_SYMBOL(pipe_lock);
 
 void pipe_unlock(struct pipe_inode_info *pipe)
 {
-	if (pipe->files)
+	/* As in pipe_lock(), only the stable zero/nonzero distinction matters. */
+	if (data_race(READ_ONCE(pipe->files)))
 		mutex_unlock(&pipe->mutex);
 }
 EXPORT_SYMBOL(pipe_unlock);
