@@ -33,6 +33,7 @@
 #include "squashfs_fs.h"
 #include "squashfs_fs_sb.h"
 #include "squashfs_fs_i.h"
+#include "squashfs_helpers.h"
 #include "squashfs.h"
 #include "decompressor.h"
 #include "xattr.h"
@@ -176,6 +177,29 @@ static const struct squashfs_decompressor *supported_squashfs_filesystem(
 	return decompressor;
 }
 
+static void squashfs_free_inode_table(struct squashfs_sb_info *msblk)
+{
+	if (msblk->lookup_table_is_cache)
+		squashfs_cache_delete(msblk->inode_lookup_cache);
+	else
+		kfree(msblk->inode_lookup_array);
+}
+
+static void squashfs_free_fragment_indexes(struct squashfs_sb_info *msblk)
+{
+	if (msblk->fragment_index_is_cache)
+		squashfs_cache_delete(msblk->fragment_index_cache);
+	else
+		kfree(msblk->fragment_index_array);
+}
+
+static void squashfs_free_xattr_indexes(struct squashfs_sb_info *msblk)
+{
+	if (msblk->xattr_id_is_cache)
+		squashfs_cache_delete(msblk->xattr_id_cache);
+	else
+		kfree(msblk->xattr_id_array);
+}
 
 static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
@@ -186,8 +210,9 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	long long root_inode;
 	unsigned short flags;
 	unsigned int fragments;
-	u64 lookup_table_start, xattr_id_table_start, next_table;
-	int err, devblksize = sb_min_blocksize(sb, SQUASHFS_DEVBLK_SIZE);
+	u64 next_table;
+	s64 err;
+	int devblksize = sb_min_blocksize(sb, SQUASHFS_DEVBLK_SIZE);
 
 	TRACE("Entered squashfs_fill_superblock\n");
 
@@ -286,11 +311,12 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/* Check the root inode for sanity */
 	root_inode = le64_to_cpu(sblk->root_inode);
-	if (SQUASHFS_INODE_OFFSET(root_inode) > SQUASHFS_METADATA_SIZE)
+	if (squashfs_inode_offset(root_inode) > SQUASHFS_METADATA_SIZE)
 		goto insanity;
 
 	msblk->inode_table = le64_to_cpu(sblk->inode_table_start);
 	msblk->directory_table = le64_to_cpu(sblk->directory_table_start);
+	msblk->fragment_table = le64_to_cpu(sblk->fragment_table_start);
 	msblk->inodes = le32_to_cpu(sblk->inodes);
 	msblk->fragments = le32_to_cpu(sblk->fragments);
 	msblk->ids = le16_to_cpu(sblk->no_ids);
@@ -308,8 +334,7 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	TRACE("Number of ids %d\n", msblk->ids);
 	TRACE("sblk->inode_table_start %llx\n", msblk->inode_table);
 	TRACE("sblk->directory_table_start %llx\n", msblk->directory_table);
-	TRACE("sblk->fragment_table_start %llx\n",
-		(u64) le64_to_cpu(sblk->fragment_table_start));
+	TRACE("sblk->fragment_table_start %llx\n", msblk->fragment_table);
 	TRACE("sblk->id_table_start %llx\n",
 		(u64) le64_to_cpu(sblk->id_table_start));
 
@@ -359,19 +384,17 @@ static int squashfs_fill_super(struct super_block *sb, struct fs_context *fc)
 
 	/* Handle xattrs */
 	sb->s_xattr = squashfs_xattr_handlers;
-	xattr_id_table_start = le64_to_cpu(sblk->xattr_id_table_start);
-	if (xattr_id_table_start == SQUASHFS_INVALID_BLK) {
+	msblk->xattr_id_table = le64_to_cpu(sblk->xattr_id_table_start);
+	if (msblk->xattr_id_table == SQUASHFS_INVALID_BLK) {
 		next_table = msblk->bytes_used;
 		goto allocate_id_index_table;
 	}
 
 	/* Allocate and read xattr id lookup table */
-	msblk->xattr_id_table = squashfs_read_xattr_id_table(sb,
-		xattr_id_table_start, &msblk->xattr_table, &msblk->xattr_ids);
-	if (IS_ERR(msblk->xattr_id_table)) {
+	err = squashfs_read_xattr_id_table(sb, msblk->xattr_id_table,
+				&msblk->xattr_table, &msblk->xattr_ids);
+	if (err < 0) {
 		errorf(fc, "unable to read xattr id index table");
-		err = PTR_ERR(msblk->xattr_id_table);
-		msblk->xattr_id_table = NULL;
 		if (err != -ENOTSUPP)
 			goto failed_mount;
 	}
@@ -390,20 +413,24 @@ allocate_id_index_table:
 	next_table = le64_to_cpu(msblk->id_table[0]);
 
 	/* Handle inode lookup table */
-	lookup_table_start = le64_to_cpu(sblk->lookup_table_start);
-	if (lookup_table_start == SQUASHFS_INVALID_BLK)
+	msblk->lookup_table = le64_to_cpu(sblk->lookup_table_start);
+	if (msblk->lookup_table == SQUASHFS_INVALID_BLK)
 		goto handle_fragments;
 
 	/* Allocate and read inode lookup table */
-	msblk->inode_lookup_table = squashfs_read_inode_lookup_table(sb,
-		lookup_table_start, next_table, msblk->inodes);
-	if (IS_ERR(msblk->inode_lookup_table)) {
+	err = squashfs_read_inode_lookup_table(sb, msblk->lookup_table,
+			next_table, msblk->inodes);
+	if (err < 0) {
 		errorf(fc, "unable to read inode lookup table");
-		err = PTR_ERR(msblk->inode_lookup_table);
-		msblk->inode_lookup_table = NULL;
 		goto failed_mount;
 	}
-	next_table = le64_to_cpu(msblk->inode_lookup_table[0]);
+
+	err = squashfs_inode_lookup_start(sb, 1);
+	if (err < 0) {
+		errorf(fc, "unable to read inode lookup table");
+		goto failed_mount;
+	}
+	next_table = msblk->lookup_table_start = err;
 
 	sb->s_export_op = &squashfs_export_ops;
 
@@ -420,15 +447,19 @@ handle_fragments:
 	}
 
 	/* Allocate and read fragment index table */
-	msblk->fragment_index = squashfs_read_fragment_index_table(sb,
-		le64_to_cpu(sblk->fragment_table_start), next_table, fragments);
-	if (IS_ERR(msblk->fragment_index)) {
+	err = squashfs_read_fragment_index_table(sb, msblk->fragment_table,
+			next_table, fragments);
+	if (err < 0) {
 		errorf(fc, "unable to read fragment index table");
-		err = PTR_ERR(msblk->fragment_index);
-		msblk->fragment_index = NULL;
 		goto failed_mount;
 	}
-	next_table = le64_to_cpu(msblk->fragment_index[0]);
+
+	err = squashfs_frag_lookup_start(sb, 0);
+	if (err < 0) {
+		errorf(fc, "unable to read fragment index table");
+		goto failed_mount;
+	}
+	next_table = msblk->fragment_table_start = err;
 
 check_directory_table:
 	/* Sanity check directory_table */
@@ -436,6 +467,7 @@ check_directory_table:
 		err = -EINVAL;
 		goto insanity;
 	}
+	msblk->directory_table_end = next_table;
 
 	/* Sanity check inode_table */
 	if (msblk->inode_table >= msblk->directory_table) {
@@ -478,10 +510,10 @@ failed_mount:
 	if (msblk->cache_mapping)
 		iput(msblk->cache_mapping->host);
 	msblk->thread_ops->destroy(msblk);
-	kfree(msblk->inode_lookup_table);
-	kfree(msblk->fragment_index);
+	squashfs_free_inode_table(msblk);
+	squashfs_free_fragment_indexes(msblk);
 	kfree(msblk->id_table);
-	kfree(msblk->xattr_id_table);
+	squashfs_free_xattr_indexes(msblk);
 	kfree(sb->s_fs_info);
 	sb->s_fs_info = NULL;
 	kfree(sblk);
@@ -599,10 +631,10 @@ static void squashfs_put_super(struct super_block *sb)
 			iput(sbi->cache_mapping->host);
 		sbi->thread_ops->destroy(sbi);
 		kfree(sbi->id_table);
-		kfree(sbi->fragment_index);
+		squashfs_free_fragment_indexes(sbi);
 		kfree(sbi->meta_index);
-		kfree(sbi->inode_lookup_table);
-		kfree(sbi->xattr_id_table);
+		squashfs_free_inode_table(sbi);
+		squashfs_free_xattr_indexes(sbi);
 		kfree(sb->s_fs_info);
 		sb->s_fs_info = NULL;
 	}
