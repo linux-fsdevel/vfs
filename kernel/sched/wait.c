@@ -332,8 +332,12 @@ EXPORT_SYMBOL(prepare_to_wait_event);
  */
 int do_wait_intr(wait_queue_head_t *wq, wait_queue_entry_t *wait)
 {
-	if (likely(list_empty(&wait->entry)))
-		__add_wait_queue_entry_tail(wq, wait);
+	if (likely(list_empty(&wait->entry))) {
+		if (wait->flags & WQ_FLAG_EXCLUSIVE)
+			__add_wait_queue_entry_tail(wq, wait);
+		else
+			__add_wait_queue(wq, wait);
+	}
 
 	set_current_state(TASK_INTERRUPTIBLE);
 	if (signal_pending(current))
@@ -349,8 +353,12 @@ EXPORT_SYMBOL(do_wait_intr);
 
 int do_wait_intr_irq(wait_queue_head_t *wq, wait_queue_entry_t *wait)
 {
-	if (likely(list_empty(&wait->entry)))
-		__add_wait_queue_entry_tail(wq, wait);
+	if (likely(list_empty(&wait->entry))) {
+		if (wait->flags & WQ_FLAG_EXCLUSIVE)
+			__add_wait_queue_entry_tail(wq, wait);
+		else
+			__add_wait_queue(wq, wait);
+	}
 
 	set_current_state(TASK_INTERRUPTIBLE);
 	if (signal_pending(current))
