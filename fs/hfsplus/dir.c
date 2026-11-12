@@ -135,10 +135,16 @@ static int hfsplus_readdir(struct file *file, struct dir_context *ctx)
 	char *strbuf;
 	hfsplus_cat_entry entry;
 	struct hfs_find_data fd;
-	struct hfsplus_readdir_data *rd;
+	struct hfsplus_readdir_data *rd = file->private_data;
+	/*
+	 * i_size follows the valence and drops on unlink, so it says nothing
+	 * about a walk that continues from a saved key. That walk ends where
+	 * the records of this directory end.
+	 */
+	bool resume = rd && rd->pos == file->f_pos;
 	u16 type;
 
-	if (file->f_pos >= inode->i_size)
+	if (!resume && file->f_pos >= inode->i_size)
 		return 0;
 
 	err = hfs_find_init(HFSPLUS_SB(sb)->cat_tree, &fd);
@@ -183,10 +189,9 @@ static int hfsplus_readdir(struct file *file, struct dir_context *ctx)
 			goto out;
 		ctx->pos = 2;
 	}
-	if (ctx->pos >= inode->i_size)
+	if (!resume && ctx->pos >= inode->i_size)
 		goto out;
-	rd = file->private_data;
-	if (rd && rd->pos == ctx->pos) {
+	if (resume) {
 		memcpy(fd.search_key, &rd->key, sizeof(struct hfsplus_cat_key));
 		err = hfs_brec_find(&fd, hfs_find_rec_by_key);
 		if (err == -ENOENT)
@@ -195,9 +200,11 @@ static int hfsplus_readdir(struct file *file, struct dir_context *ctx)
 		err = hfs_brec_goto(&fd, ctx->pos - 1);
 	}
 	if (err)
-		goto out;
+		goto end_walk;
 	for (;;) {
 		if (be32_to_cpu(fd.key->cat.parent) != inode->i_ino) {
+			if (resume)
+				goto out;
 			pr_err("walked past end of dir\n");
 			err = -EIO;
 			goto out;
@@ -263,11 +270,11 @@ static int hfsplus_readdir(struct file *file, struct dir_context *ctx)
 		}
 next:
 		ctx->pos++;
-		if (ctx->pos >= inode->i_size)
+		if (!resume && ctx->pos >= inode->i_size)
 			goto out;
 		err = hfs_brec_goto(&fd, 1);
 		if (err)
-			goto out;
+			goto end_walk;
 	}
 	if (!rd) {
 		rd = kmalloc_obj(struct hfsplus_readdir_data);
@@ -279,6 +286,10 @@ next:
 	}
 	rd->pos = ctx->pos;
 	memcpy(&rd->key, fd.key, sizeof(struct hfsplus_cat_key));
+end_walk:
+	/* This directory can hold the last records of the catalog. */
+	if (resume && err == -ENOENT)
+		err = 0;
 out:
 	kfree(strbuf);
 	hfs_find_exit(&fd);
