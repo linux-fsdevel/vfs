@@ -1433,7 +1433,7 @@ bool has_bh_in_lru(int cpu, void *dummy)
 	int i;
 	
 	for (i = 0; i < BH_LRU_SIZE; i++) {
-		if (b->bhs[i])
+		if (data_race(b->bhs[i]))
 			return true;
 	}
 
