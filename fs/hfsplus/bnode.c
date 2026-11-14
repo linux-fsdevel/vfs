@@ -84,8 +84,8 @@ void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off)
 	else
 		key_len = tree->max_key_len + 2;
 
-	if (key_len > sizeof(hfsplus_btree_key) || key_len < 1) {
-		memset(key, 0, sizeof(hfsplus_btree_key));
+	if (key_len > tree->max_key_len + 2 || key_len < 1) {
+		memset(key, 0, tree->max_key_len + 2);
 		pr_err("hfsplus: Invalid key length: %u\n", key_len);
 		return;
 	}
