@@ -259,7 +259,9 @@ static int lo_fallocate(struct loop_device *lo, struct request *rq, loff_t pos,
 	if (!bdev_max_discard_sectors(lo->lo_device))
 		return -EOPNOTSUPP;
 
+	file_start_write(file);
 	ret = file->f_op->fallocate(file, mode, pos, blk_rq_bytes(rq));
+	file_end_write(file);
 	if (unlikely(ret && ret != -EINVAL && ret != -EOPNOTSUPP))
 		return -EIO;
 

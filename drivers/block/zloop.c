@@ -513,6 +513,10 @@ static void zloop_rw_complete(struct kiocb *iocb, long ret)
 {
 	struct zloop_cmd *cmd = container_of(iocb, struct zloop_cmd, iocb);
 
+	/* A queued write still holds freeze protection. */
+	if (req_op(blk_mq_rq_from_pdu(cmd)) != REQ_OP_READ)
+		kiocb_end_write(iocb);
+
 	cmd->ret = ret;
 	zloop_put_cmd(cmd);
 }
@@ -526,6 +530,7 @@ static int zloop_do_rw(struct zloop_cmd *cmd)
 	struct zloop_zone *zone = &zlo->zones[rq_zone_no(rq)];
 	struct req_iterator rq_iter;
 	struct iov_iter iter;
+	int ret;
 
 	if (rq->bio != rq->biotail) {
 		struct bio_vec tmp, *bvec;
@@ -565,9 +570,14 @@ static int zloop_do_rw(struct zloop_cmd *cmd)
 		cmd->iocb.ki_flags = IOCB_DIRECT;
 	cmd->iocb.ki_ioprio = IOPRIO_PRIO_VALUE(IOPRIO_CLASS_NONE, 0);
 
-	if (rw == ITER_SOURCE)
-		return zone->file->f_op->write_iter(&cmd->iocb, &iter);
-	return zone->file->f_op->read_iter(&cmd->iocb, &iter);
+	if (rw == ITER_DEST)
+		return zone->file->f_op->read_iter(&cmd->iocb, &iter);
+
+	kiocb_start_write(&cmd->iocb);
+	ret = zone->file->f_op->write_iter(&cmd->iocb, &iter);
+	if (ret != -EIOCBQUEUED)
+		kiocb_end_write(&cmd->iocb);
+	return ret;
 }
 
 static int zloop_seq_write_prep(struct zloop_cmd *cmd)
@@ -682,8 +692,10 @@ static void zloop_rw(struct zloop_cmd *cmd)
 		ret = zloop_do_rw(cmd);
 	}
 out:
-	if (ret != -EIOCBQUEUED)
-		zloop_rw_complete(&cmd->iocb, ret);
+	if (ret != -EIOCBQUEUED) {
+		cmd->ret = ret;
+		zloop_put_cmd(cmd);
+	}
 	zloop_put_cmd(cmd);
 }
 
@@ -710,8 +722,13 @@ static int zloop_record_safe_wps(struct zloop_device *zlo)
 
 		if (!zloop_zone_is_active(zone))
 			continue;
-		ret = vfs_setxattr(file_mnt_idmap(file), file_dentry(file),
-				"user.zloop.wp", &zone->wp, sizeof(zone->wp), 0);
+		ret = mnt_want_write_file(file);
+		if (!ret) {
+			ret = vfs_setxattr(file_mnt_idmap(file),
+					file_dentry(file), "user.zloop.wp",
+					&zone->wp, sizeof(zone->wp), 0);
+			mnt_drop_write_file(file);
+		}
 		if (ret) {
 			pr_err("%pg: failed to record write pointer (%d)\n",
 				zlo->disk->part0, ret);
