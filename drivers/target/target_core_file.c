@@ -246,6 +246,7 @@ struct target_core_file_cmd {
 	unsigned long	len;
 	struct se_cmd	*cmd;
 	refcount_t	ref;
+	bool		is_write;
 	struct kiocb	iocb;
 	struct bio_vec	bvecs[];
 };
@@ -256,18 +257,27 @@ static void cmd_rw_aio_put(struct target_core_file_cmd *cmd)
 		kfree(cmd);
 }
 
-static void cmd_rw_aio_complete(struct kiocb *iocb, long ret)
+static void cmd_rw_aio_done(struct target_core_file_cmd *cmd, long ret)
 {
-	struct target_core_file_cmd *cmd;
-
-	cmd = container_of(iocb, struct target_core_file_cmd, iocb);
-
 	if (ret != cmd->len)
 		target_complete_cmd(cmd->cmd, SAM_STAT_CHECK_CONDITION);
 	else
 		target_complete_cmd(cmd->cmd, SAM_STAT_GOOD);
 
 	cmd_rw_aio_put(cmd);
+}
+
+static void cmd_rw_aio_complete(struct kiocb *iocb, long ret)
+{
+	struct target_core_file_cmd *cmd;
+
+	cmd = container_of(iocb, struct target_core_file_cmd, iocb);
+
+	/* A queued write still holds freeze protection. */
+	if (cmd->is_write)
+		kiocb_end_write(iocb);
+
+	cmd_rw_aio_done(cmd, ret);
 }
 
 static sense_reason_t
@@ -300,6 +310,7 @@ fd_execute_rw_aio(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	refcount_set(&aio_cmd->ref, 2);
 	aio_cmd->cmd = cmd;
 	aio_cmd->len = len;
+	aio_cmd->is_write = is_write;
 	aio_cmd->iocb.ki_pos = cmd->t_task_lba * dev->dev_attrib.block_size;
 	aio_cmd->iocb.ki_filp = file;
 	aio_cmd->iocb.ki_complete = cmd_rw_aio_complete;
@@ -308,13 +319,17 @@ fd_execute_rw_aio(struct se_cmd *cmd, struct scatterlist *sgl, u32 sgl_nents,
 	if (is_write && (cmd->se_cmd_flags & SCF_FUA))
 		aio_cmd->iocb.ki_flags |= IOCB_DSYNC;
 
-	if (is_write)
+	if (is_write) {
+		kiocb_start_write(&aio_cmd->iocb);
 		ret = file->f_op->write_iter(&aio_cmd->iocb, &iter);
-	else
+		if (ret != -EIOCBQUEUED)
+			kiocb_end_write(&aio_cmd->iocb);
+	} else {
 		ret = file->f_op->read_iter(&aio_cmd->iocb, &iter);
+	}
 
 	if (ret != -EIOCBQUEUED)
-		cmd_rw_aio_complete(&aio_cmd->iocb, ret);
+		cmd_rw_aio_done(aio_cmd, ret);
 	cmd_rw_aio_put(aio_cmd);
 
 	return 0;
