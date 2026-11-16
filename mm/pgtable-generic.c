@@ -302,7 +302,7 @@ pte_t *__pte_offset_map(pmd_t *pmd, unsigned long addr, pmd_t *pmdvalp)
 		pmd_clear_bad(pmd);
 		goto nomap;
 	}
-	return __pte_map(&pmdval, addr);
+	return pte_offset_kernel(&pmdval, addr);
 nomap:
 	rcu_read_unlock();
 	return NULL;
@@ -341,11 +341,11 @@ pte_t *pte_offset_map_rw_nolock(struct mm_struct *mm, pmd_t *pmd,
  * for read (or for write). In a few cases, it may be used with pmd pointing to
  * a pmd_t already copied to or constructed on the stack.
  *
- * When successful, it returns the pte pointer for addr, with its page table
- * kmapped if necessary (when CONFIG_HIGHPTE), and locked against concurrent
- * modification by software, with a pointer to that spinlock in ptlp (in some
- * configs mm->page_table_lock, in SPLIT_PTLOCK configs a spinlock in table's
- * struct page).  pte_unmap_unlock(pte, ptl) to unlock and unmap afterwards.
+ * When successful, it returns the pte pointer for addr, locked against
+ * concurrent modification by software, with a pointer to that spinlock in ptlp
+ * (in some configs mm->page_table_lock, in SPLIT_PTLOCK configs a spinlock in
+ * table's struct page).  pte_unmap_unlock(pte, ptl) to unlock and unmap
+ * afterwards.
  *
  * But it is unsuccessful, returning NULL with *ptlp unchanged, if there is no
  * page table at *pmd: if, for example, the page table has just been removed,
@@ -354,13 +354,12 @@ pte_t *pte_offset_map_rw_nolock(struct mm_struct *mm, pmd_t *pmd,
  * page table can be safely removed or replaced by THP while holding its lock.)
  *
  * pte_offset_map(pmd, addr), and its internal helper __pte_offset_map() above,
- * just returns the pte pointer for addr, its page table kmapped if necessary;
- * or NULL if there is no page table at *pmd.  It does not attempt to lock the
- * page table, so cannot normally be used when the page table is to be updated,
- * or when entries read must be stable.  But it does take rcu_read_lock(): so
- * that even when page table is racily removed, it remains a valid though empty
- * and disconnected table.  Until pte_unmap(pte) unmaps and rcu_read_unlock()s
- * afterwards.
+ * just returns the pte pointer for addr, or NULL if there is no page table at
+ * *pmd.  It does not attempt to lock the page table, so cannot normally be
+ * used when the page table is to be updated, or when entries read must be
+ * stable.  But it does take rcu_read_lock(): so that even when page table is
+ * racily removed, it remains a valid though empty and disconnected table.
+ * Until pte_unmap(pte) unmaps and rcu_read_unlock()s afterwards.
  *
  * pte_offset_map_ro_nolock(mm, pmd, addr, ptlp), above, is like pte_offset_map();
  * but when successful, it also outputs a pointer to the spinlock in ptlp - as
