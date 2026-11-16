@@ -190,6 +190,7 @@ locks_get_lock_context(struct inode *inode, int type)
 	INIT_LIST_HEAD(&ctx->flc_flock);
 	INIT_LIST_HEAD(&ctx->flc_posix);
 	INIT_LIST_HEAD(&ctx->flc_lease);
+	ctx->flc_deleg_blocked_until = 0;
 
 	/*
 	 * Assign the pointer if it's not already assigned. If it is, then
@@ -1705,8 +1706,11 @@ int __break_lease(struct inode *inode, unsigned int flags)
 
 	time_out_leases(inode, &dispose);
 
-	if (!first_visible_lease(inode, new_fl, flags))
+	if (!first_visible_lease(inode, new_fl, flags)) {
+		if (type == FL_DELEG && (flags & LEASE_BREAK_NONBLOCK))
+			ctx->flc_deleg_blocked_until = 0;
 		goto out;
+	}
 
 	break_time = 0;
 	if (lease_break_time > 0) {
@@ -1738,6 +1742,10 @@ int __break_lease(struct inode *inode, unsigned int flags)
 	fl = first_visible_lease(inode, new_fl, flags);
 	if (!fl)
 		goto out;
+
+	if (type == FL_DELEG && lease_break_time > 0)
+		ctx->flc_deleg_blocked_until = get_jiffies_64() +
+					       2 * (u64)lease_break_time * HZ;
 
 	if (flags & LEASE_BREAK_NONBLOCK) {
 		trace_break_lease_noblock(inode, new_fl);
@@ -1790,6 +1798,15 @@ free_lock:
 	return error;
 }
 EXPORT_SYMBOL(__break_lease);
+
+void locks_unblock_deleg(struct file_lock_context *ctx)
+{
+	spin_lock(&ctx->flc_lock);
+	if (list_empty(&ctx->flc_lease))
+		ctx->flc_deleg_blocked_until = 0;
+	spin_unlock(&ctx->flc_lock);
+}
+EXPORT_SYMBOL(locks_unblock_deleg);
 
 /**
  *	lease_get_mtime - update modified time of an inode with exclusive lease
@@ -1966,6 +1983,11 @@ generic_add_lease(struct file *filp, int arg, struct file_lease **flp, void **pr
 
 	error = -EINVAL;
 	if (!leases_enable)
+		goto out;
+
+	error = -EAGAIN;
+	if (is_deleg && lease->fl_lmops == &lease_manager_ops &&
+	    time_before64(get_jiffies_64(), ctx->flc_deleg_blocked_until))
 		goto out;
 
 	locks_insert_lock_ctx(&lease->c, &ctx->flc_lease);
