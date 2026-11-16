@@ -230,8 +230,8 @@ _GLOBAL(kvmppc_resume_host)
 #endif
 
 	/* Restore host IVPR before re-enabling interrupts. We cheat and know
-	 * that Linux IVPR is always 0xc0000000. */
-	lis	r3, 0xc000
+	 * that Linux IVPR is always PAGE_OFFSET. */
+	lis	r3, PAGE_OFFSET >> 16
 	mtspr	SPRN_IVPR, r3
 
 	/* Switch to kernel stack and jump to handler. */

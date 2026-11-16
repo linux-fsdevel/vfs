@@ -1747,11 +1747,7 @@ out:
 		folio_unlock(src_folio);
 		folio_put(src_folio);
 	}
-	/*
-	 * Unmap in reverse order (LIFO) to maintain proper kmap_local
-	 * index ordering when CONFIG_HIGHPTE is enabled. We mapped dst_pte
-	 * first, then src_pte, so we must unmap src_pte first, then dst_pte.
-	 */
+
 	if (src_pte)
 		pte_unmap(src_pte);
 	if (dst_pte)

@@ -115,7 +115,8 @@ static u32 get_host_mas0(unsigned long eaddr)
 	mtspr(SPRN_MAS6, 0);
 	mas4 = mfspr(SPRN_MAS4);
 	mtspr(SPRN_MAS4, mas4 & ~MAS4_TLBSEL_MASK);
-	asm volatile("tlbsx 0, %0" : : "b" (eaddr & ~CONFIG_PAGE_OFFSET));
+	asm volatile("tlbsx 0, %0" :
+		: "b" (eaddr & (rounddown_pow_of_two(PAGE_OFFSET)-1)));
 	mas0 = mfspr(SPRN_MAS0);
 	mtspr(SPRN_MAS4, mas4);
 	local_irq_restore(flags);
