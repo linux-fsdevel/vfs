@@ -158,6 +158,7 @@ struct file_lock_context {
 	struct list_head	flc_flock;
 	struct list_head	flc_posix;
 	struct list_head	flc_lease;
+	u64			flc_deleg_blocked_until;
 };
 
 #ifdef CONFIG_FILE_LOCKING
@@ -229,6 +230,7 @@ void locks_init_lease(struct file_lease *);
 void locks_free_lease(struct file_lease *fl);
 struct file_lease *locks_alloc_lease(void);
 int __break_lease(struct inode *inode, unsigned int flags);
+void locks_unblock_deleg(struct file_lock_context *ctx);
 void lease_get_mtime(struct inode *, struct timespec64 *time);
 int generic_setlease(struct file *, int, struct file_lease **, void **priv);
 int kernel_setlease(struct file *, int, struct file_lease **, void **);
@@ -510,6 +512,9 @@ static inline int break_deleg(struct inode *inode, unsigned int flags)
 		flags |= LEASE_BREAK_DELEG;
 		return __break_lease(inode, flags);
 	}
+	if ((flags & LEASE_BREAK_NONBLOCK) &&
+	    READ_ONCE(flctx->flc_deleg_blocked_until))
+		locks_unblock_deleg(flctx);
 	return 0;
 }
 
