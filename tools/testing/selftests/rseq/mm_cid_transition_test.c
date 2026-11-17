@@ -20,21 +20,28 @@
  * A second case starts on two CPUs and widens the affinity of a thread
  * while the others count.
  *
+ * A third case leaves the affinity changes to another process. It narrows
+ * and widens every thread in a loop, while the threads count, call
+ * vfork(2) and then exit with their process.
+ *
  * The test fails when counts are lost, or when an mm_cid is not below the
  * number of possible CPUs. A kernel that loops looking for a free ID
  * shows as a timeout.
  */
 
 #define _GNU_SOURCE
+#include <dirent.h>
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <sched.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/prctl.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -266,6 +273,59 @@ static int run_child_widen(int delay_us)
 	return check_counts("affinity change");
 }
 
+/*
+ * Narrow and widen the affinity of every thread of @pid in a loop, from
+ * another process. Start after @delay_us and run until @pid exits.
+ */
+static void remote_setter(pid_t pid, int delay_us, const cpu_set_t *narrow)
+{
+	bool widen = true;
+	char path[64];
+
+	/* Die with the process under test, not before its exit. */
+	prctl(PR_SET_PDEATHSIG, SIGKILL);
+	snprintf(path, sizeof(path), "/proc/%d/task", pid);
+	usleep(delay_us);
+	while (getppid() == pid) {
+		DIR *dir = opendir(path);
+		struct dirent *de;
+
+		if (!dir)
+			break;
+		while ((de = readdir(dir))) {
+			pid_t tid = atoi(de->d_name);
+
+			/* A thread can exit first: ESRCH is expected. */
+			if (tid > 0)
+				sched_setaffinity(tid, sizeof(all_cpus),
+						  widen ? &all_cpus : narrow);
+		}
+		closedir(dir);
+		widen = !widen;
+	}
+	_exit(0);
+}
+
+/* Run one round while another process changes the affinity of the threads. */
+static int run_child_remote(int delay_us)
+{
+	pid_t self = getpid(), setter;
+	cpu_set_t narrow;
+
+	if (sched_getaffinity(0, sizeof(narrow), &narrow))
+		return CHILD_ERROR;
+	init_workers();
+	setter = fork();
+	if (setter < 0)
+		return CHILD_ERROR;
+	if (!setter)
+		remote_setter(self, delay_us, &narrow);
+	if (run_round(3, -1))
+		return CHILD_ERROR;
+	/* The setter keeps running while this process exits. */
+	return check_counts("affinity change by another process");
+}
+
 static int read_nr_possible(void)
 {
 	int first, last, total = 0;
@@ -343,7 +403,7 @@ int main(void)
 	int status, i;
 
 	ksft_print_header();
-	ksft_set_plan(3);
+	ksft_set_plan(4);
 
 	if (!rseq_available())
 		ksft_exit_skip("rseq is unavailable\n");
@@ -371,5 +431,12 @@ int main(void)
 			break;
 	}
 	ksft_test_result(status == CHILD_PASS, "affinity change widens the allowed CPUs\n");
+
+	for (i = 0; i < WIDEN_RUNS; i++) {
+		status = run_under_test(run_child_remote, (i * 13) % ROUND_US, &narrow);
+		if (status != CHILD_PASS)
+			break;
+	}
+	ksft_test_result(status == CHILD_PASS, "affinity changed by another process\n");
 	ksft_finished();
 }
