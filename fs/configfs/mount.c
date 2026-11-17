@@ -60,6 +60,15 @@ static struct configfs_dirent configfs_root = {
 	.s_iattr	= NULL,
 };
 
+/*
+ * configfs_depend_item_unlocked() takes the root inode's lock while a
+ * subsystem's own locks may be held, but nothing takes a subsystem lock
+ * while holding the root inode's lock.  Directories created by mkdir(2)
+ * share the default i_rwsem class and are locked before their subsystem's
+ * su_mutex, so give the root inode a class of its own.
+ */
+static struct lock_class_key configfs_root_inode_class;
+
 static int configfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	struct inode *inode;
@@ -76,6 +85,7 @@ static int configfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (inode) {
 		inode->i_op = &configfs_root_inode_operations;
 		inode->i_fop = &configfs_dir_operations;
+		lockdep_set_class(&inode->i_rwsem, &configfs_root_inode_class);
 		/* directory inodes start off with i_nlink == 2 (for "." entry) */
 		inc_nlink(inode);
 	} else {
