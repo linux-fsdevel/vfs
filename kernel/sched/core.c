@@ -11033,7 +11033,11 @@ static void sched_mm_cid_fork(struct task_struct *t)
 	struct mm_struct *mm = t->mm;
 	bool percpu = false, flip = false;
 
-	if (!mm)
+	/*
+	 * A user worker (io_uring, vhost) never returns to user space and
+	 * has no rseq area. It needs no CID.
+	 */
+	if (!mm || (t->flags & PF_USER_WORKER))
 		return;
 
 	WARN_ON_ONCE(t->mm_cid.cid != MM_CID_UNSET);
