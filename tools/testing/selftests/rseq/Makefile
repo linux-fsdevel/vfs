@@ -21,7 +21,8 @@ OVERRIDE_TARGETS = 1
 TEST_GEN_PROGS = basic_test basic_percpu_ops_test basic_percpu_ops_mm_cid_test \
 		 param_test_benchmark param_test_mm_cid_benchmark \
 		 mm_cid_execve_test mm_cid_transition_test \
-		 mm_cid_bound_test mm_cid_exec_affinity_test
+		 mm_cid_bound_test mm_cid_exec_affinity_test \
+		 mm_cid_window_test
 
 TEST_GEN_PROGS_EXTENDED = librseq.so \
 	param_test \

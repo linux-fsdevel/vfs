@@ -13,6 +13,7 @@ mm_cid_bound_test
 mm_cid_execve_test
 mm_cid_transition_test
 mm_cid_exec_affinity_test
+mm_cid_window_test
 syscall_errors_test
 slice_test
 legacy_check
