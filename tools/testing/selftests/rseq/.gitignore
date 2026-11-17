@@ -10,6 +10,7 @@ param_test_mm_cid
 param_test_mm_cid_benchmark
 param_test_mm_cid_compare_twice
 mm_cid_execve_test
+mm_cid_transition_test
 syscall_errors_test
 slice_test
 legacy_check
