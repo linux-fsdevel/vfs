@@ -28,6 +28,11 @@
  * The number of IDs follows the union of the allowed CPUs of the threads,
  * which only grows. The affinity is therefore narrowed before the fork(2)
  * that creates the process under test.
+ *
+ * A last case widens the affinity. Three threads start on two CPUs, so the
+ * CPUs own the IDs. The threads are then allowed on all CPUs. The kernel
+ * aims at giving the IDs back to the tasks, so that three threads read an
+ * mm_cid below 3. That is a target too: the case prints when it is missed.
  */
 
 #define _GNU_SOURCE
@@ -46,6 +51,9 @@
 
 #define MAX_THREADS	1024
 #define MAX_STEPS	64
+#define WIDEN_THREADS	3
+#define WIDEN_MIN_CPUS	8
+#define WIDEN_SETTLE_US	20000
 
 /*
  * Exit status of the process under test: a mask of the bound and of the
@@ -67,6 +75,7 @@ struct worker {
 static struct worker workers[MAX_THREADS];
 static unsigned int epoch;
 static cpu_set_t allowed;
+static cpu_set_t all_cpus;
 static int nr_allowed;
 static int nr_possible;
 
@@ -228,6 +237,49 @@ static int run_child(const int *steps, int nr_steps)
 	return ret;
 }
 
+/*
+ * The process under test of the widening case. It starts on two CPUs.
+ * Return a mask of the OVER_* values.
+ */
+static int run_child_widen(void)
+{
+	int nr_workers = 0, ret = 0, cpu, err;
+	unsigned int cid;
+
+	if (sched_getaffinity(0, sizeof(allowed), &allowed))
+		return CHILD_ERROR;
+	nr_allowed = CPU_COUNT(&allowed);
+
+	err = set_workers(&nr_workers, WIDEN_THREADS - 1);
+	if (err)
+		return CHILD_ERROR;
+	measure(nr_workers, &cpu);
+	cid = measure(nr_workers, &cpu);
+	ksft_print_msg("%4d threads on %d CPUs: largest mm_cid %u on CPU %d\n",
+		       WIDEN_THREADS, nr_allowed, cid, cpu);
+
+	/* Each thread widens its own affinity at the end of its next tour. */
+	allowed = all_cpus;
+	nr_allowed = CPU_COUNT(&allowed);
+	if (sched_setaffinity(0, sizeof(allowed), &allowed))
+		ret |= CHILD_ERROR;
+	measure(nr_workers, &cpu);
+	/* The kernel changes the owners of the IDs from a work item. */
+	usleep(WIDEN_SETTLE_US);
+	measure(nr_workers, &cpu);
+	cid = measure(nr_workers, &cpu);
+	if (cid >= (unsigned int)nr_possible)
+		ret |= OVER_POSSIBLE;
+	if (cid >= WIDEN_THREADS)
+		ret |= OVER_STRICT;
+	ksft_print_msg("%4d threads widened to %d CPUs: largest mm_cid %u on CPU %d%s\n",
+		       WIDEN_THREADS, nr_allowed, cid, cpu,
+		       ret & OVER_STRICT ? ", above the thread count target" : "");
+	if (set_workers(&nr_workers, 0))
+		ret |= CHILD_ERROR;
+	return ret;
+}
+
 /* Keep the first @nr CPUs of @src in @dst. */
 static int narrow_cpus(cpu_set_t *dst, const cpu_set_t *src, int nr)
 {
@@ -326,13 +378,46 @@ static void test_ramp(const cpu_set_t *all, int cpus, const char *name)
 			 "%s: below the possible CPUs\n", name);
 }
 
+static void test_widen(const cpu_set_t *all)
+{
+	const char *name = "widened from 2 CPUs: below the possible CPUs";
+	cpu_set_t narrow;
+	int status = 0;
+	pid_t child;
+
+	/* With fewer CPUs the kernel keeps the CPUs as owners of the IDs. */
+	if (CPU_COUNT(all) < WIDEN_MIN_CPUS || nr_possible < WIDEN_MIN_CPUS) {
+		ksft_test_result_skip("%s: fewer than %d CPUs\n", name, WIDEN_MIN_CPUS);
+		return;
+	}
+	narrow_cpus(&narrow, all, 2);
+	all_cpus = *all;
+	if (sched_setaffinity(0, sizeof(narrow), &narrow))
+		ksft_exit_fail_msg("sched_setaffinity: %s\n", strerror(errno));
+	child = fork();
+	if (!child)
+		_exit(run_child_widen());
+	if (child < 0)
+		ksft_exit_fail_msg("fork: %s\n", strerror(errno));
+	if (sched_setaffinity(0, sizeof(*all), all))
+		ksft_exit_fail_msg("sched_setaffinity: %s\n", strerror(errno));
+	if (waitpid(child, &status, 0) != child)
+		ksft_exit_fail_msg("waitpid: %s\n", strerror(errno));
+	if (!WIFEXITED(status) || (WEXITSTATUS(status) & CHILD_ERROR))
+		ksft_exit_fail_msg("the process under test failed to run\n");
+	/* The thread count is a target. Only the bound decides the result. */
+	if (WEXITSTATUS(status) & OVER_STRICT)
+		ksft_print_msg("widened from 2 CPUs: above the thread count target\n");
+	ksft_test_result(!(WEXITSTATUS(status) & OVER_POSSIBLE), "%s\n", name);
+}
+
 int main(void)
 {
 	cpu_set_t all;
 	int nr_all;
 
 	ksft_print_header();
-	ksft_set_plan(3);
+	ksft_set_plan(4);
 
 	if (!rseq_available())
 		ksft_exit_skip("rseq is unavailable\n");
@@ -351,5 +436,6 @@ int main(void)
 	test_ramp(&all, 2, "2 CPUs");
 	test_ramp(&all, 4, "4 CPUs");
 	test_ramp(&all, nr_all, "all CPUs");
+	test_widen(&all);
 	ksft_finished();
 }
