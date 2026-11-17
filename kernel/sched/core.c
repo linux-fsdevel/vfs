@@ -11019,10 +11019,19 @@ static bool sched_mm_cid_add_user(struct task_struct *t, struct mm_struct *mm)
 	return mm_update_max_cids(mm);
 }
 
+/*
+ * Make @t a user of the CIDs of its mm. Called on fork(2) and on
+ * execve(2). A failed execve(2) rejoins the mm it left.
+ *
+ * In per CPU mode a new user gets no CID here. It takes the CID of its
+ * CPU when it is scheduled in. A task that joins while it is running
+ * returns to user space before that, so it takes its CID here. This is
+ * the case of a failed execve(2) when the mm has other users.
+ */
 static void sched_mm_cid_fork(struct task_struct *t)
 {
 	struct mm_struct *mm = t->mm;
-	bool percpu;
+	bool percpu = false, flip = false;
 
 	if (!mm)
 		return;
@@ -11045,10 +11054,14 @@ static void sched_mm_cid_fork(struct task_struct *t)
 		if (!sched_mm_cid_add_user(t, mm)) {
 			if (!cid_on_cpu(mm->mm_cid.mode))
 				t->mm_cid.cid = mm_get_cid(mm);
-			return;
+			break;
 		}
 
-		/* Handle the mode change and transfer current's CID */
+		/*
+		 * Handle the mode change and transfer current's CID. A
+		 * running joiner has no CID yet. It takes one below.
+		 */
+		flip = true;
 		percpu = cid_on_cpu(mm->mm_cid.mode);
 		if (!percpu)
 			mm_cid_transit_to_task(current, pcp);
@@ -11056,11 +11069,25 @@ static void sched_mm_cid_fork(struct task_struct *t)
 			mm_cid_transit_to_cpu(current, pcp);
 	}
 
-	if (percpu) {
-		mm_cid_fixup_tasks_to_cpus();
-	} else {
-		mm_cid_fixup_cpus_to_tasks(mm);
-		t->mm_cid.cid = mm_get_cid(mm);
+	if (flip) {
+		if (percpu) {
+			mm_cid_fixup_tasks_to_cpus();
+		} else {
+			mm_cid_fixup_cpus_to_tasks(mm);
+			/*
+			 * A running joiner may have taken a CID at a
+			 * schedule in. If not, it takes one below.
+			 */
+			if (t != current)
+				t->mm_cid.cid = mm_get_cid(mm);
+		}
+	}
+
+	/* A running joiner with no CID takes one now, see above. */
+	if (t == current) {
+		guard(task_rq_lock)(t);
+		if (t->mm_cid.cid == MM_CID_UNSET)
+			mm_cid_schedin(t);
 	}
 }
 
