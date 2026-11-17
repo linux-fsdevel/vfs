@@ -11087,7 +11087,16 @@ static void sched_mm_cid_fork(struct task_struct *t)
 			return;
 		}
 
-		if (!sched_mm_cid_add_user(t, mm)) {
+		flip = sched_mm_cid_add_user(t, mm);
+		/*
+		 * A running joiner takes no CID at a schedule in before the
+		 * fixups are done. The users it joins can hold every CID
+		 * until then, and the fixups are its own work.
+		 */
+		if (t == current)
+			t->mm_cid.active = 0;
+
+		if (!flip) {
 			if (!cid_on_cpu(mm->mm_cid.mode))
 				t->mm_cid.cid = mm_get_cid(mm);
 			break;
@@ -11097,7 +11106,6 @@ static void sched_mm_cid_fork(struct task_struct *t)
 		 * Handle the mode change and transfer current's CID. A
 		 * running joiner has no CID yet. It takes one below.
 		 */
-		flip = true;
 		percpu = cid_on_cpu(mm->mm_cid.mode);
 		if (!percpu)
 			mm_cid_transit_to_task(current, pcp);
@@ -11110,18 +11118,16 @@ static void sched_mm_cid_fork(struct task_struct *t)
 			mm_cid_fixup_tasks_to_cpus();
 		} else {
 			mm_cid_fixup_cpus_to_tasks(mm);
-			/*
-			 * A running joiner may have taken a CID at a
-			 * schedule in. If not, it takes one below.
-			 */
+			/* A running joiner takes its CID below. */
 			if (t != current)
 				t->mm_cid.cid = mm_get_cid(mm);
 		}
 	}
 
-	/* A running joiner with no CID takes one now, see above. */
+	/* The running joiner takes part from here on, see above. */
 	if (t == current) {
 		guard(task_rq_lock)(t);
+		t->mm_cid.active = 1;
 		if (t->mm_cid.cid == MM_CID_UNSET)
 			mm_cid_schedin(t);
 	}
