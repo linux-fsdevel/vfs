@@ -893,6 +893,13 @@ static int pidfd_getfd(struct pid *pid, int fd)
 	struct file *file;
 	int ret;
 
+	/*
+	 * Require the target to be visible in the caller's pid namespace,
+	 * like the pidfs ioctls that grant access to its resources.
+	 */
+	if (!pid_vnr(pid))
+		return -EREMOTE;
+
 	task = get_pid_task(pid, PIDTYPE_PID);
 	if (!task)
 		return -ESRCH;
@@ -917,9 +924,10 @@ static int pidfd_getfd(struct pid *pid, int fd)
  *
  * This syscall gets a copy of a file descriptor from another process
  * based on the pidfd, and file descriptor number. It requires that
- * the calling process has the ability to ptrace the process represented
- * by the pidfd. The process which is having its file descriptor copied
- * is otherwise unaffected.
+ * the process represented by the pidfd is visible in the caller's pid
+ * namespace and that the calling process has the ability to ptrace it.
+ * The process which is having its file descriptor copied is otherwise
+ * unaffected.
  *
  * Return: On success, a cloexec file descriptor is returned.
  *         On error, a negative errno number will be returned.
