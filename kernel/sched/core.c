@@ -10880,6 +10880,10 @@ static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpu
 	 */
 	mc = &mm->mm_cid;
 	guard(raw_spinlock)(&mc->lock);
+	/* Might have raced with exit() */
+	if (!mm->mm_cid.users)
+		return;
+
 	mm_allowed = mm_cpus_allowed(mm);
 	weight = cpumask_weighted_or(mm_allowed, mm_allowed, affmsk);
 	if (weight == mc->nr_cpus_allowed)
@@ -11020,6 +11024,33 @@ static bool sched_mm_cid_add_user(struct task_struct *t, struct mm_struct *mm)
 }
 
 /*
+ * sched_mm_cid_exit() does not handle the mode switch for the last user
+ * because for normal exit() that's a pointless exercise. But if the
+ * process which issued execve() was multithreaded and the last exiting
+ * thread switched back from per CPU mode then this leaves stale state
+ * around. The indicator for that is mm_cid::mode having MM_CID_TRANSIT
+ * set.
+ */
+static void sched_mm_cid_cleanup_execve(struct task_struct *t, struct mm_struct *mm)
+{
+	if (likely(!mm->mm_cid.mode))
+		return;
+
+	WARN_ON_ONCE(mm->mm_cid.mode & MM_CID_ONCPU);
+	mm->mm_cid.mode = 0;
+
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu)
+		per_cpu(mm->mm_cid.pcpu->cid, cpu) = 0;
+
+	bitmap_zero(mm_cidmask(mm), num_possible_cpus());
+
+	mm->mm_cid.nr_cpus_allowed = t->nr_cpus_allowed;
+	cpumask_copy(mm_cpus_allowed(mm), &t->cpus_mask);
+}
+
+/*
  * Make @t a user of the CIDs of its mm. Called on fork(2) and on
  * execve(2). A failed execve(2) rejoins the mm it left.
  *
@@ -11048,6 +11079,7 @@ static void sched_mm_cid_fork(struct task_struct *t)
 
 		/* First user ? */
 		if (!mm->mm_cid.users) {
+			sched_mm_cid_cleanup_execve(t, mm);
 			sched_mm_cid_add_user(t, mm);
 			t->mm_cid.cid = mm_get_cid(mm);
 			/* Required for execve() */
