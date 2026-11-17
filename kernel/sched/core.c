@@ -10866,24 +10866,17 @@ static bool mm_update_max_cids(struct mm_struct *mm)
 	return true;
 }
 
-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+static void __mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
 {
+	struct mm_mm_cid *mc = &mm->mm_cid;
 	struct cpumask *mm_allowed;
-	struct mm_mm_cid *mc;
 	unsigned int weight;
 
-	if (!mm || !READ_ONCE(mm->mm_cid.users))
-		return;
+	lockdep_assert_held(&mc->lock);
 	/*
 	 * mm::mm_cid::mm_cpus_allowed is the superset of each threads
 	 * allowed CPUs mask which means it can only grow.
 	 */
-	mc = &mm->mm_cid;
-	guard(raw_spinlock)(&mc->lock);
-	/* Might have raced with exit() */
-	if (!mm->mm_cid.users)
-		return;
-
 	mm_allowed = mm_cpus_allowed(mm);
 	weight = cpumask_weighted_or(mm_allowed, mm_allowed, affmsk);
 	if (weight == mc->nr_cpus_allowed)
@@ -10907,6 +10900,20 @@ static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpu
 	/* Queue the irq work, which schedules the real work */
 	mc->update_deferred = true;
 	irq_work_queue(&mc->irq_work);
+}
+
+static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+{
+	/* The first user takes the allowed CPUs of its task when it joins */
+	if (!mm || !READ_ONCE(mm->mm_cid.users))
+		return;
+
+	guard(raw_spinlock)(&mm->mm_cid.lock);
+	/* Might have raced with exit() */
+	if (!mm->mm_cid.users)
+		return;
+
+	__mm_update_cpus_allowed(mm, affmsk);
 }
 
 static inline void mm_cid_complete_transit(struct mm_struct *mm, unsigned int mode)
@@ -11051,6 +11058,28 @@ static void sched_mm_cid_cleanup_execve(struct task_struct *t, struct mm_struct 
 }
 
 /*
+ * Make @t the first user of the CIDs of its mm.
+ *
+ * mm_init_cid() copied the allowed CPUs of @t before @t was a user. An
+ * affinity change since then did not reach the mm. Add the allowed CPUs
+ * of @t again. Hold t->pi_lock, which every affinity change takes. A
+ * concurrent change is then in t->cpus_mask already, or it finds the
+ * user.
+ */
+static void sched_mm_cid_add_first_user(struct task_struct *t, struct mm_struct *mm)
+{
+	guard(raw_spinlock_irq)(&t->pi_lock);
+	guard(raw_spinlock)(&mm->mm_cid.lock);
+
+	sched_mm_cid_cleanup_execve(t, mm);
+	sched_mm_cid_add_user(t, mm);
+	__mm_update_cpus_allowed(mm, &t->cpus_mask);
+	t->mm_cid.cid = mm_get_cid(mm);
+	/* Required for execve() */
+	__this_cpu_write(mm->mm_cid.pcpu->cid, t->mm_cid.cid);
+}
+
+/*
  * Make @t a user of the CIDs of its mm. Called on fork(2) and on
  * execve(2). A failed execve(2) rejoins the mm it left.
  *
@@ -11074,18 +11103,14 @@ static void sched_mm_cid_fork(struct task_struct *t)
 	WARN_ON_ONCE(t->mm_cid.cid != MM_CID_UNSET);
 
 	guard(mutex)(&mm->mm_cid.mutex);
+	/* The mutex keeps other users from joining or leaving */
+	if (!mm->mm_cid.users) {
+		sched_mm_cid_add_first_user(t, mm);
+		return;
+	}
+
 	scoped_guard(raw_spinlock_irq, &mm->mm_cid.lock) {
 		struct mm_cid_pcpu *pcp = this_cpu_ptr(mm->mm_cid.pcpu);
-
-		/* First user ? */
-		if (!mm->mm_cid.users) {
-			sched_mm_cid_cleanup_execve(t, mm);
-			sched_mm_cid_add_user(t, mm);
-			t->mm_cid.cid = mm_get_cid(mm);
-			/* Required for execve() */
-			pcp->cid = t->mm_cid.cid;
-			return;
-		}
 
 		flip = sched_mm_cid_add_user(t, mm);
 		/*
