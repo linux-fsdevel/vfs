@@ -10866,20 +10866,17 @@ static bool mm_update_max_cids(struct mm_struct *mm)
 	return true;
 }
 
-static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+static void __mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
 {
+	struct mm_mm_cid *mc = &mm->mm_cid;
 	struct cpumask *mm_allowed;
-	struct mm_mm_cid *mc;
 	unsigned int weight;
 
-	if (!mm || !READ_ONCE(mm->mm_cid.users))
-		return;
+	lockdep_assert_held(&mc->lock);
 	/*
 	 * mm::mm_cid::mm_cpus_allowed is the superset of each threads
 	 * allowed CPUs mask which means it can only grow.
 	 */
-	mc = &mm->mm_cid;
-	guard(raw_spinlock)(&mc->lock);
 	mm_allowed = mm_cpus_allowed(mm);
 	weight = cpumask_weighted_or(mm_allowed, mm_allowed, affmsk);
 	if (weight == mc->nr_cpus_allowed)
@@ -10903,6 +10900,20 @@ static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpu
 	/* Queue the irq work, which schedules the real work */
 	mc->update_deferred = true;
 	irq_work_queue(&mc->irq_work);
+}
+
+static inline void mm_update_cpus_allowed(struct mm_struct *mm, const struct cpumask *affmsk)
+{
+	/* The first user takes the allowed CPUs of its task when it joins */
+	if (!mm || !READ_ONCE(mm->mm_cid.users))
+		return;
+
+	guard(raw_spinlock)(&mm->mm_cid.lock);
+	/* Might have raced with exit() */
+	if (!mm->mm_cid.users)
+		return;
+
+	__mm_update_cpus_allowed(mm, affmsk);
 }
 
 static inline void mm_cid_complete_transit(struct mm_struct *mm, unsigned int mode)
@@ -11019,36 +11030,107 @@ static bool sched_mm_cid_add_user(struct task_struct *t, struct mm_struct *mm)
 	return mm_update_max_cids(mm);
 }
 
+/*
+ * sched_mm_cid_exit() does not handle the mode switch for the last user
+ * because for normal exit() that's a pointless exercise. But if the
+ * process which issued execve() was multithreaded and the last exiting
+ * thread switched back from per CPU mode then this leaves stale state
+ * around. The indicator for that is mm_cid::mode having MM_CID_TRANSIT
+ * set.
+ */
+static void sched_mm_cid_cleanup_execve(struct task_struct *t, struct mm_struct *mm)
+{
+	if (likely(!mm->mm_cid.mode))
+		return;
+
+	WARN_ON_ONCE(mm->mm_cid.mode & MM_CID_ONCPU);
+	mm->mm_cid.mode = 0;
+
+	unsigned int cpu;
+
+	for_each_possible_cpu(cpu)
+		per_cpu(mm->mm_cid.pcpu->cid, cpu) = 0;
+
+	bitmap_zero(mm_cidmask(mm), num_possible_cpus());
+
+	mm->mm_cid.nr_cpus_allowed = t->nr_cpus_allowed;
+	cpumask_copy(mm_cpus_allowed(mm), &t->cpus_mask);
+}
+
+/*
+ * Make @t the first user of the CIDs of its mm.
+ *
+ * mm_init_cid() copied the allowed CPUs of @t before @t was a user. An
+ * affinity change since then did not reach the mm. Add the allowed CPUs
+ * of @t again. Hold t->pi_lock, which every affinity change takes. A
+ * concurrent change is then in t->cpus_mask already, or it finds the
+ * user.
+ */
+static void sched_mm_cid_add_first_user(struct task_struct *t, struct mm_struct *mm)
+{
+	guard(raw_spinlock_irq)(&t->pi_lock);
+	guard(raw_spinlock)(&mm->mm_cid.lock);
+
+	sched_mm_cid_cleanup_execve(t, mm);
+	sched_mm_cid_add_user(t, mm);
+	__mm_update_cpus_allowed(mm, &t->cpus_mask);
+	t->mm_cid.cid = mm_get_cid(mm);
+	/* Required for execve() */
+	__this_cpu_write(mm->mm_cid.pcpu->cid, t->mm_cid.cid);
+}
+
+/*
+ * Make @t a user of the CIDs of its mm. Called on fork(2) and on
+ * execve(2). A failed execve(2) rejoins the mm it left.
+ *
+ * In per CPU mode a new user gets no CID here. It takes the CID of its
+ * CPU when it is scheduled in. A task that joins while it is running
+ * returns to user space before that, so it takes its CID here. This is
+ * the case of a failed execve(2) when the mm has other users.
+ */
 static void sched_mm_cid_fork(struct task_struct *t)
 {
 	struct mm_struct *mm = t->mm;
-	bool percpu;
+	bool percpu = false, flip = false;
 
-	if (!mm)
+	/*
+	 * A user worker (io_uring, vhost) never returns to user space and
+	 * has no rseq area. It needs no CID.
+	 */
+	if (!mm || (t->flags & PF_USER_WORKER))
 		return;
 
 	WARN_ON_ONCE(t->mm_cid.cid != MM_CID_UNSET);
 
 	guard(mutex)(&mm->mm_cid.mutex);
+	/* The mutex keeps other users from joining or leaving */
+	if (!mm->mm_cid.users) {
+		sched_mm_cid_add_first_user(t, mm);
+		return;
+	}
+
 	scoped_guard(raw_spinlock_irq, &mm->mm_cid.lock) {
 		struct mm_cid_pcpu *pcp = this_cpu_ptr(mm->mm_cid.pcpu);
 
-		/* First user ? */
-		if (!mm->mm_cid.users) {
-			sched_mm_cid_add_user(t, mm);
-			t->mm_cid.cid = mm_get_cid(mm);
-			/* Required for execve() */
-			pcp->cid = t->mm_cid.cid;
-			return;
-		}
+		flip = sched_mm_cid_add_user(t, mm);
+		/*
+		 * A running joiner takes no CID at a schedule in before the
+		 * fixups are done. The users it joins can hold every CID
+		 * until then, and the fixups are its own work.
+		 */
+		if (t == current)
+			t->mm_cid.active = 0;
 
-		if (!sched_mm_cid_add_user(t, mm)) {
+		if (!flip) {
 			if (!cid_on_cpu(mm->mm_cid.mode))
 				t->mm_cid.cid = mm_get_cid(mm);
-			return;
+			break;
 		}
 
-		/* Handle the mode change and transfer current's CID */
+		/*
+		 * Handle the mode change and transfer current's CID. A
+		 * running joiner has no CID yet. It takes one below.
+		 */
 		percpu = cid_on_cpu(mm->mm_cid.mode);
 		if (!percpu)
 			mm_cid_transit_to_task(current, pcp);
@@ -11056,11 +11138,23 @@ static void sched_mm_cid_fork(struct task_struct *t)
 			mm_cid_transit_to_cpu(current, pcp);
 	}
 
-	if (percpu) {
-		mm_cid_fixup_tasks_to_cpus();
-	} else {
-		mm_cid_fixup_cpus_to_tasks(mm);
-		t->mm_cid.cid = mm_get_cid(mm);
+	if (flip) {
+		if (percpu) {
+			mm_cid_fixup_tasks_to_cpus();
+		} else {
+			mm_cid_fixup_cpus_to_tasks(mm);
+			/* A running joiner takes its CID below. */
+			if (t != current)
+				t->mm_cid.cid = mm_get_cid(mm);
+		}
+	}
+
+	/* The running joiner takes part from here on, see above. */
+	if (t == current) {
+		guard(task_rq_lock)(t);
+		t->mm_cid.active = 1;
+		if (t->mm_cid.cid == MM_CID_UNSET)
+			mm_cid_schedin(t);
 	}
 }
 
@@ -11166,6 +11260,15 @@ void sched_mm_cid_after_execve(struct task_struct *t)
 {
 	if (t->mm)
 		sched_mm_cid_fork(t);
+}
+
+/*
+ * Pair with set_cpus_allowed_common()'s p->pi_lock critical section. Call
+ * after publishing p->mm and before dropping the old MM reference.
+ */
+void sched_mm_cid_mm_barrier(struct task_struct *t)
+{
+	guard(raw_spinlock_irq)(&t->pi_lock);
 }
 
 static void mm_cid_work_fn(struct work_struct *work)
