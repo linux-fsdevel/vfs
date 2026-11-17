@@ -298,6 +298,7 @@ static int qnx6_fill_super(struct super_block *s, struct fs_context *fc)
 	const char *errmsg;
 	struct qnx6_sb_info *qs;
 	int ret = -EINVAL;
+	int maxlevels;
 	u64 offset;
 	int bootblock_offset = QNX6_BOOTBLOCK_SIZE;
 	int silent = fc->sb_flags & SB_SILENT;
@@ -405,27 +406,31 @@ static int qnx6_fill_super(struct super_block *s, struct fs_context *fc)
 		brelse(bh1);
 		pr_info("superblock #2 active\n");
 	}
+	/* ease the later tree level calculations */
+	sbi = QNX6_SB(s);
+	sbi->s_ptrbits = ilog2(s->s_blocksize / 4);
+
+	/* limit levels so that ptrbits * levels stays below int width */
+	maxlevels = min_t(int, QNX6_PTR_MAX_LEVELS, 31 / sbi->s_ptrbits);
+
 mmi_success:
 	/* sanity check - limit maximum indirect pointer levels */
-	if (sb1->Inode.levels > QNX6_PTR_MAX_LEVELS) {
+	if (sb1->Inode.levels > maxlevels) {
 		pr_err("too many inode levels (max %i, sb %i)\n",
-		       QNX6_PTR_MAX_LEVELS, sb1->Inode.levels);
+		       maxlevels, sb1->Inode.levels);
 		goto out;
 	}
-	if (sb1->Longfile.levels > QNX6_PTR_MAX_LEVELS) {
+	if (sb1->Longfile.levels > maxlevels) {
 		pr_err("too many longfilename levels (max %i, sb %i)\n",
-		       QNX6_PTR_MAX_LEVELS, sb1->Longfile.levels);
+		       maxlevels, sb1->Longfile.levels);
 		goto out;
 	}
 	s->s_op = &qnx6_sops;
 	s->s_magic = QNX6_SUPER_MAGIC;
-	s->s_flags |= SB_RDONLY;        /* Yup, read-only yet */
+	s->s_flags |= SB_RDONLY;	/* Yup, read-only yet */
 	s->s_time_min = 0;
 	s->s_time_max = U32_MAX;
 
-	/* ease the later tree level calculations */
-	sbi = QNX6_SB(s);
-	sbi->s_ptrbits = ilog2(s->s_blocksize / 4);
 	sbi->inodes = qnx6_private_inode(s, &sb1->Inode);
 	if (!sbi->inodes)
 		goto out;
@@ -560,6 +565,13 @@ struct inode *qnx6_iget(struct super_block *sb, unsigned ino)
 	memcpy(&ei->di_block_ptr, &raw_inode->di_block_ptr,
 				sizeof(raw_inode->di_block_ptr));
 	ei->di_filelevels = raw_inode->di_filelevels;
+	if (ei->di_filelevels > 31 / sbi->s_ptrbits) {
+		pr_err("inode %u on dev %s: too many file levels (%u > %d)\n",
+		       ino, sb->s_id, ei->di_filelevels, 31 / sbi->s_ptrbits);
+		folio_release_kmap(folio, raw_inode);
+		iget_failed(inode);
+		return ERR_PTR(-EIO);
+	}
 
 	if (S_ISREG(inode->i_mode)) {
 		inode->i_fop = &generic_ro_fops;
