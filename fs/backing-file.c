@@ -79,6 +79,18 @@ struct file *backing_tmpfile_open(const struct file *user_file, int flags,
 }
 EXPORT_SYMBOL(backing_tmpfile_open);
 
+/* Slow path of file_real() for a file with ->f_real() */
+struct file *__file_real(struct file *file)
+{
+	struct file *real_file = file->f_op->f_real(file);
+
+	if (!IS_ERR(real_file) && real_file != file &&
+	    WARN_ON_ONCE(!(real_file->f_mode & FMODE_BACKING)))
+		return ERR_PTR(-EIO);
+
+	return real_file;
+}
+
 struct backing_aio {
 	struct kiocb iocb;
 	refcount_t ref;
