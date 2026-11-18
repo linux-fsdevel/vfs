@@ -889,6 +889,9 @@ static void ufs_clusteracct(struct super_block * sb,
 	i = back + forw + 1;
 	if (i > uspi->s_contigsumsize)
 		i = uspi->s_contigsumsize;
+	if (ucpi->c_clusteroff < (i + 1) * sizeof(__fs32) ||
+	    ucpi->c_clusteroff - (i + 1) * sizeof(__fs32) < ucpi->c_clustersumoff)
+		return;
 	fs32_add(sb, (__fs32*)ubh_get_addr(UCPI_UBH(ucpi), ucpi->c_clustersumoff + (i << 2)), cnt);
 	if (back > 0)
 		fs32_sub(sb, (__fs32*)ubh_get_addr(UCPI_UBH(ucpi), ucpi->c_clustersumoff + (back << 2)), cnt);
