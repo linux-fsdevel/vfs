@@ -10,6 +10,7 @@
 #include <linux/slab.h>
 #include <linux/export.h>
 #include <linux/namei.h>
+#include <linux/overflow.h>
 #include <linux/sched.h>
 #include <linux/writeback.h>
 #include <linux/syscalls.h>
@@ -233,13 +234,10 @@ int sync_file_range(struct file *file, loff_t offset, loff_t nbytes,
 	if (flags & ~VALID_FLAGS)
 		goto out;
 
-	endbyte = offset + nbytes;
+	if (offset < 0 || nbytes < 0)
+		goto out;
 
-	if ((s64)offset < 0)
-		goto out;
-	if ((s64)endbyte < 0)
-		goto out;
-	if (endbyte < offset)
+	if (check_add_overflow(offset, nbytes, &endbyte))
 		goto out;
 
 	if (sizeof(pgoff_t) == 4) {
