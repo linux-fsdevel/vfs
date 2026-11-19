@@ -94,11 +94,10 @@ int panfrost_gpu_soft_reset(struct panfrost_device *pfdev)
 		  GPU_IRQ_CLEAN_CACHES_COMPLETED);
 
 	/*
-	 * All in-flight jobs should have released their cycle
-	 * counter references upon reset, but let us make sure
+	 * Even though all in-flight jobs should have released their cycle counter
+	 * references upon reset, perfcnt's might still hang about.
 	 */
-	if (drm_WARN_ON(&pfdev->base, atomic_read(&pfdev->cycle_counter.use_count) != 0))
-		atomic_set(&pfdev->cycle_counter.use_count, 0);
+	atomic_set(&pfdev->cycle_counter.use_count, 0);
 
 	return 0;
 }
@@ -242,6 +241,9 @@ static const struct panfrost_model gpu_models[] = {
 	/* MediaTek MT8188 Mali-G57 MC3 */
 	GPU_MODEL(g57, 0x9093,
 		GPU_REV(g57, 0, 0)),
+
+	GPU_MODEL(g68, 0x9004,
+		  GPU_REV(g68, 1, 0), GPU_REV(g68, 1, 1)),
 	{0},
 };
 
@@ -515,6 +517,8 @@ void panfrost_gpu_suspend_irq(struct panfrost_device *pfdev)
 int panfrost_gpu_init(struct panfrost_device *pfdev)
 {
 	int err;
+
+	spin_lock_init(&pfdev->cycle_counter.lock);
 
 	err = panfrost_gpu_soft_reset(pfdev);
 	if (err)

@@ -1283,7 +1283,7 @@ static int cdns_allocate_pdi(struct sdw_cdns *cdns,
 	if (!num)
 		return 0;
 
-	pdi = devm_kcalloc(cdns->dev, num, sizeof(*pdi), GFP_KERNEL);
+	pdi = devm_kzalloc_objs(cdns->dev, *pdi, num);
 	if (!pdi)
 		return -ENOMEM;
 
@@ -1700,6 +1700,13 @@ int sdw_cdns_clock_stop(struct sdw_cdns *cdns, bool block_wake)
 		dev_dbg(cdns->dev, "Clock is already stopped\n");
 		return 0;
 	}
+
+	/*
+	 * wait for any in-flight peripheral event handling to complete before stopping the clock.
+	 * No need to disable peripheral interrupts before canceling the work, as the peripheral
+	 * interrupts are already masked before the work is scheduled.
+	 */
+	cancel_work_sync(&cdns->work);
 
 	/*
 	 * Before entering clock stop we mask the Slave

@@ -178,9 +178,9 @@ int avs_path_set_constraint(struct avs_dev *adev, struct avs_tplg_path_template 
 	list_for_each_entry(path_template, &template->path_list, node)
 		i++;
 
-	rlist = kcalloc(i, sizeof(*rlist), GFP_KERNEL);
-	clist = kcalloc(i, sizeof(*clist), GFP_KERNEL);
-	slist = kcalloc(i, sizeof(*slist), GFP_KERNEL);
+	rlist = kzalloc_objs(*rlist, i);
+	clist = kzalloc_objs(*clist, i);
+	slist = kzalloc_objs(*slist, i);
 	if (!rlist || !clist || !slist)
 		return -ENOMEM;
 
@@ -836,15 +836,10 @@ static int avs_path_module_type_create(struct avs_dev *adev, struct avs_path_mod
 
 static int avs_path_module_send_init_configs(struct avs_dev *adev, struct avs_path_module *mod)
 {
-	struct avs_soc_component *acomp;
+	struct avs_tplg_module *template = mod->template;
 
-	acomp = to_avs_soc_component(mod->template->owner->owner->owner->owner->comp);
-
-	u32 num_ids = mod->template->num_config_ids;
-	u32 *ids = mod->template->config_ids;
-
-	for (int i = 0; i < num_ids; i++) {
-		struct avs_tplg_init_config *config = &acomp->tplg->init_configs[ids[i]];
+	for (int i = 0; i < template->num_init_configs; i++) {
+		struct avs_tplg_init_config *config = template->init_configs[i];
 		size_t len = config->length;
 		void *data = config->data;
 		u32 param = config->param;

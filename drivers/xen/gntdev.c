@@ -670,15 +670,19 @@ static long gntdev_ioctl_map_grant_ref(struct gntdev_priv *priv,
 	mutex_lock(&priv->lock);
 	gntdev_add_map(priv, map);
 	op.index = map->index << PAGE_SHIFT;
+	mutex_unlock(&priv->lock);
 
 	if (copy_to_user(u, &op, sizeof(op)) != 0) {
-		list_del(&map->next);
+		mutex_lock(&priv->lock);
+		map = gntdev_find_map_index(priv, op.index >> PAGE_SHIFT,
+					    op.count);
+		if (map)
+			list_del(&map->next);
 		mutex_unlock(&priv->lock);
 		gntdev_put_map(priv, map);
 		return -EFAULT;
 	}
 
-	mutex_unlock(&priv->lock);
 	return 0;
 }
 
@@ -849,13 +853,13 @@ static int gntdev_copy(struct gntdev_copy_batch *batch)
 		if (status == GNTST_okay)
 			continue;
 
-		if (__get_user(old_status, batch->status[i]))
+		if (get_user(old_status, batch->status[i]))
 			return -EFAULT;
 
 		if (old_status != GNTST_okay)
 			continue;
 
-		if (__put_user(status, batch->status[i]))
+		if (put_user(status, batch->status[i]))
 			return -EFAULT;
 	}
 
@@ -1065,6 +1069,13 @@ static int gntdev_mmap(struct file *flip, struct vm_area_struct *vma)
 
 	if ((vma->vm_flags & VM_WRITE) && !(vma->vm_flags & VM_SHARED))
 		return -EINVAL;
+
+	/*
+	 * Private mappings of foreign grant pages must never become
+	 * writable: they would take the COW path on granted pages.
+	 */
+	if (!(vma->vm_flags & VM_SHARED))
+		vm_flags_clear(vma, VM_MAYWRITE);
 
 	pr_debug("map %d+%d at %lx (pgoff %lx)\n",
 		 index, count, vma->vm_start, vma->vm_pgoff);

@@ -42,6 +42,12 @@
 #include <linux/uaccess.h>
 #include <linux/iversion.h>
 #include <linux/fileattr.h>
+#include <linux/nsproxy.h>
+#include <linux/key-type.h>
+#include <keys/user-type.h>
+#ifdef CONFIG_KEYS
+#include <keys/request_key_auth-type.h>
+#endif
 
 #include "nfs4_fs.h"
 #include "callback.h"
@@ -623,28 +629,52 @@ nfs_fattr_fixup_delegated(struct inode *inode, struct nfs_fattr *fattr)
 	}
 }
 
+/*
+ * With delegated timestamps, the client's coarse clock can trail the
+ * server's fine-grained ctime cached from an OPEN or SETATTR reply. The
+ * server won't move ctime backward when the times are returned, so a
+ * new stamp must land after the cached ctime.
+ */
+static struct timespec64 nfs_delegated_stamp(struct inode *inode)
+{
+	struct timespec64 ctime = inode_get_ctime(inode);
+	struct timespec64 now = current_time(inode);
+
+	if (timespec64_compare(&now, &ctime) <= 0) {
+		now = ctime;
+		timespec64_add_ns(&now, 1);
+	}
+	return now;
+}
+
+/*
+ * The server stamped c/mtime itself (e.g. for a size change). Raise the
+ * cached ctime to the server's so that the next delegated stamp lands
+ * after it.
+ */
+void nfs_delegated_ctime_raise(struct inode *inode,
+			       const struct nfs_fattr *fattr)
+{
+	struct timespec64 ctime = inode_get_ctime(inode);
+
+	if ((fattr->valid & NFS_ATTR_FATTR_CTIME) &&
+	    timespec64_compare(&fattr->ctime, &ctime) > 0)
+		inode_set_ctime_to_ts(inode, fattr->ctime);
+}
+EXPORT_SYMBOL_GPL(nfs_delegated_ctime_raise);
+
 static void nfs_set_timestamps_to_ts(struct inode *inode, struct iattr *attr)
 {
 	unsigned int cache_flags = 0;
 
 	if (attr->ia_valid & ATTR_MTIME_SET) {
-		struct timespec64 ctime = inode_get_ctime(inode);
-		struct timespec64 mtime = inode_get_mtime(inode);
-		struct timespec64 now;
-		bool updated = false;
-
-		now = inode_set_ctime_current(inode);
-		if (!timespec64_equal(&now, &ctime))
-			updated = true;
-
+		/* The stamp is always after the old ctime */
+		inode_set_ctime_to_ts(inode, nfs_delegated_stamp(inode));
 		inode_set_mtime_to_ts(inode, attr->ia_mtime);
-		if (!timespec64_equal(&now, &mtime))
-			updated = true;
-
-		inode_maybe_inc_iversion(inode, updated);
+		inode_maybe_inc_iversion(inode, true);
 		cache_flags |= NFS_INO_INVALID_CTIME | NFS_INO_INVALID_MTIME;
 	}
-	if (attr->ia_valid & ATTR_ATIME_SET) {
+	if (attr->ia_valid & ATTR_ATIME) {
 		inode_set_atime_to_ts(inode, attr->ia_atime);
 		cache_flags |= NFS_INO_INVALID_ATIME;
 	}
@@ -659,7 +689,11 @@ static void nfs_update_atime(struct inode *inode)
 
 static void nfs_update_mtime(struct inode *inode)
 {
-	inode_update_time(inode, FS_UPD_CMTIME, 0);
+	struct timespec64 now = nfs_delegated_stamp(inode);
+
+	/* Not inode_update_time(): lockless readers would see its stamp */
+	inode_set_ctime_to_ts(inode, now);
+	inode_set_mtime_to_ts(inode, now);
 	NFS_I(inode)->cache_validity &=
 		~(NFS_INO_INVALID_CTIME | NFS_INO_INVALID_MTIME);
 }
@@ -678,6 +712,7 @@ void nfs_update_delegated_mtime_locked(struct inode *inode)
 	    nfs_have_directory_delegation(inode))
 		nfs_update_mtime(inode);
 }
+EXPORT_SYMBOL_GPL(nfs_update_delegated_mtime_locked);
 
 void nfs_update_delegated_mtime(struct inode *inode)
 {
@@ -690,7 +725,7 @@ EXPORT_SYMBOL_GPL(nfs_update_delegated_mtime);
 #define NFS_VALID_ATTRS (ATTR_MODE|ATTR_UID|ATTR_GID|ATTR_SIZE|ATTR_ATIME|ATTR_ATIME_SET|ATTR_MTIME|ATTR_MTIME_SET|ATTR_FILE|ATTR_OPEN)
 
 int
-nfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+nfs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 	    struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
@@ -740,7 +775,7 @@ nfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 	} else if (nfs_have_delegated_atime(inode) &&
 		   attr->ia_valid & ATTR_ATIME &&
 		   !(attr->ia_valid & ATTR_MTIME)) {
-		if (!(attr->ia_valid & ATTR_ATIME_SET)) {
+		if (!(attr->ia_valid & (ATTR_ATIME_SET | ATTR_TIMES_SET))) {
 			nfs_update_delegated_atime(inode);
 			attr->ia_valid &= ~ATTR_ATIME;
 		}
@@ -802,10 +837,14 @@ static int nfs_vmtruncate(struct inode * inode, loff_t offset)
 		nfs_ooo_clear(NFS_I(inode));
 	}
 	NFS_I(inode)->cache_validity &= ~NFS_INO_INVALID_SIZE;
+	/*
+	 * Stamp in the same i_lock section that checked the delegation and
+	 * raised ctime, before a delegation return can start.
+	 */
+	nfs_update_delegated_mtime_locked(inode);
 
 	spin_unlock(&inode->i_lock);
 	truncate_pagecache(inode, offset);
-	nfs_update_delegated_mtime_locked(inode);
 	spin_lock(&inode->i_lock);
 out:
 	return err;
@@ -831,6 +870,8 @@ void nfs_setattr_update_inode(struct inode *inode, struct iattr *attr,
 	if ((attr->ia_valid & ATTR_SIZE) != 0) {
 		if (!nfs_have_delegated_mtime(inode))
 			nfs_set_cache_invalid(inode, NFS_INO_INVALID_MTIME);
+		else
+			nfs_delegated_ctime_raise(inode, fattr);
 		nfs_set_cache_invalid(inode, NFS_INO_INVALID_BLOCKS);
 		nfs_inc_stats(inode, NFSIOS_SETATTRTRUNC);
 		nfs_vmtruncate(inode, attr->ia_size);
@@ -955,7 +996,7 @@ static u32 nfs_get_valid_attrmask(struct inode *inode)
 	return reply_mask;
 }
 
-int nfs_getattr(struct mnt_idmap *idmap, const struct path *path,
+int nfs_getattr(const struct mnt_idmap *idmap, const struct path *path,
 		struct kstat *stat, u32 request_mask, unsigned int query_flags)
 {
 	struct inode *inode = d_inode(path->dentry);
@@ -2641,10 +2682,130 @@ static int nfsiod_start(void)
 unsigned int nfs_net_id;
 EXPORT_SYMBOL_GPL(nfs_net_id);
 
+#ifdef CONFIG_KEYS
+static int nfs_init_keyring(struct net *net)
+{
+	struct nfs_net *nn = net_generic(net, nfs_net_id);
+	struct cred *cred;
+	struct key *keyring;
+
+	cred = prepare_kernel_cred(&init_task);
+	if (!cred)
+		return -ENOMEM;
+	keyring = keyring_alloc(".nfs", net->user_ns->owner,
+				net->user_ns->group, cred,
+				(KEY_POS_ALL & ~KEY_POS_SETATTR) |
+				(KEY_USR_ALL & ~KEY_USR_SETATTR),
+				KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
+	put_cred(cred);
+	if (IS_ERR(keyring))
+		return PTR_ERR(keyring);
+	nn->nfs_keyring = keyring;
+	return 0;
+}
+
+static void nfs_exit_keyring(struct nfs_net *nn)
+{
+	key_put(nn->nfs_keyring);
+}
+
+static int nfs_keyring_vet_description(const char *desc)
+{
+	return strcmp(desc, ".nfs") ? -EINVAL : 0;
+}
+
+static int nfs_keyring_format_serial(char *buf, size_t len)
+{
+	struct key *keyring = nfs_net_keyring(current->nsproxy->net_ns);
+
+	return snprintf(buf, len, "%d", key_serial(keyring));
+}
+
+/*
+ * A key planted by add_key() answers request_key() before the handler
+ * runs. Accept only the serial number the handler would produce.
+ */
+static int nfs_keyring_preparse(struct key_preparsed_payload *prep)
+{
+	char serial[12];
+	int len;
+
+	len = nfs_keyring_format_serial(serial, sizeof(serial));
+	if (prep->datalen != len || !prep->data ||
+	    memcmp(prep->data, serial, len))
+		return -EINVAL;
+	return user_preparse(prep);
+}
+
+static int nfs_keyring_request_key(struct key *authkey, void *aux)
+{
+	struct request_key_auth *rka = get_request_key_auth(authkey);
+	char serial[12];
+	int len, ret;
+
+	len = nfs_keyring_format_serial(serial, sizeof(serial));
+	ret = key_instantiate_and_link(rka->target_key, serial, len,
+				       rka->dest_keyring, authkey);
+	if (ret < 0)
+		complete_request_key(authkey, ret);
+	return ret;
+}
+
+/*
+ * A session keyring survives setns(). Without the net domain tag, a
+ * key instantiated in one namespace answers a request from another.
+ */
+static struct key_type key_type_nfs_keyring = {
+	.name		= "nfs_keyring",
+	.flags		= KEY_TYPE_NET_DOMAIN,
+	.vet_description = nfs_keyring_vet_description,
+	.preparse	= nfs_keyring_preparse,
+	.free_preparse	= user_free_preparse,
+	.instantiate	= generic_key_instantiate,
+	.revoke		= user_revoke,
+	.destroy	= user_destroy,
+	.describe	= user_describe,
+	.read		= user_read,
+	.request_key	= nfs_keyring_request_key,
+};
+
+static int __init nfs_register_key_type(void)
+{
+	return register_key_type(&key_type_nfs_keyring);
+}
+
+static void nfs_unregister_key_type(void)
+{
+	unregister_key_type(&key_type_nfs_keyring);
+}
+#else
+static inline int nfs_init_keyring(struct net *net)
+{
+	return 0;
+}
+
+static inline void nfs_exit_keyring(struct nfs_net *nn)
+{
+}
+
+static inline int nfs_register_key_type(void)
+{
+	return 0;
+}
+
+static inline void nfs_unregister_key_type(void)
+{
+}
+#endif /* CONFIG_KEYS */
+
 static int nfs_net_init(struct net *net)
 {
 	struct nfs_net *nn = net_generic(net, nfs_net_id);
 	int err;
+
+	err = nfs_init_keyring(net);
+	if (err)
+		return err;
 
 	nfs_clients_init(net);
 
@@ -2663,14 +2824,18 @@ err_proc_nfs:
 	rpc_proc_unregister(net, "nfs");
 err_proc_rpc:
 	nfs_clients_exit(net);
+	nfs_exit_keyring(nn);
 	return err;
 }
 
 static void nfs_net_exit(struct net *net)
 {
+	struct nfs_net *nn = net_generic(net, nfs_net_id);
+
 	rpc_proc_unregister(net, "nfs");
 	nfs_fs_proc_net_exit(net);
 	nfs_clients_exit(net);
+	nfs_exit_keyring(nn);
 }
 
 static struct pernet_operations nfs_net_ops = {
@@ -2680,35 +2845,6 @@ static struct pernet_operations nfs_net_ops = {
 	.size = sizeof(struct nfs_net),
 };
 
-#ifdef CONFIG_KEYS
-static struct key *nfs_keyring;
-
-static int __init nfs_init_keyring(void)
-{
-	nfs_keyring = keyring_alloc(".nfs",
-			     GLOBAL_ROOT_UID, GLOBAL_ROOT_GID,
-			     current_cred(),
-			     (KEY_POS_ALL & ~KEY_POS_SETATTR) |
-			     (KEY_USR_ALL & ~KEY_USR_SETATTR),
-			     KEY_ALLOC_NOT_IN_QUOTA, NULL, NULL);
-	return PTR_ERR_OR_ZERO(nfs_keyring);
-}
-
-static void nfs_exit_keyring(void)
-{
-	key_put(nfs_keyring);
-}
-#else
-static inline int nfs_init_keyring(void)
-{
-	return 0;
-}
-
-static inline void nfs_exit_keyring(void)
-{
-}
-#endif /* CONFIG_KEYS */
-
 /*
  * Initialize NFS
  */
@@ -2716,71 +2852,71 @@ static int __init init_nfs_fs(void)
 {
 	int err;
 
-	err = nfs_init_keyring();
-	if (err)
-		return err;
-
 	err = nfs_sysfs_init();
 	if (err < 0)
-		goto out10;
+		return err;
 
 	err = register_pernet_subsys(&nfs_net_ops);
 	if (err < 0)
-		goto out9;
+		goto err_sysfs;
+
+	err = nfs_register_key_type();
+	if (err)
+		goto err_pernet;
 
 	err = nfsiod_start();
 	if (err)
-		goto out7;
+		goto err_keytype;
 
 	err = nfs_fs_proc_init();
 	if (err)
-		goto out6;
+		goto err_nfsiod;
 
 	err = nfs_init_nfspagecache();
 	if (err)
-		goto out5;
+		goto err_proc;
 
 	err = nfs_init_inodecache();
 	if (err)
-		goto out4;
+		goto err_nfspagecache;
 
 	err = nfs_init_readpagecache();
 	if (err)
-		goto out3;
+		goto err_inodecache;
 
 	err = nfs_init_writepagecache();
 	if (err)
-		goto out2;
+		goto err_readpagecache;
 
 	err = nfs_init_directcache();
 	if (err)
-		goto out1;
+		goto err_writepagecache;
 
 	err = register_nfs_fs();
 	if (err)
-		goto out0;
+		goto err_directcache;
 
 	return 0;
-out0:
+err_directcache:
 	nfs_destroy_directcache();
-out1:
+err_writepagecache:
 	nfs_destroy_writepagecache();
-out2:
+err_readpagecache:
 	nfs_destroy_readpagecache();
-out3:
+err_inodecache:
 	nfs_destroy_inodecache();
-out4:
+err_nfspagecache:
 	nfs_destroy_nfspagecache();
-out5:
+err_proc:
 	nfs_fs_proc_exit();
-out6:
+err_nfsiod:
 	nfsiod_stop();
-out7:
+err_keytype:
+	nfs_unregister_key_type();
+err_pernet:
 	unregister_pernet_subsys(&nfs_net_ops);
-out9:
+err_sysfs:
 	nfs_sysfs_exit();
-out10:
-	nfs_exit_keyring();
 	return err;
 }
 
@@ -2791,12 +2927,12 @@ static void __exit exit_nfs_fs(void)
 	nfs_destroy_readpagecache();
 	nfs_destroy_inodecache();
 	nfs_destroy_nfspagecache();
+	nfs_unregister_key_type();
 	unregister_pernet_subsys(&nfs_net_ops);
 	unregister_nfs_fs();
 	nfs_fs_proc_exit();
 	nfsiod_stop();
 	nfs_sysfs_exit();
-	nfs_exit_keyring();
 }
 
 /* Not quite true; I just maintain it */

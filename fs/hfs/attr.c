@@ -121,13 +121,16 @@ static int hfs_xattr_get(const struct xattr_handler *handler,
 }
 
 static int hfs_xattr_set(const struct xattr_handler *handler,
-			 struct mnt_idmap *idmap,
+			 const struct mnt_idmap *idmap,
 			 struct dentry *unused, struct inode *inode,
 			 const char *name, const void *value, size_t size,
 			 int flags)
 {
 	if (!value)
 		return -EOPNOTSUPP;
+
+	if (unlikely(sb_emergency_ro(inode->i_sb)))
+		return -EROFS;
 
 	return __hfs_setxattr(inode, handler->flags, value, size, flags);
 }

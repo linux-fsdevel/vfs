@@ -377,6 +377,10 @@ static int tb_xdp_properties_request(struct tb_ctl *ctl, u64 route,
 
 		len += sizeof(res->hdr.xd_hdr) / 4;
 		len -= sizeof(*res) / 4;
+		if (len > TB_XDP_PROPERTIES_MAX_DATA_LENGTH) {
+			ret = -EINVAL;
+			goto err;
+		}
 
 		if (res->offset != req.offset) {
 			ret = -EINVAL;
@@ -394,7 +398,7 @@ static int tb_xdp_properties_request(struct tb_ctl *ctl, u64 route,
 				goto err;
 			}
 
-			data = kcalloc(data_len, sizeof(u32), GFP_KERNEL);
+			data = kzalloc_objs(u32, data_len);
 			if (!data) {
 				ret = -ENOMEM;
 				goto err;
@@ -706,7 +710,7 @@ static void update_property_block(struct tb_xdomain *xd)
 		}
 
 		block_len = ret;
-		block = kcalloc(block_len, sizeof(*block), GFP_KERNEL);
+		block = kzalloc_objs(*block, block_len);
 		if (!block) {
 			tb_property_free_dir(dir);
 			goto out_unlock;
@@ -1814,7 +1818,6 @@ static void tb_xdomain_state_work(struct work_struct *work)
 			tb_xdomain_failed(xd);
 		} else {
 			xd->state = XDOMAIN_STATE_ENUMERATED;
-			tb_xdomain_queue_properties_changed(xd);
 		}
 		break;
 

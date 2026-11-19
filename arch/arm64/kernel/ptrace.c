@@ -573,8 +573,12 @@ static void update_syscall_orig_x0_after_ptrace(struct task_struct *target)
 	if (regs->syscallno == NO_SYSCALL)
 		return;
 
-	/* We should only be called when target is in a ptrace stop */
-	if (WARN_ON_ONCE(!info))
+	/*
+	 * For exit-stops, info is always non-NULL, but that's not true for other
+	 * stops such as non-seized group-stops. In those cases, just return early
+	 * as there's no need to update orig_x0 anyway.
+	 */
+	if (!info)
 		return;
 
 	/*
@@ -2517,12 +2521,8 @@ static int valid_compat_regs(struct user_pt_regs *regs)
 {
 	regs->pstate &= ~SPSR_EL1_AARCH32_RES0_BITS;
 
-	if (!system_supports_mixed_endian_el0()) {
-		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
-			regs->pstate |= PSR_AA32_E_BIT;
-		else
-			regs->pstate &= ~PSR_AA32_E_BIT;
-	}
+	if (!system_supports_mixed_endian_el0())
+		regs->pstate &= ~PSR_AA32_E_BIT;
 
 	if (user_mode(regs) && (regs->pstate & PSR_MODE32_BIT) &&
 	    (regs->pstate & PSR_AA32_A_BIT) == 0 &&

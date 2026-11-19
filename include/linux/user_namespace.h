@@ -29,8 +29,8 @@ struct uid_gid_map { /* 64 bytes -- 1 cache line */
 			u32 nr_extents;
 		};
 		struct {
-			struct uid_gid_extent *forward;
-			struct uid_gid_extent *reverse;
+			struct uid_gid_extent *forward __counted_by_ptr(nr_extents);
+			struct uid_gid_extent *reverse __counted_by_ptr(nr_extents);
 		};
 	};
 };
@@ -86,8 +86,9 @@ struct user_namespace {
 	kgid_t			group;
 	struct ns_common	ns;
 	unsigned long		flags;
-	/* parent_could_setfcap: true if the creator if this ns had CAP_SETFCAP
-	 * in its effective capability set at the child ns creation time. */
+	/* parent_could_setfcap: true if the creator of this ns could use
+	 * CAP_SETFCAP in the parent ns at the child ns creation time.
+	 */
 	bool			parent_could_setfcap;
 
 #ifdef CONFIG_KEYS
@@ -207,6 +208,13 @@ extern bool in_userns(const struct user_namespace *ancestor,
 		       const struct user_namespace *child);
 extern bool current_in_userns(const struct user_namespace *target_ns);
 struct ns_common *ns_get_owner(struct ns_common *ns);
+
+#if IS_ENABLED(CONFIG_KUNIT)
+extern int uid_gid_map_insert_extent(struct uid_gid_map *map,
+				     struct uid_gid_extent *extent);
+extern int uid_gid_map_sort(struct uid_gid_map *map);
+#endif /* CONFIG_KUNIT */
+
 #else
 
 static inline struct user_namespace *get_user_ns(struct user_namespace *ns)

@@ -72,12 +72,14 @@ static void rtc_hctosys(struct rtc_device *rtc)
 
 	tv64.tv_sec = rtc_tm_to_time64(&tm);
 
-#if BITS_PER_LONG == 32
-	if (tv64.tv_sec > INT_MAX) {
+	if (IS_ENABLED(CONFIG_RTC_HCTOSYS_TIME32_LIMIT) &&
+	    tv64.tv_sec > INT_MAX) {
+		dev_warn(rtc->dev.parent,
+			 "hctosys: rejecting %ptR UTC due to CONFIG_RTC_HCTOSYS_TIME32_LIMIT=y\n",
+			 &tm);
 		err = -ERANGE;
 		goto err_read;
 	}
-#endif
 
 	err = do_settimeofday64(&tv64);
 
@@ -341,12 +343,13 @@ static void devm_rtc_unregister_device(void *data)
 {
 	struct rtc_device *rtc = data;
 
+	/* the entry's reader takes ops_lock and the removal waits for it */
+	rtc_proc_del_device(rtc);
 	mutex_lock(&rtc->ops_lock);
 	/*
 	 * Remove innards of this RTC, then disable it, before
 	 * letting any rtc_class_open() users access it again
 	 */
-	rtc_proc_del_device(rtc);
 	if (!test_bit(RTC_NO_CDEV, &rtc->flags))
 		cdev_device_del(&rtc->char_dev, &rtc->dev);
 	rtc->ops = NULL;

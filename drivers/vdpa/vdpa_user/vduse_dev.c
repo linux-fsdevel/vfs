@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/cdev.h>
 #include <linux/device.h>
+#include <linux/cpu.h>
 #include <linux/eventfd.h>
 #include <linux/slab.h>
 #include <linux/wait.h>
@@ -506,7 +507,7 @@ static void vduse_dev_reset(struct vduse_dev *dev)
 	}
 
 	scoped_guard(rwsem_write, &dev->rwsem) {
-		dev->suspended = false;
+		WRITE_ONCE(dev->suspended, false);
 		dev->status = 0;
 		dev->driver_features = 0;
 		dev->generation++;
@@ -567,11 +568,17 @@ static int vduse_vdpa_set_vq_address(struct vdpa_device *vdpa, u16 idx,
 
 static void vduse_vq_kick(struct vduse_virtqueue *vq)
 {
-	guard(rwsem_read)(&vq->dev->rwsem);
-	if (vq->dev->suspended)
+	/*
+	 * This runs in the context of the vdpa kick_vq op, which may be
+	 * atomic (e.g. virtio-blk kicks from blk-mq dispatch under
+	 * rcu_read_lock()), so dev->rwsem must not be taken here.
+	 * dev->suspended is checked under kick_lock instead and
+	 * vduse_vdpa_suspend() cycles every kick_lock after setting it.
+	 */
+	guard(spinlock)(&vq->kick_lock);
+	if (READ_ONCE(vq->dev->suspended))
 		return;
 
-	guard(spinlock)(&vq->kick_lock);
 	scoped_guard(spinlock_bh, &vq->ready_lock)
 		if (!vq->ready)
 			return;
@@ -946,7 +953,17 @@ static int vduse_vdpa_suspend(struct vdpa_device *vdpa)
 	ret = vduse_dev_msg_sync(dev, &msg);
 	if (ret == 0) {
 		scoped_guard(rwsem_write, &dev->rwsem)
-			dev->suspended = true;
+			WRITE_ONCE(dev->suspended, true);
+
+		/*
+		 * Kicks check dev->suspended under kick_lock without taking
+		 * the rwsem: cycle each kick_lock so that no kick that has
+		 * already passed the check is still in flight after this.
+		 */
+		for (u32 i = 0; i < dev->vq_num; i++) {
+			spin_lock(&dev->vqs[i]->kick_lock);
+			spin_unlock(&dev->vqs[i]->kick_lock);
+		}
 
 		cancel_work_sync(&dev->inject);
 		for (u32 i = 0; i < dev->vq_num; i++)
@@ -1414,14 +1431,10 @@ static void vduse_vq_update_effective_cpu(struct vduse_virtqueue *vq)
 {
 	int curr_cpu = vq->irq_effective_cpu;
 
-	while (true) {
-		curr_cpu = cpumask_next(curr_cpu, &vq->irq_affinity);
-		if (cpu_online(curr_cpu))
-			break;
-
-		if (curr_cpu >= nr_cpu_ids)
-			curr_cpu = IRQ_UNBOUND;
-	}
+	curr_cpu = cpumask_next_and_wrap(curr_cpu, &vq->irq_affinity,
+					 cpu_online_mask);
+	if (curr_cpu >= nr_cpu_ids)
+		curr_cpu = IRQ_UNBOUND;
 
 	vq->irq_effective_cpu = curr_cpu;
 }
@@ -1656,10 +1669,12 @@ static long vduse_dev_ioctl(struct file *file, unsigned int cmd,
 		ret = 0;
 		index = array_index_nospec(index, dev->vq_num);
 		if (!vduse_vq_signal_irqfd(dev->vqs[index])) {
+			cpus_read_lock();
 			vduse_vq_update_effective_cpu(dev->vqs[index]);
 			ret = vduse_dev_queue_irq_work(dev,
 						&dev->vqs[index]->inject,
 						dev->vqs[index]->irq_effective_cpu);
+			cpus_read_unlock();
 		}
 		break;
 	}
@@ -1866,11 +1881,11 @@ static long vduse_dev_compat_ioctl(struct file *file, unsigned int cmd,
 		break;
 	}
 	default:
-		ret = -ENOIOCTLCMD;
-		break;
+		return vduse_dev_ioctl(file, cmd,
+				       (unsigned long)compat_ptr(arg));
 	}
 
-	return vduse_dev_ioctl(file, cmd, (unsigned long)compat_ptr(arg));
+	return ret;
 }
 #else
 #define vduse_dev_compat_ioctl compat_ptr_ioctl
@@ -2211,7 +2226,9 @@ static bool vduse_validate_config(struct vduse_dev_config *config,
 			return false;
 	}
 
-	if (config->vq_align > PAGE_SIZE)
+	if (config->vq_align < VRING_USED_ALIGN_SIZE ||
+	    !is_power_of_2(config->vq_align) ||
+	    config->vq_align > PAGE_SIZE)
 		return false;
 
 	if (config->config_size > PAGE_SIZE)

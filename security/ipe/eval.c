@@ -102,9 +102,16 @@ void ipe_build_eval_ctx(struct ipe_eval_ctx *ctx,
 
 	if (file) {
 		build_ipe_sb_ctx(ctx, file);
-		ino = d_real_inode(file->f_path.dentry);
-		build_ipe_bdev_ctx(ctx, ino);
-		build_ipe_inode_ctx(ctx, ino);
+		/*
+		 * If the real data inode cannot be resolved, leave the bdev
+		 * and inode fields unset so the file is evaluated without
+		 * dm-verity/fs-verity state.
+		 */
+		ino = d_real_data_inode(file->f_path.dentry);
+		if (!IS_ERR(ino)) {
+			build_ipe_bdev_ctx(ctx, ino);
+			build_ipe_inode_ctx(ctx, ino);
+		}
 	}
 }
 
@@ -134,10 +141,14 @@ static bool evaluate_boot_verified(const struct ipe_eval_ctx *const ctx)
 static bool evaluate_dmv_roothash(const struct ipe_eval_ctx *const ctx,
 				  struct ipe_prop *p)
 {
-	return !!ctx->ipe_bdev &&
-	       !!ctx->ipe_bdev->root_hash &&
-	       ipe_digest_eval(p->value,
-			       ctx->ipe_bdev->root_hash);
+	const struct digest_info *root_hash;
+
+	if (!ctx->ipe_bdev)
+		return false;
+
+	root_hash = rcu_dereference(ctx->ipe_bdev->root_hash);
+
+	return root_hash && ipe_digest_eval(p->value, root_hash);
 }
 #else
 static bool evaluate_dmv_roothash(const struct ipe_eval_ctx *const ctx,

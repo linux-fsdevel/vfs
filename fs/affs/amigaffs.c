@@ -293,7 +293,11 @@ affs_remove_header(struct dentry *dentry)
 		 * i_hash_lock of the inode must only be
 		 * taken after some checks
 		 */
-		affs_lock_dir(inode);
+		if (inode == dir) {
+			retval = -EIO;
+			goto done_unlock;
+		}
+		affs_lock_subdir(inode);
 		retval = affs_empty_dir(inode);
 		affs_unlock_dir(inode);
 		if (retval)
@@ -479,9 +483,9 @@ affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 	vaf.fmt = fmt;
 	vaf.va = &args;
 	pr_crit("error (device %s): %s(): %pV\n", sb->s_id, function, &vaf);
-	if (!sb_rdonly(sb))
+	/* SB_RDONLY needs s_umount, see sb_set_emergency_ro(). */
+	if (!sb_rdonly(sb) && sb_set_emergency_ro(sb))
 		pr_warn("Remounting filesystem read-only\n");
-	sb->s_flags |= SB_RDONLY;
 	va_end(args);
 }
 

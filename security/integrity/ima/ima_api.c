@@ -116,7 +116,7 @@ int ima_store_template(struct ima_template_entry *entry,
 		if (result < 0) {
 			integrity_audit_msg(AUDIT_INTEGRITY_PCR, inode,
 					    template_name, op,
-					    audit_cause, result, 0);
+					    audit_cause, result, 0, result);
 			return result;
 		}
 	}
@@ -159,7 +159,7 @@ void ima_add_violation(struct file *file, const unsigned char *filename,
 		ima_free_template_entry(entry);
 err_out:
 	integrity_audit_msg(AUDIT_INTEGRITY_PCR, inode, filename,
-			    op, cause, result, 0);
+			    op, cause, result, 0, result);
 }
 
 /**
@@ -188,7 +188,7 @@ err_out:
  * Returns IMA_MEASURE, IMA_APPRAISE mask.
  *
  */
-int ima_get_action(struct mnt_idmap *idmap, struct inode *inode,
+int ima_get_action(const struct mnt_idmap *idmap, struct inode *inode,
 		   const struct cred *cred, struct lsm_prop *prop, int mask,
 		   enum ima_hooks func, int *pcr,
 		   struct ima_template_desc **template_desc,
@@ -246,7 +246,7 @@ int ima_collect_measurement(struct ima_iint_cache *iint, struct file *file,
 {
 	const char *audit_cause = "failed";
 	struct inode *inode = file_inode(file);
-	struct inode *real_inode = d_real_inode(file_dentry(file));
+	struct inode *real_inode;
 	struct ima_max_digest_data hash;
 	struct ima_digest_data *hash_hdr = container_of(&hash.hdr,
 						struct ima_digest_data, hdr);
@@ -269,6 +269,13 @@ int ima_collect_measurement(struct ima_iint_cache *iint, struct file *file,
 		goto out;
 
 	/*
+	 * On stacked filesystems the inode hosting the data may have to be
+	 * looked up and that can fail. Treat it like failing to calculate
+	 * the hash.
+	 */
+	real_inode = d_real_data_inode(file_dentry(file));
+
+	/*
 	 * Detect file change based on STATX_CHANGE_COOKIE, when supported,
 	 * and fallback to detecting file change based on i_version.
 	 *
@@ -280,7 +287,7 @@ int ima_collect_measurement(struct ima_iint_cache *iint, struct file *file,
 				   AT_STATX_SYNC_AS_STAT);
 	if (!result && (stat.result_mask & STATX_CHANGE_COOKIE))
 		i_version = stat.change_cookie;
-	else if (IS_I_VERSION(real_inode))
+	else if (!IS_ERR(real_inode) && IS_I_VERSION(real_inode))
 		i_version = inode_peek_iversion(real_inode);
 
 	hash.hdr.algo = algo;
@@ -289,7 +296,9 @@ int ima_collect_measurement(struct ima_iint_cache *iint, struct file *file,
 	/* Initialize hash digest to 0's in case of failure */
 	memset(&hash.digest, 0, sizeof(hash.digest));
 
-	if (iint->flags & IMA_VERITY_REQUIRED) {
+	if (IS_ERR(real_inode)) {
+		result = PTR_ERR(real_inode);
+	} else if (iint->flags & IMA_VERITY_REQUIRED) {
 		if (!ima_get_verity_digest(iint, inode, &hash)) {
 			audit_cause = "no-verity-digest";
 			result = -ENODATA;
@@ -314,7 +323,7 @@ int ima_collect_measurement(struct ima_iint_cache *iint, struct file *file,
 	memcpy(iint->ima_hash, &hash, length);
 	if (real_inode == inode)
 		iint->real_inode.version = i_version;
-	else
+	else if (!IS_ERR(real_inode))
 		integrity_inode_attrs_store(&iint->real_inode, i_version,
 					    real_inode);
 
@@ -330,7 +339,7 @@ out:
 
 		integrity_audit_msg(AUDIT_INTEGRITY_DATA, inode,
 				    filename.name.name, "collect_data",
-				    audit_cause, result, 0);
+				    audit_cause, result, 0, result);
 
 		release_dentry_name_snapshot(&filename);
 	}
@@ -383,7 +392,7 @@ void ima_store_measurement(struct ima_iint_cache *iint, struct file *file,
 	result = ima_alloc_init_template(&event_data, &entry, template_desc);
 	if (result < 0) {
 		integrity_audit_msg(AUDIT_INTEGRITY_PCR, inode, filename,
-				    op, audit_cause, result, 0);
+				    op, audit_cause, result, 0, result);
 		return;
 	}
 

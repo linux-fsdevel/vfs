@@ -1089,14 +1089,15 @@ instant_inode:
 
 /**
  * smack_inode_link - Smack check on link
+ * @idmap: idmap of the mount
  * @old_dentry: the existing object
  * @dir: unused
  * @new_dentry: the new object
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_link(struct dentry *old_dentry, struct inode *dir,
-			    struct dentry *new_dentry)
+static int smack_inode_link(const struct mnt_idmap *idmap, struct dentry *old_dentry,
+			    struct inode *dir, struct dentry *new_dentry)
 {
 	struct smack_known *isp;
 	struct smk_audit_info ad;
@@ -1226,6 +1227,7 @@ static int smack_inode_rename(struct inode *old_inode,
 
 /**
  * smack_inode_permission - Smack version of permission()
+ * @idmap: idmap of the mount
  * @inode: the inode in question
  * @mask: the access requested
  *
@@ -1233,7 +1235,8 @@ static int smack_inode_rename(struct inode *old_inode,
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_permission(struct inode *inode, int mask)
+static int smack_inode_permission(const struct mnt_idmap *idmap, struct inode *inode,
+				  int mask)
 {
 	struct superblock_smack *sbsp = smack_superblock(inode->i_sb);
 	struct smk_audit_info ad;
@@ -1270,7 +1273,7 @@ static int smack_inode_permission(struct inode *inode, int mask)
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+static int smack_inode_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 			       struct iattr *iattr)
 {
 	struct smk_audit_info ad;
@@ -1348,7 +1351,7 @@ static int smack_inode_xattr_skipcap(const char *name)
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_setxattr(struct mnt_idmap *idmap,
+static int smack_inode_setxattr(const struct mnt_idmap *idmap,
 				struct dentry *dentry, const char *name,
 				const void *value, size_t size, int flags)
 {
@@ -1482,7 +1485,7 @@ static int smack_inode_getxattr(struct dentry *dentry, const char *name)
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_removexattr(struct mnt_idmap *idmap,
+static int smack_inode_removexattr(const struct mnt_idmap *idmap,
 				   struct dentry *dentry, const char *name)
 {
 	struct inode_smack *isp;
@@ -1543,7 +1546,7 @@ static int smack_inode_removexattr(struct mnt_idmap *idmap,
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_set_acl(struct mnt_idmap *idmap,
+static int smack_inode_set_acl(const struct mnt_idmap *idmap,
 			       struct dentry *dentry, const char *acl_name,
 			       struct posix_acl *kacl)
 {
@@ -1566,7 +1569,7 @@ static int smack_inode_set_acl(struct mnt_idmap *idmap,
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_get_acl(struct mnt_idmap *idmap,
+static int smack_inode_get_acl(const struct mnt_idmap *idmap,
 			       struct dentry *dentry, const char *acl_name)
 {
 	struct smk_audit_info ad;
@@ -1588,7 +1591,7 @@ static int smack_inode_get_acl(struct mnt_idmap *idmap,
  *
  * Returns 0 if access is permitted, an error code otherwise
  */
-static int smack_inode_remove_acl(struct mnt_idmap *idmap,
+static int smack_inode_remove_acl(const struct mnt_idmap *idmap,
 				  struct dentry *dentry, const char *acl_name)
 {
 	struct smk_audit_info ad;
@@ -1612,7 +1615,7 @@ static int smack_inode_remove_acl(struct mnt_idmap *idmap,
  *
  * Returns the size of the attribute or an error code
  */
-static int smack_inode_getsecurity(struct mnt_idmap *idmap,
+static int smack_inode_getsecurity(const struct mnt_idmap *idmap,
 				   struct inode *inode, const char *name,
 				   void **buffer, bool alloc)
 {
@@ -2653,22 +2656,26 @@ static int smack_netlbl_add(struct sock *sk)
  *
  * Remove the outbound smack value from a socket
  */
-static void smack_netlbl_delete(struct sock *sk)
+static int smack_netlbl_delete(struct sock *sk)
 {
 	struct socket_smack *ssp = smack_sock(sk);
+	int rc;
 
 	/*
 	 * Take the label off the socket if one is set.
 	 */
 	if (ssp->smk_state != SMK_NETLBL_LABELED)
-		return;
+		return 0;
 
 	local_bh_disable();
 	bh_lock_sock_nested(sk);
-	netlbl_sock_delattr(sk);
+	rc = netlbl_sock_delattr(sk);
 	bh_unlock_sock(sk);
 	local_bh_enable();
+	if (rc)
+		return rc;
 	ssp->smk_state = SMK_NETLBL_UNLABELED;
+	return 0;
 }
 
 /**
@@ -2708,7 +2715,7 @@ static int smk_ipv4_check(struct sock *sk, struct sockaddr_in *sap)
 		 * Clear the socket netlabel if it's set.
 		 */
 		if (!rc)
-			smack_netlbl_delete(sk);
+			rc = smack_netlbl_delete(sk);
 	}
 	rcu_read_unlock();
 
@@ -4545,7 +4552,7 @@ static int smack_inet_conn_request(const struct sock *sk, struct sk_buff *skb,
 	if (hskp == NULL)
 		rc = netlbl_req_setattr(req, &ssp->smk_out->smk_netlabel);
 	else
-		netlbl_req_delattr(req);
+		rc = netlbl_req_delattr(req);
 
 	return rc;
 }

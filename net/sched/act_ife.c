@@ -50,8 +50,7 @@ int ife_encode_meta_u16(u16 metaval, void *skbdata, struct tcf_meta_info *mi)
 		edata = *(u16 *)mi->metaval;
 	else if (metaval)
 		edata = metaval;
-
-	if (!edata) /* will not encode */
+	else
 		return 0;
 
 	edata = htons(edata);
@@ -94,8 +93,7 @@ int ife_encode_meta_u32(u32 metaval, void *skbdata, struct tcf_meta_info *mi)
 		edata = *(u32 *)mi->metaval;
 	else if (metaval)
 		edata = metaval;
-
-	if (!edata) /* will not encode */
+	else
 		return 0;
 
 	edata = htonl(edata);
@@ -737,6 +735,7 @@ static int tcf_ife_decode(struct sk_buff *skb, const struct tc_action *a,
 		u8 *curr_data;
 		u16 mtype;
 		u16 dlen;
+		int ret;
 
 		curr_data = ife_tlv_meta_decode(tlv_data, ifehdr_end, &mtype,
 						&dlen, NULL);
@@ -745,13 +744,19 @@ static int tcf_ife_decode(struct sk_buff *skb, const struct tc_action *a,
 			return TC_ACT_SHOT;
 		}
 
-		if (find_decode_metaid(skb, p, mtype, dlen, curr_data)) {
-			/* abuse overlimits to count when we receive metadata
-			 * but dont have an ops for it
+		ret = find_decode_metaid(skb, p, mtype, dlen, curr_data);
+		if (ret < 0) {
+			/* abuse overlimits to count metadata we cannot
+			 * decode: no ops for it, or the decoder rejected it
 			 */
-			pr_info_ratelimited("Unknown metaid %d dlen %d\n",
-					    mtype, dlen);
 			qstats_cpu_overlimit_inc(ife->common.cpu_qstats);
+
+			if (ret == -ENOENT)
+				pr_info_ratelimited("Unknown metaid %d dlen %d\n",
+						    mtype, dlen);
+			else
+				pr_info_ratelimited("Failed to decode metaid %d dlen %d err %d\n",
+						    mtype, dlen, ret);
 		}
 	}
 
@@ -762,6 +767,10 @@ static int tcf_ife_decode(struct sk_buff *skb, const struct tc_action *a,
 
 	skb->protocol = eth_type_trans(skb, skb->dev);
 	skb_reset_network_header(skb);
+	if (!skb_at_tc_ingress(skb)) {
+		skb_push(skb, ETH_HLEN);
+		skb_reset_mac_len(skb);
+	}
 
 	return action;
 }
@@ -869,13 +878,16 @@ drop:
  * is an Ethernet header because the skb could've been redirected with mirred
  * from a non-Ethernet device.
  */
-static bool tcf_ife_is_eth_skb(const struct sk_buff *skb)
+static bool tcf_ife_is_eth_skb(struct sk_buff *skb)
 {
 	if (skb->dev->type != ARPHRD_ETHER &&
 	    skb->dev->type != ARPHRD_LOOPBACK)
 		return false;
 
-	return !skb_at_tc_ingress(skb) || skb->mac_len == ETH_HLEN;
+	if (skb_at_tc_ingress(skb))
+		return skb->mac_len == ETH_HLEN;
+
+	return pskb_may_pull(skb, ETH_HLEN);
 }
 
 TC_INDIRECT_SCOPE int tcf_ife_act(struct sk_buff *skb,

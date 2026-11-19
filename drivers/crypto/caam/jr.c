@@ -542,8 +542,7 @@ static int caam_jr_init(struct device *dev)
 	if (!jrp->outring)
 		return -ENOMEM;
 
-	jrp->entinfo = devm_kcalloc(dev, JOBR_DEPTH, sizeof(*jrp->entinfo),
-				    GFP_KERNEL);
+	jrp->entinfo = devm_kzalloc_objs(dev, *jrp->entinfo, JOBR_DEPTH);
 	if (!jrp->entinfo)
 		return -ENOMEM;
 
@@ -583,19 +582,36 @@ static int caam_jr_probe(struct platform_device *pdev)
 	struct caam_drv_private_jr *jrpriv;
 	static int total_jobrs;
 	void __iomem *ctrl;
+	struct resource *r;
 	int error;
 	int irq;
 
-	ctrl = devm_platform_ioremap_resource(pdev, 0);
-	if (IS_ERR(ctrl))
-		return PTR_ERR(ctrl);
+	/*
+	 * The job rings live inside the register window of their parent
+	 * fsl,sec-v4.0 node, which caam_probe() already reserves (and maps)
+	 * via devm_of_iomap().  A requested region that overlaps that
+	 * reservation, e.g. from devm_platform_ioremap_resource(), would
+	 * therefore fail with -EBUSY, so map the registers without claiming
+	 * the region here.
+	 */
+	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	if (!r) {
+		dev_err(&pdev->dev, "platform_get_resource() failed\n");
+		return -EINVAL;
+	}
+
+	ctrl = devm_ioremap(&pdev->dev, r->start, resource_size(r));
+	if (!ctrl) {
+		dev_err(&pdev->dev, "devm_ioremap() failed\n");
+		return -ENOMEM;
+	}
 
 	irq = platform_get_irq(pdev, 0);
 	if (irq < 0)
 		return irq;
 
 	jrdev = &pdev->dev;
-	jrpriv = devm_kzalloc(jrdev, sizeof(*jrpriv), GFP_KERNEL);
+	jrpriv = devm_kzalloc_obj(jrdev, *jrpriv);
 	if (!jrpriv)
 		return -ENOMEM;
 

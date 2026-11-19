@@ -61,8 +61,7 @@ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
 		goto out;
 	}
 
-	clkfreq = devm_kcalloc(dev, sz, sizeof(*clkfreq),
-			       GFP_KERNEL);
+	clkfreq = devm_kzalloc_objs(dev, *clkfreq, sz);
 	if (!clkfreq) {
 		ret = -ENOMEM;
 		goto out;
@@ -82,7 +81,7 @@ static int ufshcd_parse_clock_info(struct ufs_hba *hba)
 		if (ret)
 			goto out;
 
-		clki = devm_kzalloc(dev, sizeof(*clki), GFP_KERNEL);
+		clki = devm_kzalloc_obj(dev, *clki);
 		if (!clki) {
 			ret = -ENOMEM;
 			goto out;
@@ -137,7 +136,7 @@ int ufshcd_populate_vreg(struct device *dev, const char *name,
 		goto out;
 	}
 
-	vreg = devm_kzalloc(dev, sizeof(*vreg), GFP_KERNEL);
+	vreg = devm_kzalloc_obj(dev, *vreg);
 	if (!vreg)
 		return -ENOMEM;
 
@@ -206,7 +205,11 @@ static void ufshcd_init_lanes_per_dir(struct ufs_hba *hba)
 		dev_dbg(hba->dev,
 			"%s: failed to read lanes-per-direction, ret=%d\n",
 			__func__, ret);
-		hba->lanes_per_direction = UFSHCD_DEFAULT_LANES_PER_DIRECTION;
+		/* Old R-Car S4 DTBs lack "lanes-per-direction = <1>" */
+		if (of_device_is_compatible(dev->of_node, "renesas,r8a779f0-ufs"))
+			hba->lanes_per_direction = 1;
+		else
+			hba->lanes_per_direction = UFSHCD_DEFAULT_LANES_PER_DIRECTION;
 	}
 }
 
@@ -436,7 +439,7 @@ static int ufshcd_parse_operating_points(struct ufs_hba *hba)
 	}
 
 	/* OPP expects clk_names to be NULL terminated */
-	clk_names = devm_kcalloc(dev, cnt + 1, sizeof(*clk_names), GFP_KERNEL);
+	clk_names = devm_kzalloc_objs(dev, *clk_names, cnt + 1);
 	if (!clk_names)
 		return -ENOMEM;
 
@@ -450,7 +453,7 @@ static int ufshcd_parse_operating_points(struct ufs_hba *hba)
 		if (ret)
 			return ret;
 
-		clki = devm_kzalloc(dev, sizeof(*clki), GFP_KERNEL);
+		clki = devm_kzalloc_obj(dev, *clki);
 		if (!clki)
 			return -ENOMEM;
 

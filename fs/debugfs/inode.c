@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/pseudo_fs.h>
 #include <linux/fs_parser.h>
 #include <linux/pagemap.h>
 #include <linux/init.h>
@@ -42,7 +43,7 @@ static bool debugfs_enabled __ro_after_init = IS_ENABLED(CONFIG_DEBUG_FS_ALLOW_A
  * so that we can use the file mode as part of a heuristic to determine whether
  * to lock down individual files.
  */
-static int debugfs_setattr(struct mnt_idmap *idmap,
+static int debugfs_setattr(const struct mnt_idmap *idmap,
 			   struct dentry *dentry, struct iattr *ia)
 {
 	int ret;
@@ -317,6 +318,7 @@ static int debugfs_init_fs_context(struct fs_context *fc)
 	fsi->mode = DEBUGFS_DEFAULT_MODE;
 
 	fc->s_fs_info = fsi;
+	fc_init_pseudo(fc);
 	fc->ops = &debugfs_context_ops;
 	return 0;
 }
@@ -368,6 +370,9 @@ static struct dentry *debugfs_start_creating(const char *name,
 	if (!debugfs_enabled)
 		return ERR_PTR(-EPERM);
 
+	if (IS_ERR(parent))
+		return parent;
+
 	if (!debugfs_initialized()) {
 		pr_err("Unable to create file '%s', debugfs is not initialized yet\n",
 		       name);
@@ -375,9 +380,6 @@ static struct dentry *debugfs_start_creating(const char *name,
 	}
 
 	pr_debug("creating file '%s'\n", name);
-
-	if (IS_ERR(parent))
-		return parent;
 
 	error = simple_pin_fs(&debug_fs_type, &debugfs_mount,
 			      &debugfs_mount_count);

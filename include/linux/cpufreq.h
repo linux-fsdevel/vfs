@@ -146,8 +146,11 @@ struct cpufreq_policy {
 	/* Per policy boost supported flag. */
 	bool			boost_supported;
 
-	/* Pending policy->min/max update for the driver */
-	bool			update_limits;
+	/* Force passing target frequency to the driver. */
+	bool			force_target;
+
+	/* The policy has been suspended. */
+	bool			suspended;
 
 	 /* Cached frequency lookup from cpufreq_driver_resolve_freq. */
 	unsigned int cached_target_freq;
@@ -419,6 +422,9 @@ struct cpufreq_driver {
 
 	/* Will be called after the driver is fully initialized */
 	void		(*ready)(struct cpufreq_policy *policy);
+
+	/* Return the capacity reference frequency for policy. */
+	unsigned int	(*scale_freq_ref)(struct cpufreq_policy *policy);
 
 	struct freq_attr **attr;
 

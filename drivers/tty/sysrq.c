@@ -911,10 +911,7 @@ static bool sysrq_handle_keypress(struct sysrq_state *sysrq,
 		 * keyboard state so we can release keys that have been
 		 * pressed before entering SysRq mode.
 		 */
-		if (value)
-			set_bit(code, sysrq->key_down);
-		else
-			clear_bit(code, sysrq->key_down);
+		assign_bit(code, sysrq->key_down, value);
 
 		if (was_active)
 			schedule_work(&sysrq->reinject_work);
@@ -1203,17 +1200,14 @@ EXPORT_SYMBOL(unregister_sysrq_key);
  * However, if the first character is an underscore,
  * all characters are processed.
  */
-static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
+static ssize_t write_sysrq_trigger(struct file *file, char *buf,
 				   size_t count, loff_t *ppos)
 {
 	bool bulk = false;
 	size_t i;
 
 	for (i = 0; i < count; i++) {
-		char c;
-
-		if (get_user(c, buf + i))
-			return -EFAULT;
+		char c = buf[i];
 
 		if (c == '_')
 			bulk = true;
@@ -1228,7 +1222,7 @@ static ssize_t write_sysrq_trigger(struct file *file, const char __user *buf,
 }
 
 static const struct proc_ops sysrq_trigger_proc_ops = {
-	.proc_write	= write_sysrq_trigger,
+	.proc_write_buf	= write_sysrq_trigger,
 	.proc_lseek	= noop_llseek,
 };
 

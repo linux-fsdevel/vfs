@@ -315,7 +315,7 @@ int snd_cs46xx_download(struct snd_cs46xx *chip,
 	dst = chip->region.idx[bank+1].remap_addr + offset;
 	len /= sizeof(u32);
 
-	/* writel already converts 32-bit value to right endianess */
+	/* writel already converts 32-bit value to right endianness */
 	while (len-- > 0) {
 		writel(*src++, dst);
 		dst += sizeof(u32);
@@ -474,7 +474,7 @@ int snd_cs46xx_clear_BA1(struct snd_cs46xx *chip,
 	dst = chip->region.idx[bank+1].remap_addr + offset;
 	len /= sizeof(u32);
 
-	/* writel already converts 32-bit value to right endianess */
+	/* writel already converts 32-bit value to right endianness */
 	while (len-- > 0) {
 		writel(0, dst);
 		dst += sizeof(u32);
@@ -1444,7 +1444,7 @@ static int _cs46xx_playback_open_channel (struct snd_pcm_substream *substream,in
 	struct snd_cs46xx_pcm * cpcm;
 	struct snd_pcm_runtime *runtime = substream->runtime;
 
-	cpcm = kzalloc(sizeof(*cpcm), GFP_KERNEL);
+	cpcm = kzalloc_obj(*cpcm);
 	if (cpcm == NULL)
 		return -ENOMEM;
 	if (snd_dma_alloc_pages(SNDRV_DMA_TYPE_DEV, &chip->pci->dev,
@@ -2741,13 +2741,12 @@ static inline void snd_cs46xx_remove_gameport(struct snd_cs46xx *chip) { }
 
 static ssize_t snd_cs46xx_io_read(struct snd_info_entry *entry,
 				  void *file_private_data,
-				  struct file *file, char __user *buf,
+				  struct file *file, char *buf,
 				  size_t count, loff_t pos)
 {
 	struct snd_cs46xx_region *region = entry->private_data;
 	
-	if (copy_to_user_fromio(buf, region->remap_addr + pos, count))
-		return -EFAULT;
+	memcpy_fromio(buf, region->remap_addr + pos, count);
 	return count;
 }
 
@@ -2764,7 +2763,7 @@ static int snd_cs46xx_proc_init(struct snd_card *card, struct snd_cs46xx *chip)
 		struct snd_cs46xx_region *region = &chip->region.idx[idx];
 		if (! snd_card_proc_new(card, region->name, &entry)) {
 			entry->content = SNDRV_INFO_CONTENT_DATA;
-			entry->private_data = chip;
+			entry->private_data = region;
 			entry->c.ops = &snd_cs46xx_proc_io_ops;
 			entry->size = region->size;
 			entry->mode = S_IFREG | 0400;
@@ -3039,7 +3038,7 @@ static int snd_cs46xx_chip_init(struct snd_cs46xx *chip)
 #endif
 
 	/*
-	 *  Assert the vaid frame signal so that we can start sending commands
+	 *  Assert the valid frame signal so that we can start sending commands
 	 *  to the AC97 codec.
 	 */
 	snd_cs46xx_pokeBA0(chip, BA0_ACCTL, ACCTL_VFRM | ACCTL_ESYN | ACCTL_RSTN);
@@ -3901,10 +3900,8 @@ int snd_cs46xx_create(struct snd_card *card,
 	snd_cs46xx_proc_init(card, chip);
 
 #ifdef CONFIG_PM_SLEEP
-	chip->saved_regs = devm_kmalloc_array(&pci->dev,
-					      ARRAY_SIZE(saved_regs),
-					      sizeof(*chip->saved_regs),
-					      GFP_KERNEL);
+	chip->saved_regs = devm_kmalloc_objs(&pci->dev, *chip->saved_regs,
+					     ARRAY_SIZE(saved_regs));
 	if (!chip->saved_regs)
 		return -ENOMEM;
 #endif

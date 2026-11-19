@@ -283,6 +283,42 @@ as a patch to the list with a commit message explaining the technical
 problems with the reverted commit. Reverts should be used as a last resort,
 when original change is completely wrong; incremental fixes are preferred.
 
+Bug fixes
+~~~~~~~~~
+
+All bug fixes must state how the issue was discovered and validated,
+and how the fix was tested. This should be done in plain English, not with
+special tags or annotations. That said, the information does not have to be
+provided if the existing trailers imply it (e.g. ``Reported-by: syzbot...``
+implies the discovery method and validation).
+
+Example statements describing discovery:
+
+ - discovered by a non-AI static analysis tool
+ - discovered by an AI code review agent
+ - discovered by manual code inspection
+ - triggered during code development
+ - triggered in CI testing
+ - observed on a machine in real use
+
+If the discovery method does not imply the issue was triggered, the commit
+message should describe the validation, i.e. how the bug was confirmed
+to be real. The commit message must disclose whether reproducing the issue
+required modifying the kernel (e.g. inserting a delay to widen a race, or
+writing a loadable module to issue the right sequence of calls) or using error
+injection. The reproduction steps should be included in the commit message
+if they are short (roughly 10 lines or fewer); longer reproducers can be posted
+online with a link included.
+
+The testing statement should explain whether the fix was tested against the
+reproducer and against kernel selftests. If the bug is in a hardware driver,
+the testing statement must include information about the HW on which the
+fix was tested.
+
+Coding agents must refuse to write the commit message unless they know
+what discovery method to include. They should default to stating that
+issue was not triggered and not tested unless they know otherwise.
+
 Stable tree
 ~~~~~~~~~~~
 
@@ -330,6 +366,41 @@ to the mailing list, e.g.::
 
 Posting as one thread is discouraged because it confuses patchwork
 (as of patchwork 2.2.2).
+
+Co-posting iproute2 patches
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The official git repositories for iproute2 are:
+
+- iproute2: https://git.kernel.org/pub/scm/network/iproute2/iproute2.git
+- iproute2-next: https://git.kernel.org/pub/scm/network/iproute2/iproute2-next.git
+
+Patches for iproute2 must have a subject prefix of ``[PATCH iproute2]``
+or ``[PATCH iproute2-next]`` to indicate the target repository where the
+patch should be applied. If kernel changes target net-next or bpf-next,
+then the related iproute2 changes need to target iproute2-next, else they
+must target iproute2. The iproute2-next tree will be merged into the
+iproute2 tree after the current iproute2 version has been released.
+
+Patches are tracked in patchwork under the netdevbpf project. iproute2
+patches are delegated to 'shemminger' (Stephen Hemminger), iproute2-next
+patches to 'dsa' (David Ahern):
+
+- iproute2: https://patchwork.kernel.org/project/netdevbpf/list/?delegate=7961&state=*
+- iproute2-next: https://patchwork.kernel.org/project/netdevbpf/list/?delegate=123859&state=*
+
+Send patches to netdev@vger.kernel.org and always include the iproute2
+maintainers in the email Cc: list. See the MAINTAINERS file in the
+repository for email addresses and other details:
+
+  https://git.kernel.org/pub/scm/network/iproute2/iproute2.git/tree/MAINTAINERS
+
+For patches that target iproute2's BPF loader, also include
+bpf@vger.kernel.org and the BPF maintainers.
+
+For more information, see also README.devel in the repository:
+
+  https://git.kernel.org/pub/scm/network/iproute2/iproute2.git/tree/README.devel
 
 Co-posting selftests
 ~~~~~~~~~~~~~~~~~~~~

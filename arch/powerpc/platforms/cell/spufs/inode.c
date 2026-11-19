@@ -11,6 +11,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/pseudo_fs.h>
 #include <linux/fs_parser.h>
 #include <linux/fsnotify.h>
 #include <linux/backing-dev.h>
@@ -92,7 +93,7 @@ out:
 }
 
 static int
-spufs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+spufs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 	      struct iattr *attr)
 {
 	struct inode *inode = d_inode(dentry);
@@ -266,9 +267,9 @@ spufs_mkdir(struct inode *dir, struct dentry *dentry, unsigned int flags,
 static int spufs_context_open(const struct path *path)
 {
 	FD_PREPARE(fdf, 0, dentry_open(path, O_RDONLY, current_cred()));
-	if (fdf.err)
-		return fdf.err;
-	fd_prepare_file(fdf)->f_op = &spufs_context_fops;
+	if (fdf->fd < 0)
+		return fdf->fd;
+	fdf->file->f_op = &spufs_context_fops;
 	return fd_publish(fdf);
 }
 
@@ -499,9 +500,9 @@ static int spufs_gang_open(const struct path *path)
 	 * in error path of *_open().
 	 */
 	FD_PREPARE(fdf, 0, dentry_open(path, O_RDONLY, current_cred()));
-	if (fdf.err)
-		return fdf.err;
-	fd_prepare_file(fdf)->f_op = &spufs_gang_fops;
+	if (fdf->fd < 0)
+		return fdf->fd;
+	fdf->file->f_op = &spufs_gang_fops;
 	return fd_publish(fdf);
 }
 
@@ -741,6 +742,7 @@ static int spufs_init_fs_context(struct fs_context *fc)
 
 	fc->fs_private = ctx;
 	fc->s_fs_info = sbi;
+	fc_init_pseudo(fc);
 	fc->ops = &spufs_context_ops;
 	return 0;
 

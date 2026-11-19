@@ -117,7 +117,14 @@ static inline bool kernfs_rename_is_locked(const struct kernfs_node *kn)
 
 static inline const char *kernfs_rcu_name(const struct kernfs_node *kn)
 {
-	return rcu_dereference_check(kn->name, kernfs_root_is_locked(kn));
+	/*
+	 * Like kernfs_node::__parent below, the name is only replaced under
+	 * both kernfs_root::kernfs_rwsem and kernfs_root::kernfs_rename_lock,
+	 * so either one keeps it, and the string it points at, stable.
+	 */
+	return rcu_dereference_check(kn->name,
+				     kernfs_root_is_locked(kn) ||
+				     kernfs_rename_is_locked(kn));
 }
 
 static inline struct kernfs_node *kernfs_parent(const struct kernfs_node *kn)
@@ -147,20 +154,19 @@ static inline struct kernfs_node *kernfs_dentry_node(struct dentry *dentry)
 static inline void kernfs_set_rev(struct kernfs_node *parent,
 				  struct dentry *dentry)
 {
-	dentry->d_time = parent->dir.rev;
+	WRITE_ONCE(dentry->d_time, READ_ONCE(parent->dir.rev));
 }
 
 static inline void kernfs_inc_rev(struct kernfs_node *parent)
 {
-	parent->dir.rev++;
+	lockdep_assert_held_write(&parent->dir.root->kernfs_rwsem);
+	WRITE_ONCE(parent->dir.rev, parent->dir.rev + 1);
 }
 
 static inline bool kernfs_dir_changed(struct kernfs_node *parent,
 				      struct dentry *dentry)
 {
-	if (parent->dir.rev != dentry->d_time)
-		return true;
-	return false;
+	return READ_ONCE(parent->dir.rev) != READ_ONCE(dentry->d_time);
 }
 
 extern const struct super_operations kernfs_sops;
@@ -170,12 +176,14 @@ extern struct kmem_cache *kernfs_node_cache, *kernfs_iattrs_cache;
  * inode.c
  */
 extern const struct xattr_handler * const kernfs_xattr_handlers[];
+struct inode *kernfs_get_inode_locked(struct inode *inode,
+				      struct kernfs_node *kn);
 void kernfs_evict_inode(struct inode *inode);
-int kernfs_iop_permission(struct mnt_idmap *idmap,
+int kernfs_iop_permission(const struct mnt_idmap *idmap,
 			  struct inode *inode, int mask);
-int kernfs_iop_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+int kernfs_iop_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 		       struct iattr *iattr);
-int kernfs_iop_getattr(struct mnt_idmap *idmap,
+int kernfs_iop_getattr(const struct mnt_idmap *idmap,
 		       const struct path *path, struct kstat *stat,
 		       u32 request_mask, unsigned int query_flags);
 ssize_t kernfs_iop_listxattr(struct dentry *dentry, char *buf, size_t size);
@@ -188,6 +196,7 @@ extern const struct dentry_operations kernfs_dops;
 extern const struct file_operations kernfs_dir_fops;
 extern const struct inode_operations kernfs_dir_iops;
 
+bool kernfs_active(struct kernfs_node *kn);
 struct kernfs_node *kernfs_get_active(struct kernfs_node *kn);
 void kernfs_put_active(struct kernfs_node *kn);
 int kernfs_add_one(struct kernfs_node *kn);

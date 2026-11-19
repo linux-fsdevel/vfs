@@ -3,8 +3,10 @@
 #define pr_fmt(fmt) "generic pinconfig core: " fmt
 
 #include <linux/array_size.h>
+#include <linux/cleanup.h>
 #include <linux/device.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/slab.h>
 
@@ -105,11 +107,11 @@ static int pinctrl_generic_pins_function_dt_subnode_to_map(struct pinctrl_dev *p
 		return npins;
 	}
 
-	pins = devm_kcalloc(dev, npins, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(dev, *pins, npins);
 	if (!pins)
 		return -ENOMEM;
 
-	functions = devm_kcalloc(dev, npins, sizeof(*functions), GFP_KERNEL);
+	functions = devm_kzalloc_objs(dev, *functions, npins);
 	if (!functions)
 		return -ENOMEM;
 
@@ -151,11 +153,11 @@ static int pinctrl_generic_pinmux_dt_subnode_to_map(struct pinctrl_dev *pctldev,
 		return npins;
 	}
 
-	pins = devm_kcalloc(dev, npins, sizeof(*pins), GFP_KERNEL);
+	pins = devm_kzalloc_objs(dev, *pins, npins);
 	if (!pins)
 		return -ENOMEM;
 
-	muxes = devm_kcalloc(dev, npins, sizeof(*muxes), GFP_KERNEL);
+	muxes = devm_kzalloc_objs(dev, *muxes, npins);
 	if (!muxes)
 		return -ENOMEM;
 
@@ -196,6 +198,8 @@ static int pinctrl_generic_dt_node_to_map(struct pinctrl_dev *pctldev,
 	int ngroups = 0;
 	int ret;
 
+	guard(mutex)(&pctldev->mutex);
+
 	*maps = NULL;
 	*num_maps = 0;
 
@@ -206,7 +210,7 @@ static int pinctrl_generic_dt_node_to_map(struct pinctrl_dev *pctldev,
 	if (!of_property_present(np, "pins"))
 		goto parent;
 
-	group_names = devm_kcalloc(dev, 1, sizeof(*group_names), GFP_KERNEL);
+	group_names = devm_kzalloc_objs(dev, *group_names, 1);
 	if (!group_names)
 		return -ENOMEM;
 
@@ -229,7 +233,7 @@ parent:
 	for_each_available_child_of_node(np, child_np)
 		ngroups += 1;
 
-	group_names = devm_kcalloc(dev, ngroups, sizeof(*group_names), GFP_KERNEL);
+	group_names = devm_kzalloc_objs(dev, *group_names, ngroups);
 	if (!group_names)
 		return -ENOMEM;
 

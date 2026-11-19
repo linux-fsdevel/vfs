@@ -5,7 +5,7 @@
 
   debugfs driver debugging code
 
-  Copyright (c) 2005-2007 Michael Buesch <m@bues.ch>
+  Copyright (c) 2005-2007 Michael Buesch
 
 
 */
@@ -557,7 +557,7 @@ static ssize_t b43_debugfs_write(struct file *file,
 
 	if (!count)
 		return 0;
-	if (count > PAGE_SIZE)
+	if (count >= PAGE_SIZE)
 		return -E2BIG;
 	dev = file->private_data;
 	if (!dev)

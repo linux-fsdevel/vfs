@@ -25,9 +25,11 @@ TEST_PROGS := \
 	cmsg_so_mark.sh \
 	cmsg_so_priority.sh \
 	cmsg_time.sh \
+	cork_fragsize.py \
 	double_udp_encap.sh \
 	drop_monitor_tests.sh \
 	ecmp_rehash.sh \
+	exception_cache.sh \
 	fcnal-ipv4.sh \
 	fcnal-ipv6.sh \
 	fcnal-other.sh \
@@ -40,10 +42,12 @@ TEST_PROGS := \
 	fib_rule_tests.sh \
 	fib_tests.sh \
 	fin_ack_lat.sh \
+	fou_gre_gro.sh \
 	fou_mcast_encap.sh \
 	fq_band_pktlimit.sh \
 	gre_gso.sh \
 	gre_ipv6_lladdr.sh \
+	gtp.py \
 	icmp.sh \
 	icmp_redirect.sh \
 	io_uring_zerocopy_tx.sh \
@@ -65,12 +69,14 @@ TEST_PROGS := \
 	nat6to4.sh \
 	ndisc_unsolicited_na_test.sh \
 	netdev-l2addr.sh \
+	netdev_lock.py \
 	netdevice.sh \
 	netns-name.sh \
 	netns-sysctl.sh \
 	nk_qlease.py \
 	nl_netdev.py \
 	nl_nlctrl.py \
+	nsh_gso.sh \
 	pmtu.sh \
 	protodown.sh \
 	psock_snd.sh \
@@ -85,6 +91,7 @@ TEST_PROGS := \
 	run_afpackettests \
 	run_netsocktests \
 	rxtimestamp.sh \
+	sctp_ifwdtsn.sh \
 	sctp_vrf.sh \
 	skf_net_off.sh \
 	srv6_encap_lookup_l3vpn_test.sh \
@@ -102,7 +109,6 @@ TEST_PROGS := \
 	stress_reuseport_listen.sh \
 	tcp_ecmp_failover.sh \
 	tcp_fastopen_backup_key.sh \
-	test_bpf.sh \
 	test_bridge_backup_port.sh \
 	test_bridge_neigh_suppress.sh \
 	test_ingress_egress_chaining.sh \
@@ -152,6 +158,7 @@ TEST_GEN_FILES := \
 	ipv6_flowlabel \
 	msg_zerocopy \
 	nettest \
+	nsh_gso \
 	psock_fanout \
 	psock_snd \
 	psock_tpacket \
@@ -159,6 +166,7 @@ TEST_GEN_FILES := \
 	reuseport_addr_any \
 	rxtimestamp \
 	sctp_hello \
+	sctp_ifwdtsn \
 	skf_net_off \
 	so_netns_cookie \
 	so_rcv_listener \
@@ -194,9 +202,11 @@ TEST_GEN_PROGS := \
 	sk_connect_zero_addr \
 	sk_so_peek_off \
 	so_incoming_cpu \
+	so_reserve_mem \
 	tap \
 	tcp_port_share \
 	tls \
+	udp_splice_checksum \
 # end of TEST_GEN_PROGS
 
 TEST_FILES := \

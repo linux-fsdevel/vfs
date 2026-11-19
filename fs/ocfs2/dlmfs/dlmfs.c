@@ -21,6 +21,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/pseudo_fs.h>
 #include <linux/pagemap.h>
 #include <linux/types.h>
 #include <linux/slab.h>
@@ -188,7 +189,7 @@ static int dlmfs_file_release(struct inode *inode,
  * We do ->setattr() just to override size changes.  Our size is the size
  * of the LVB and nothing else.
  */
-static int dlmfs_file_setattr(struct mnt_idmap *idmap,
+static int dlmfs_file_setattr(const struct mnt_idmap *idmap,
 			      struct dentry *dentry, struct iattr *attr)
 {
 	int error;
@@ -402,7 +403,7 @@ static struct inode *dlmfs_get_inode(struct inode *parent,
  * File creation. Allocate an inode, and we're done..
  */
 /* SMP-safe */
-static struct dentry *dlmfs_mkdir(struct mnt_idmap * idmap,
+static struct dentry *dlmfs_mkdir(const struct mnt_idmap * idmap,
 				  struct inode * dir,
 				  struct dentry * dentry,
 				  umode_t mode)
@@ -450,7 +451,7 @@ bail:
 	return ERR_PTR(status);
 }
 
-static int dlmfs_create(struct mnt_idmap *idmap,
+static int dlmfs_create(const struct mnt_idmap *idmap,
 			struct inode *dir,
 			struct dentry *dentry,
 			umode_t mode)
@@ -563,6 +564,7 @@ static const struct fs_context_operations dlmfs_context_ops = {
 
 static int dlmfs_init_fs_context(struct fs_context *fc)
 {
+	fc_init_pseudo(fc);
 	fc->ops = &dlmfs_context_ops;
 
 	return 0;

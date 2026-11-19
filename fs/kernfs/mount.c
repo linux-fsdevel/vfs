@@ -8,6 +8,7 @@
  */
 
 #include <linux/fs.h>
+#include <linux/pseudo_fs.h>
 #include <linux/mount.h>
 #include <linux/init.h>
 #include <linux/magic.h>
@@ -99,8 +100,8 @@ static struct dentry *__kernfs_fh_to_dentry(struct super_block *sb,
 					    int fh_type, bool get_parent)
 {
 	struct kernfs_super_info *info = kernfs_info(sb);
+	struct inode *inode = ERR_PTR(-ESTALE), *new;
 	struct kernfs_node *kn;
-	struct inode *inode;
 	u64 id;
 
 	if (fh_len < 2)
@@ -124,22 +125,32 @@ static struct dentry *__kernfs_fh_to_dentry(struct super_block *sb,
 		return NULL;
 	}
 
-	kn = kernfs_find_and_get_node_by_id(info->root, id);
-	if (!kn)
-		return ERR_PTR(-ESTALE);
+	new = new_inode(sb);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
 
-	if (get_parent) {
-		struct kernfs_node *parent;
+	/*
+	 * Hold kernfs_rwsem from the lookup through kernfs_get_inode_locked().
+	 * Then __kernfs_remove() either finds the inode to clear i_nlink, or
+	 * the node is already inactive and no inode is created.
+	 */
+	scoped_guard(rwsem_read, &info->root->kernfs_rwsem) {
+		kn = kernfs_find_and_get_node_by_id(info->root, id);
+		if (kn && get_parent) {
+			struct kernfs_node *parent;
 
-		parent = kernfs_get_parent(kn);
-		kernfs_put(kn);
-		kn = parent;
-		if (!kn)
-			return ERR_PTR(-ESTALE);
+			parent = kernfs_get_parent(kn);
+			kernfs_put(kn);
+			kn = parent;
+		}
+		if (kn) {
+			inode = kernfs_get_inode_locked(new, kn);
+			new = NULL;
+			kernfs_put(kn);
+		}
 	}
 
-	inode = kernfs_get_inode(sb, kn);
-	kernfs_put(kn);
+	iput(new);
 	return d_obtain_alias(inode);
 }
 
@@ -161,9 +172,17 @@ static struct dentry *kernfs_get_parent_dentry(struct dentry *child)
 {
 	struct kernfs_node *kn = kernfs_dentry_node(child);
 	struct kernfs_root *root = kernfs_root(kn);
+	struct inode *inode, *new;
 
-	guard(rwsem_read)(&root->kernfs_rwsem);
-	return d_obtain_alias(kernfs_get_inode(child->d_sb, kernfs_parent(kn)));
+	new = new_inode(child->d_sb);
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+	scoped_guard(rwsem_read, &root->kernfs_rwsem) {
+		inode = kernfs_get_inode_locked(new, kernfs_parent(kn));
+	}
+
+	return d_obtain_alias(inode);
 }
 
 static const struct export_operations kernfs_export_ops = {
@@ -284,12 +303,10 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
 {
 	struct kernfs_super_info *info = kernfs_info(sb);
 	struct kernfs_root *kf_root = kfc->root;
-	struct inode *inode;
+	struct inode *inode, *new;
 	struct dentry *root;
 
 	info->sb = sb;
-	/* Userspace would break if executables or devices appear on sysfs */
-	sb->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
 	sb->s_blocksize = PAGE_SIZE;
 	sb->s_blocksize_bits = PAGE_SHIFT;
 	sb->s_magic = kfc->magic;
@@ -304,8 +321,11 @@ static int kernfs_fill_super(struct super_block *sb, struct kernfs_fs_context *k
 	sb->s_shrink->seeks = 0;
 
 	/* get root inode, initialize and unlock it */
+	new = new_inode(sb);
+	if (!new)
+		return -ENOMEM;
 	down_read(&kf_root->kernfs_rwsem);
-	inode = kernfs_get_inode(sb, info->root->kn);
+	inode = kernfs_get_inode_locked(new, info->root->kn);
 	up_read(&kf_root->kernfs_rwsem);
 	if (!inode) {
 		pr_debug("kernfs: could not get root inode\n");
@@ -378,6 +398,7 @@ int kernfs_get_tree(struct fs_context *fc)
 	info->ns = kfc->ns_tag;
 	INIT_LIST_HEAD(&info->node);
 
+	fc_init_pseudo(fc);
 	fc->s_fs_info = info;
 	sb = sget_fc(fc, kernfs_test_super, kernfs_set_super);
 	if (IS_ERR(sb))
@@ -434,8 +455,8 @@ void kernfs_kill_sb(struct super_block *sb)
 	up_write(&root->kernfs_supers_rwsem);
 
 	/*
-	 * Remove the superblock from fs_supers/s_instances
-	 * so we can't find it, before freeing kernfs_super_info.
+	 * Mark the superblock dead so sget_fc() can't find it,
+	 * before freeing kernfs_super_info.
 	 */
 	kill_anon_super(sb);
 	kfree(info);

@@ -66,7 +66,8 @@ ieee80211_rx_eml_op_mode_notif(struct ieee80211_sub_if_data *sdata,
 	struct sta_info *sta;
 	int opt_len = 0;
 
-	if (!ieee80211_vif_is_mld(&sdata->vif))
+	if (!ieee80211_vif_is_mld(&sdata->vif) ||
+	    status->link_id == IEEE80211_LINK_UNSPECIFIED)
 		return;
 
 	/* eMLSR and eMLMR can't be enabled at the same time */
@@ -80,9 +81,6 @@ ieee80211_rx_eml_op_mode_notif(struct ieee80211_sub_if_data *sdata,
 
 	ift_ext_capa = cfg80211_get_iftype_ext_capa(local->hw.wiphy, type);
 	if (!ift_ext_capa)
-		return;
-
-	if (!status->link_valid)
 		return;
 
 	sta = sta_info_get_bss(sdata, mgmt->sa);

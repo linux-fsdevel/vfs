@@ -8,6 +8,7 @@
  */
 
 #include <linux/poll.h>
+#include <linux/lockdep_types.h>
 #include <linux/seq_file.h>
 #include <sound/core.h>
 
@@ -39,19 +40,16 @@ struct snd_info_entry_ops {
 	int (*release)(struct snd_info_entry *entry,
 		       unsigned short mode, void *file_private_data);
 	ssize_t (*read)(struct snd_info_entry *entry, void *file_private_data,
-			struct file *file, char __user *buf,
+			struct file *file, char *buf,
 			size_t count, loff_t pos);
 	ssize_t (*write)(struct snd_info_entry *entry, void *file_private_data,
-			 struct file *file, const char __user *buf,
+			 struct file *file, const char *buf,
 			 size_t count, loff_t pos);
 	loff_t (*llseek)(struct snd_info_entry *entry,
 			 void *file_private_data, struct file *file,
 			 loff_t offset, int orig);
 	__poll_t (*poll)(struct snd_info_entry *entry,
-			     void *file_private_data, struct file *file,
-			     poll_table *wait);
-	int (*ioctl)(struct snd_info_entry *entry, void *file_private_data,
-		     struct file *file, unsigned int cmd, unsigned long arg);
+			     void *file_private_data, struct file *file);
 	int (*mmap)(struct snd_info_entry *entry, void *file_private_data,
 		    struct inode *inode, struct file *file,
 		    struct vm_area_struct *vma);
@@ -71,6 +69,7 @@ struct snd_info_entry {
 	void *private_data;
 	void (*private_free)(struct snd_info_entry *entry);
 	struct proc_dir_entry *p;
+	struct lock_class_key lockdep_key;	/* lockdep class of @p's pin */
 	struct mutex access;
 	struct list_head children;
 	struct list_head list;
@@ -117,6 +116,7 @@ struct snd_info_entry *snd_info_create_module_entry(struct module *module,
 struct snd_info_entry *snd_info_create_card_entry(struct snd_card *card,
 					     const char *name,
 					     struct snd_info_entry *parent);
+void snd_info_disconnect_entry(struct snd_info_entry *entry);
 void snd_info_free_entry(struct snd_info_entry *entry);
 
 int snd_info_card_create(struct snd_card *card);
@@ -164,6 +164,7 @@ static inline int snd_info_get_line(struct snd_info_buffer *buffer, char *line, 
 static inline char *snd_info_get_str(char *dest, char *src, int len) { return NULL; }
 static inline struct snd_info_entry *snd_info_create_module_entry(struct module *module, const char *name, struct snd_info_entry *parent) { return NULL; }
 static inline struct snd_info_entry *snd_info_create_card_entry(struct snd_card *card, const char *name, struct snd_info_entry *parent) { return NULL; }
+static inline void snd_info_disconnect_entry(struct snd_info_entry *entry) { }
 static inline void snd_info_free_entry(struct snd_info_entry *entry) { ; }
 
 static inline int snd_info_card_create(struct snd_card *card) { return 0; }

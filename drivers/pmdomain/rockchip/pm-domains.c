@@ -721,7 +721,7 @@ static int rockchip_pd_power_on(struct generic_pm_domain *domain)
 	ret = rockchip_pd_regulator_enable(pd);
 	if (ret)
 		return dev_err_probe(pd->pmu->dev, ret,
-				     "Failed to enable supply: %d\n", ret);
+				     "Failed to enable supply\n");
 
 	ret = rockchip_pd_power(pd, true);
 	if (ret)
@@ -759,7 +759,19 @@ static int rockchip_pd_attach_dev(struct generic_pm_domain *genpd,
 	}
 
 	i = 0;
-	while ((clk = of_clk_get(dev->of_node, i++)) && !IS_ERR(clk)) {
+	while (1) {
+		clk = of_clk_get(dev->of_node, i++);
+		if (IS_ERR(clk)) {
+			error = PTR_ERR(clk);
+			if (error == -ENOENT)
+				break;
+
+			dev_err(dev, "failed to get clock %d: %d\n", i - 1,
+				error);
+			pm_clk_destroy(dev);
+			return error;
+		}
+
 		dev_dbg(dev, "adding clock '%pC' to list of PM clocks\n", clk);
 		error = pm_clk_add_clk(dev, clk);
 		if (error) {
@@ -809,13 +821,13 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
 		return 0;
 
 	pd_info = &pmu->info->domain_info[id];
-	if (!pd_info) {
+	if (!pd_info->pwr_mask && !pd_info->req_mask) {
 		dev_err(pmu->dev, "%pOFn: undefined domain id %d\n",
 			node, id);
 		return -EINVAL;
 	}
 
-	pd = devm_kzalloc(pmu->dev, sizeof(*pd), GFP_KERNEL);
+	pd = devm_kzalloc_obj(pmu->dev, *pd);
 	if (!pd)
 		return -ENOMEM;
 
@@ -825,8 +837,7 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
 
 	pd->num_clks = of_clk_get_parent_count(node);
 	if (pd->num_clks > 0) {
-		pd->clks = devm_kcalloc(pmu->dev, pd->num_clks,
-					sizeof(*pd->clks), GFP_KERNEL);
+		pd->clks = devm_kzalloc_objs(pmu->dev, *pd->clks, pd->num_clks);
 		if (!pd->clks)
 			return -ENOMEM;
 	} else {
@@ -842,7 +853,7 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
 			dev_err(pmu->dev,
 				"%pOFn: failed to get clk at index %d: %d\n",
 				node, i, error);
-			return error;
+			goto err_put_clocks;
 		}
 	}
 
@@ -854,19 +865,16 @@ static int rockchip_pm_add_one_domain(struct rockchip_pmu *pmu,
 						 NULL);
 
 	if (pd->num_qos > 0) {
-		pd->qos_regmap = devm_kcalloc(pmu->dev, pd->num_qos,
-					      sizeof(*pd->qos_regmap),
-					      GFP_KERNEL);
+		pd->qos_regmap = devm_kzalloc_objs(pmu->dev, *pd->qos_regmap,
+						   pd->num_qos);
 		if (!pd->qos_regmap) {
 			error = -ENOMEM;
 			goto err_unprepare_clocks;
 		}
 
 		for (j = 0; j < MAX_QOS_REGS_NUM; j++) {
-			pd->qos_save_regs[j] = devm_kcalloc(pmu->dev,
-							    pd->num_qos,
-							    sizeof(u32),
-							    GFP_KERNEL);
+			pd->qos_save_regs[j] = devm_kzalloc_objs(pmu->dev, u32,
+								 pd->num_qos);
 			if (!pd->qos_save_regs[j]) {
 				error = -ENOMEM;
 				goto err_unprepare_clocks;
@@ -1018,7 +1026,9 @@ static int rockchip_pm_add_subdomain(struct rockchip_pmu *pmu,
 				parent_domain->name, child_domain->name);
 		}
 
-		rockchip_pm_add_subdomain(pmu, np);
+		error = rockchip_pm_add_subdomain(pmu, np);
+		if (error)
+			return error;
 	}
 
 	return 0;
@@ -1040,9 +1050,7 @@ static int rockchip_pm_domain_probe(struct platform_device *pdev)
 
 	pmu_info = device_get_match_data(dev);
 
-	pmu = devm_kzalloc(dev,
-			   struct_size(pmu, domains, pmu_info->num_domains),
-			   GFP_KERNEL);
+	pmu = devm_kzalloc_flex(dev, *pmu, domains, pmu_info->num_domains);
 	if (!pmu)
 		return -ENOMEM;
 

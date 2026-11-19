@@ -3238,7 +3238,10 @@ _base_assign_reply_queues(struct MPT3SAS_ADAPTER *ioc)
 		 * corresponding to high iops queues.
 		 */
 		if (ioc->high_iops_queues) {
-			mask = cpumask_of_node(dev_to_node(&ioc->pdev->dev));
+			int node = dev_to_node(&ioc->pdev->dev);
+
+			mask = (node == NUMA_NO_NODE) ?
+				cpu_online_mask : cpumask_of_node(node);
 			for (index = 0; index < ioc->high_iops_queues;
 			    index++) {
 				irq = pci_irq_vector(ioc->pdev, index);
@@ -6586,8 +6589,7 @@ _base_allocate_memory_pools(struct MPT3SAS_ADAPTER *ioc)
 			     ioc->internal,
 			     ioc->internal_depth, ioc->internal_smid));
 
-	ioc->io_queue_num = kcalloc(ioc->scsiio_depth,
-	    sizeof(u16), GFP_KERNEL);
+	ioc->io_queue_num = kzalloc_objs(u16, ioc->scsiio_depth);
 	if (!ioc->io_queue_num)
 		goto out;
 	/*

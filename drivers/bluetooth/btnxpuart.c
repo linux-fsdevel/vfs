@@ -1388,9 +1388,11 @@ static int nxp_process_fw_dump(struct hci_dev *hdev, struct sk_buff *skb)
 				      msecs_to_jiffies(20000));
 	}
 
-	err = hci_devcd_append(hdev, skb_clone(skb, GFP_ATOMIC));
-	if (err < 0)
-		goto free_skb;
+	if (IS_ENABLED(CONFIG_DEV_COREDUMP)) {
+		err = hci_devcd_append(hdev, skb_clone(skb, GFP_ATOMIC));
+		if (err < 0)
+			goto free_skb;
+	}
 
 	if (buf_len == 0) {
 		bt_dev_warn(hdev, "==== FW dump complete ===");
@@ -1405,10 +1407,8 @@ free_skb:
 
 static int nxp_recv_acl_pkt(struct hci_dev *hdev, struct sk_buff *skb)
 {
-	__u16 handle = __le16_to_cpu(hci_acl_hdr(skb)->handle);
-
 	/* FW dump chunks are ACL packets with conn handle 0xfff */
-	if ((handle & 0x0FFF) == 0xFFF)
+	if (hci_acl_handle(skb) == 0xFFF)
 		return nxp_process_fw_dump(hdev, skb);
 	else
 		return hci_recv_frame(hdev, skb);
@@ -1847,7 +1847,7 @@ static int nxp_serdev_probe(struct serdev_device *serdev)
 	bdaddr_t ba = {0};
 	int err;
 
-	nxpdev = devm_kzalloc(&serdev->dev, sizeof(*nxpdev), GFP_KERNEL);
+	nxpdev = devm_kzalloc_obj(&serdev->dev, *nxpdev);
 	if (!nxpdev)
 		return -ENOMEM;
 

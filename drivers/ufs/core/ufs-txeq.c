@@ -1073,7 +1073,7 @@ static int __ufshcd_tx_eqtr(struct ufs_hba *hba,
 			    struct ufs_pa_layer_attr *pwr_mode)
 {
 	struct ufshcd_tx_eqtr_data *eqtr_data  __free(kfree) =
-		kzalloc(sizeof(*eqtr_data), GFP_KERNEL);
+		kzalloc_obj(*eqtr_data);
 	struct tx_eqtr_iter h_iter = {};
 	struct tx_eqtr_iter d_iter = {};
 	u32 gear = pwr_mode->gear_tx;
@@ -1239,9 +1239,8 @@ static int ufshcd_tx_eqtr(struct ufs_hba *hba,
 	noio_flag = memalloc_noio_save();
 
 	if (!params->eqtr_record) {
-		params->eqtr_record = devm_kzalloc(hba->dev,
-						   sizeof(*params->eqtr_record),
-						   GFP_KERNEL);
+		params->eqtr_record = devm_kzalloc_obj(hba->dev,
+						       *params->eqtr_record);
 		if (!params->eqtr_record) {
 			ret = -ENOMEM;
 			goto out_noio_restore;

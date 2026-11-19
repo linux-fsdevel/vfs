@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/pseudo_fs.h>
 #include <linux/fs_parser.h>
 #include <linux/kobject.h>
 #include <linux/namei.h>
@@ -94,7 +95,7 @@ static struct tracefs_dir_ops {
 	int (*rmdir)(const char *name);
 } tracefs_ops __ro_after_init;
 
-static struct dentry *tracefs_syscall_mkdir(struct mnt_idmap *idmap,
+static struct dentry *tracefs_syscall_mkdir(const struct mnt_idmap *idmap,
 					    struct inode *inode, struct dentry *dentry,
 					    umode_t mode)
 {
@@ -189,14 +190,14 @@ static void set_tracefs_inode_owner(struct inode *inode)
 		inode->i_gid = gid;
 }
 
-static int tracefs_permission(struct mnt_idmap *idmap,
+static int tracefs_permission(const struct mnt_idmap *idmap,
 			      struct inode *inode, int mask)
 {
 	set_tracefs_inode_owner(inode);
 	return generic_permission(idmap, inode, mask);
 }
 
-static int tracefs_getattr(struct mnt_idmap *idmap,
+static int tracefs_getattr(const struct mnt_idmap *idmap,
 			   const struct path *path, struct kstat *stat,
 			   u32 request_mask, unsigned int flags)
 {
@@ -207,7 +208,7 @@ static int tracefs_getattr(struct mnt_idmap *idmap,
 	return 0;
 }
 
-static int tracefs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
+static int tracefs_setattr(const struct mnt_idmap *idmap, struct dentry *dentry,
 			   struct iattr *attr)
 {
 	unsigned int ia_valid = attr->ia_valid;
@@ -471,6 +472,7 @@ static int tracefs_fill_super(struct super_block *sb, struct fs_context *fc)
 		return err;
 
 	sb->s_op = &tracefs_super_operations;
+	sb->s_iflags |= SB_I_NO_ATOMIC_MKDIR;
 	tracefs_apply_options(sb, false);
 	set_default_d_op(sb, &tracefs_dentry_operations);
 
@@ -510,6 +512,7 @@ static int tracefs_init_fs_context(struct fs_context *fc)
 	fsi->mode = TRACEFS_DEFAULT_MODE;
 
 	fc->s_fs_info = fsi;
+	fc_init_pseudo(fc);
 	fc->ops = &tracefs_context_ops;
 	return 0;
 }

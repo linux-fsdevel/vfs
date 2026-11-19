@@ -24,6 +24,8 @@
 #include <linux/dma-direction.h>
 #include <linux/dma-mapping.h>
 #include <linux/migrate.h>
+#include "amdgpu.h"
+#include "amdgpu_sdma.h"
 #include "amdgpu_sync.h"
 #include "amdgpu_object.h"
 #include "amdgpu_vm.h"
@@ -295,16 +297,26 @@ svm_migrate_copy_to_vram(struct kfd_node *node, struct svm_range *prange,
 	amdgpu_res_first(prange->ttm_res, ttm_res_offset,
 			 npages << PAGE_SHIFT, &cursor);
 	for (i = j = 0; (i < npages) && (mpages < migrate->cpages); i++) {
-		struct page *spage;
+		struct page *spage = migrate_pfn_to_page(migrate->src[i]);
 
 		if (migrate->src[i] & MIGRATE_PFN_MIGRATE) {
 			dst[i] = cursor.start + (j << PAGE_SHIFT);
 			migrate->dst[i] = svm_migrate_addr_to_pfn(adev, dst[i]);
-			svm_migrate_get_vram_page(prange, migrate->dst[i]);
-			migrate->dst[i] = migrate_pfn(migrate->dst[i]);
-			mpages++;
+			/*
+			 * A reused svm_bo page may still be held by a CPU fault.
+			 * Reinitializing it would free it under this migration,
+			 * so leave this page in system memory.
+			 */
+			if (page_ref_count(pfn_to_page(migrate->dst[i]))) {
+				dst[i] = 0;
+				migrate->dst[i] = 0;
+				spage = NULL;
+			} else {
+				svm_migrate_get_vram_page(prange, migrate->dst[i]);
+				migrate->dst[i] = migrate_pfn(migrate->dst[i]);
+				mpages++;
+			}
 		}
-		spage = migrate_pfn_to_page(migrate->src[i]);
 		if (spage && !is_zone_device_page(spage)) {
 			src[i] = dma_map_page(dev, spage, 0, PAGE_SIZE,
 					      DMA_BIDIRECTIONAL);
@@ -384,6 +396,46 @@ out_free_vram_pages:
 	return r;
 }
 
+/* Check if a range of addresses is already resident in VRAM to avoid
+ * unnecessary migrations that would trigger MMU notifiers causing the range
+ * to be unmapped and faulted again unnecessarily.
+ *
+ * Called with prange->migrate_mutex held.
+ */
+static bool
+svm_range_window_resident(struct kfd_node *node, struct svm_range *prange,
+			  u64 start, u64 end)
+{
+	struct kfd_process *p = container_of(prange->svms, struct kfd_process, svms);
+	unsigned long i, offset, npages;
+	dma_addr_t *addr;
+	uint32_t gpuid;
+	int32_t gpuidx;
+
+	if (kfd_process_gpuid_from_node(p, node, &gpuid, &gpuidx))
+		return false;
+	if (prange->actual_loc != gpuid)
+		return false;
+
+	addr = prange->dma_addr[gpuidx];
+	if (!addr)
+		return false;
+
+	start = max(start >> PAGE_SHIFT, prange->start);
+	end = min(end >> PAGE_SHIFT, prange->last + 1);
+	if (end <= start)
+		return true;
+
+	offset = start - prange->start;
+	npages = end - start;
+
+	for (i = offset; i < offset + npages; i++)
+		if (!(addr[i] & SVM_RANGE_VRAM_DOMAIN))
+			return false;
+
+	return true;
+}
+
 static long
 svm_migrate_vma_to_vram(struct kfd_node *node, struct svm_range *prange,
 			struct vm_area_struct *vma, u64 start,
@@ -400,6 +452,12 @@ svm_migrate_vma_to_vram(struct kfd_node *node, struct svm_range *prange,
 	dma_addr_t *scratch;
 	void *buf;
 	int r = -ENOMEM;
+
+	/* Avoid unnecessary migrations and MMU notifiers if all the data is
+	 * already resident in VRAM.
+	 */
+	if (svm_range_window_resident(node, prange, start, end))
+		return 0;
 
 	memset(&migrate, 0, sizeof(migrate));
 	migrate.vma = vma;
@@ -729,7 +787,7 @@ svm_migrate_vma_to_ram(struct kfd_node *node, struct svm_range *prange,
 	migrate.start = start;
 	migrate.end = end;
 	migrate.pgmap_owner = SVM_ADEV_PGMAP_OWNER(adev);
-	if (adev->gmc.xgmi.connected_to_cpu)
+	if (adev->kfd.pgmap.type == MEMORY_DEVICE_COHERENT)
 		migrate.flags = MIGRATE_VMA_SELECT_DEVICE_COHERENT;
 	else
 		migrate.flags = MIGRATE_VMA_SELECT_DEVICE_PRIVATE;
@@ -1063,7 +1121,8 @@ int kgd2kfd_init_zone_device(struct amdgpu_device *adev)
 	 * should remove reserved size
 	 */
 	size = ALIGN(adev->gmc.real_vram_size, 2ULL << 20);
-	if (adev->gmc.xgmi.connected_to_cpu) {
+	if (adev->gmc.xgmi.connected_to_cpu &&
+	    amdgpu_ip_version(adev, GC_HWIP, 0) != IP_VERSION(12, 1, 0)) {
 		pgmap->range.start = adev->gmc.aper_base;
 		pgmap->range.end = adev->gmc.aper_base + adev->gmc.aper_size - 1;
 		pgmap->type = MEMORY_DEVICE_COHERENT;

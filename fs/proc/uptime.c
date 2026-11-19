@@ -15,12 +15,8 @@ static int uptime_proc_show(struct seq_file *m, void *v)
 	struct timespec64 idle;
 	u64 idle_nsec;
 	u32 rem;
-	int i;
 
-	idle_nsec = 0;
-	for_each_possible_cpu(i)
-		idle_nsec += kcpustat_field(CPUTIME_IDLE, i);
-
+	idle_nsec = kcpustat_field_total(CPUTIME_IDLE, cpu_possible_mask);
 	ktime_get_boottime_ts64(&uptime);
 	timens_add_boottime(&uptime);
 
@@ -36,10 +32,7 @@ static int uptime_proc_show(struct seq_file *m, void *v)
 
 static int __init proc_uptime_init(void)
 {
-	struct proc_dir_entry *pde;
-
-	pde = proc_create_single("uptime", 0, NULL, uptime_proc_show);
-	pde_make_permanent(pde);
+	proc_create_single_permanent("uptime", 0, NULL, uptime_proc_show);
 	return 0;
 }
 fs_initcall(proc_uptime_init);

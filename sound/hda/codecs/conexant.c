@@ -249,6 +249,25 @@ static void cx_update_headset_mic_vref(struct hda_codec *codec, struct hda_jack_
 	}
 }
 
+#define SN6140_S3_AFG_D0_DELAY_MS	1000
+
+static void cx_set_power_state(struct hda_codec *codec, hda_nid_t fg,
+			       unsigned int power_state)
+{
+	snd_hda_codec_write_sync(codec, fg, 0, AC_VERB_SET_POWER_STATE, power_state);
+
+	/*
+	 * SN6140 may not respond to AFG D0 immediately after S3.
+	 * Wait before the D0 verb so the power-state command itself succeeds.
+	 */
+	if (codec->core.vendor_id == 0x14f11f87 &&
+	    power_state == AC_PWRST_D0 &&
+	    codec->core.dev.power.power_state.event == PM_EVENT_RESUME)
+		msleep(SN6140_S3_AFG_D0_DELAY_MS);
+
+	snd_hda_codec_set_power_to_all(codec, fg, power_state);
+}
+
 static int cx_suspend(struct hda_codec *codec)
 {
 	cx_auto_shutdown(codec);
@@ -270,6 +289,7 @@ enum {
 	CXT_FIXUP_HEADPHONE_MIC_PIN,
 	CXT_FIXUP_HEADPHONE_MIC,
 	CXT_FIXUP_GPIO1,
+	CXT_FIXUP_GPIO2,
 	CXT_FIXUP_ASPIRE_DMIC,
 	CXT_FIXUP_THINKPAD_ACPI,
 	CXT_FIXUP_LENOVO_XPAD_ACPI,
@@ -283,6 +303,7 @@ enum {
 	CXT_FIXUP_HP_SPECTRE,
 	CXT_FIXUP_HP_GATE_MIC,
 	CXT_FIXUP_MUTE_LED_GPIO,
+	CXT_FIXUP_ACER_ASPIRE_GO_MUTE_LED,
 	CXT_FIXUP_HP_ELITEONE_OUT_DIS,
 	CXT_FIXUP_HP_ZBOOK_MUTE_LED,
 	CXT_FIXUP_HEADSET_MIC,
@@ -293,6 +314,7 @@ enum {
 	CXT_FIXUP_HP_A_U,
 	CXT_FIXUP_ACER_SWIFT_HP,
 	CXT_FIXUP_HUAWEI_MATEBOOK_HP,
+	CXT_FIXUP_MATEBOOK14_SN6140,
 };
 
 /* for hda_fixup_thinkpad_acpi() */
@@ -789,6 +811,13 @@ static void cxt_fixup_hp_zbook_mute_led(struct hda_codec *codec,
 		cxt_setup_mute_led(codec, 0x10, 0x20);
 }
 
+static void cxt_fixup_acer_aspire_go_mute_led(struct hda_codec *codec,
+					      const struct hda_fixup *fix, int action)
+{
+	if (action == HDA_FIXUP_ACT_PRE_PROBE)
+		cxt_setup_mute_led(codec, 0, 0x10);
+}
+
 static void cxt_fixup_hp_a_u(struct hda_codec *codec,
 			     const struct hda_fixup *fix, int action)
 {
@@ -796,6 +825,67 @@ static void cxt_fixup_hp_a_u(struct hda_codec *codec,
 	// so need to unmute once by clearing the gpio data when runs into the system.
 	if (action == HDA_FIXUP_ACT_INIT)
 		cxt_setup_gpio_unmute(codec, 0x2);
+}
+
+/* Huawei MateBook 14 (SN6140): the speaker output follows the headphone
+ * pin's connection select in hardware.  Both pins must be routed to the
+ * shared DAC 0x10, which carries the playback stream; the generic
+ * parser mutes that DAC when no headphone is plugged, silencing the
+ * speaker.  Suppress the auto-mute, bind the speaker pin to the shared
+ * DAC, remove its mute switch and keep it unmuted; the auto-mute hook
+ * re-applies the routing after every output update.
+ */
+static void cxt_mb14_route_unmute(struct hda_codec *codec)
+{
+	/* route both pins to the shared DAC 0x10, enable the speaker
+	 * EAPD and unmute the DAC at a moderate gain; the vmaster
+	 * volume takes over once userspace starts
+	 */
+	snd_hda_codec_write(codec, 0x16, 0, AC_VERB_SET_CONNECT_SEL, 0);
+	snd_hda_codec_write(codec, 0x17, 0, AC_VERB_SET_CONNECT_SEL, 0);
+	snd_hda_codec_write(codec, 0x17, 0, AC_VERB_SET_EAPD_BTLENABLE, 0x02);
+	snd_hda_codec_amp_stereo(codec, 0x10, HDA_OUTPUT, 0,
+				 HDA_AMP_VOLMASK | HDA_AMP_MUTE, 0x40);
+}
+
+static void cxt_mb14_automute(struct hda_codec *codec)
+{
+	snd_hda_gen_update_outputs(codec);
+	cxt_mb14_route_unmute(codec);
+}
+
+static void cxt_fixup_matebook14_sn6140(struct hda_codec *codec,
+					const struct hda_fixup *fix, int action)
+{
+	struct conexant_spec *spec = codec->spec;
+
+	if (action == HDA_FIXUP_ACT_PRE_PROBE) {
+		static const hda_nid_t dac_0x10[] = { 0x10 };
+
+		spec->gen.suppress_auto_mute = 1;
+		spec->gen.automute_hook = cxt_mb14_automute;
+		/* Bind the speaker pin to the shared DAC 0x10.
+		 */
+		snd_hda_override_conn_list(codec, 0x17, 1, dac_0x10);
+		return;
+	}
+	if (action == HDA_FIXUP_ACT_PROBE) {
+		unsigned int caps;
+
+		/* Remove the mute switch on the shared DAC so that
+		 * userspace (WirePlumber) cannot mute it when the
+		 * headphone route becomes unavailable (e.g. after
+		 * resume).  Must be done here: the codec regmap is not
+		 * available at pre-probe time.
+		 */
+		caps = query_amp_caps(codec, 0x10, HDA_OUTPUT);
+		snd_hda_override_amp_caps(codec, 0x10, HDA_OUTPUT,
+					  caps & ~AC_AMPCAP_MUTE);
+		return;
+	}
+	if (action != HDA_FIXUP_ACT_INIT)
+		return;
+	cxt_mb14_route_unmute(codec);
 }
 
 /* ThinkPad X200 & co with cxt5051 */
@@ -912,6 +1002,15 @@ static const struct hda_fixup cxt_fixups[] = {
 			{ }
 		},
 	},
+	[CXT_FIXUP_GPIO2] = {
+		.type = HDA_FIXUP_VERBS,
+		.v.verbs = (const struct hda_verb[]) {
+			{ 0x01, AC_VERB_SET_GPIO_MASK, 0x02 },
+			{ 0x01, AC_VERB_SET_GPIO_DIRECTION, 0x02 },
+			{ 0x01, AC_VERB_SET_GPIO_DATA, 0x02 },
+			{ }
+		},
+	},
 	[CXT_FIXUP_ASPIRE_DMIC] = {
 		.type = HDA_FIXUP_FUNC,
 		.v.func = cxt_fixup_stereo_dmic,
@@ -988,6 +1087,10 @@ static const struct hda_fixup cxt_fixups[] = {
 		.type = HDA_FIXUP_FUNC,
 		.v.func = cxt_fixup_mute_led_gpio,
 	},
+	[CXT_FIXUP_ACER_ASPIRE_GO_MUTE_LED] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cxt_fixup_acer_aspire_go_mute_led,
+	},
 	[CXT_FIXUP_HP_ELITEONE_OUT_DIS] = {
 		.type = HDA_FIXUP_FUNC,
 		.v.func = cxt_fixup_update_pinctl,
@@ -1043,6 +1146,10 @@ static const struct hda_fixup cxt_fixups[] = {
 			{ }
 		},
 	},
+	[CXT_FIXUP_MATEBOOK14_SN6140] = {
+		.type = HDA_FIXUP_FUNC,
+		.v.func = cxt_fixup_matebook14_sn6140,
+	},
 };
 
 static const struct hda_quirk cxt5045_fixups[] = {
@@ -1093,8 +1200,10 @@ static const struct hda_quirk cxt5066_fixups[] = {
 	SND_PCI_QUIRK(0x1025, 0x054c, "Acer Aspire 3830TG", CXT_FIXUP_ASPIRE_DMIC),
 	SND_PCI_QUIRK(0x1025, 0x054f, "Acer Aspire 4830T", CXT_FIXUP_ASPIRE_DMIC),
 	SND_PCI_QUIRK(0x1025, 0x136d, "Acer Swift SF314", CXT_FIXUP_ACER_SWIFT_HP),
+	SND_PCI_QUIRK(0x1025, 0x1937, "Acer Aspire Go 16", CXT_FIXUP_ACER_ASPIRE_GO_MUTE_LED),
 	SND_PCI_QUIRK(0x103c, 0x8079, "HP EliteBook 840 G3", CXT_FIXUP_HP_DOCK),
 	SND_PCI_QUIRK(0x103c, 0x807C, "HP EliteBook 820 G3", CXT_FIXUP_HP_DOCK),
+	SND_PCI_QUIRK(0x103c, 0x80d6, "HP ZBook 17 G3", CXT_FIXUP_MUTE_LED_GPIO),
 	SND_PCI_QUIRK(0x103c, 0x80FD, "HP ProBook 640 G2", CXT_FIXUP_HP_DOCK),
 	SND_PCI_QUIRK(0x103c, 0x8115, "HP Z1 Gen3", CXT_FIXUP_HP_GATE_MIC),
 	SND_PCI_QUIRK(0x103c, 0x814f, "HP ZBook 15u G3", CXT_FIXUP_MUTE_LED_GPIO),
@@ -1124,6 +1233,8 @@ static const struct hda_quirk cxt5066_fixups[] = {
 	SND_PCI_QUIRK(0x14f1, 0x0252, "MBX-Z60MR100", CXT_FIXUP_HP_A_U),
 	SND_PCI_QUIRK(0x14f1, 0x0265, "SWS JS201D", CXT_PINCFG_SWS_JS201D),
 	SND_PCI_QUIRK(0x152d, 0x0833, "OLPC XO-1.5", CXT_FIXUP_OLPC_XO),
+	SND_PCI_QUIRK(0x1558, 0xa600, "Acer TravelLite TL05-41M",
+		      CXT_FIXUP_GPIO2),
 	SND_PCI_QUIRK(0x17aa, 0x20f2, "Lenovo T400", CXT_PINCFG_LENOVO_TP410),
 	SND_PCI_QUIRK(0x17aa, 0x215e, "Lenovo T410", CXT_PINCFG_LENOVO_TP410),
 	SND_PCI_QUIRK(0x17aa, 0x215f, "Lenovo T510", CXT_PINCFG_LENOVO_TP410),
@@ -1145,6 +1256,7 @@ static const struct hda_quirk cxt5066_fixups[] = {
 	SND_PCI_QUIRK(0x17aa, 0x397b, "Lenovo S205", CXT_FIXUP_STEREO_DMIC),
 	SND_PCI_QUIRK_VENDOR(0x17aa, "Thinkpad/Ideapad", CXT_FIXUP_LENOVO_XPAD_ACPI),
 	SND_PCI_QUIRK(0x19e5, 0x3289, "Huawei Matebook", CXT_FIXUP_HUAWEI_MATEBOOK_HP),
+	SND_PCI_QUIRK(0x19e5, 0x329e, "Huawei MateBook 14", CXT_FIXUP_MATEBOOK14_SN6140),
 	SND_PCI_QUIRK(0x1c06, 0x2011, "Lemote A1004", CXT_PINCFG_LEMOTE_A1004),
 	SND_PCI_QUIRK(0x1c06, 0x2012, "Lemote A1205", CXT_PINCFG_LEMOTE_A1205),
 	SND_PCI_QUIRK(0x1d05, 0x3012, "MECHREVO Wujie 15X Pro", CXT_FIXUP_HEADSET_MIC),
@@ -1308,6 +1420,7 @@ static const struct hda_codec_ops cx_codec_ops = {
 	.init = cx_init,
 	.unsol_event = snd_hda_jack_unsol_event,
 	.suspend = cx_suspend,
+	.set_power_state = cx_set_power_state,
 	.check_power_status = snd_hda_gen_check_power_status,
 	.stream_pm = snd_hda_gen_stream_pm,
 };

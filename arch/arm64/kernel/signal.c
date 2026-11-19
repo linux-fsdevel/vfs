@@ -433,6 +433,7 @@ static int restore_sve_fpsimd_context(struct user_ctxs *user)
 	unsigned int vl, vq;
 	struct user_fpsimd_state fpsimd;
 	u16 user_vl, flags;
+	bool fpsimd_only;
 	bool sm;
 
 	if (user->sve_size < sizeof(*user->sve))
@@ -443,19 +444,33 @@ static int restore_sve_fpsimd_context(struct user_ctxs *user)
 	if (err)
 		return err;
 
+	fpsimd_only = (user->sve_size == sizeof(*user->sve));
 	sm = flags & SVE_SIG_FLAG_SM;
+
 	if (sm) {
 		if (!system_supports_sme())
+			return -EINVAL;
+
+		/*
+		 * Streaming SVE state is always preserved with an SVE payload.
+		 * Only accept streaming state which has an SVE payload.
+		 */
+		if (fpsimd_only)
 			return -EINVAL;
 
 		vl = task_get_sme_vl(current);
 	} else {
 		/*
-		 * A SME only system use SVE for streaming mode so can
-		 * have a SVE formatted context with a zero VL and no
-		 * payload data.
+		 * Non-streaming SVE state may be preserved without an SVE
+		 * payload, in which case all state is saved in the FPSIMD
+		 * context.
+		 *
+		 * On SME-only systems, non-streaming (FPSIMD-only) state is
+		 * always preserved without an SVE payload, and with VL==0. On
+		 * such systems, only accept non-streaming state without an SVE
+		 * payload.
 		 */
-		if (!system_supports_sve() && !system_supports_sme())
+		if (!system_supports_sve() && !fpsimd_only)
 			return -EINVAL;
 
 		vl = task_get_sve_vl(current);
@@ -464,16 +479,7 @@ static int restore_sve_fpsimd_context(struct user_ctxs *user)
 	if (user_vl != vl)
 		return -EINVAL;
 
-	/*
-	 * Non-streaming SVE state may be preserved without an SVE payload, in
-	 * which case the SVE context only has a header with VL==0, and all
-	 * state can be restored from the FPSIMD context.
-	 *
-	 * Streaming SVE state is always preserved with an SVE payload. For
-	 * consistency and robustness, reject restoring streaming SVE state
-	 * without an SVE payload.
-	 */
-	if (!sm && user->sve_size == sizeof(*user->sve))
+	if (fpsimd_only)
 		return restore_fpsimd_context(user);
 
 	vq = sve_vq_from_vl(vl);
@@ -735,35 +741,15 @@ static int preserve_gcs_context(struct gcs_context __user *ctx)
 
 static int restore_gcs_context(struct user_ctxs *user)
 {
-	u64 gcspr, enabled;
+	u64 gcspr;
 	int err = 0;
 
 	if (user->gcs_size != sizeof(*user->gcs))
 		return -EINVAL;
 
 	__get_user_error(gcspr, &user->gcs->gcspr, err);
-	__get_user_error(enabled, &user->gcs->features_enabled, err);
 	if (err)
 		return err;
-
-	/* Don't allow unknown modes */
-	if (enabled & ~PR_SHADOW_STACK_SUPPORTED_STATUS_MASK)
-		return -EINVAL;
-
-	err = gcs_check_locked(current, enabled);
-	if (err != 0)
-		return err;
-
-	/* Don't allow enabling */
-	if (!task_gcs_el0_enabled(current) &&
-	    (enabled & PR_SHADOW_STACK_ENABLE))
-		return -EINVAL;
-
-	/* If we are disabling disable everything */
-	if (!(enabled & PR_SHADOW_STACK_ENABLE))
-		enabled = 0;
-
-	current->thread.gcs_el0_mode = enabled;
 
 	/*
 	 * We let userspace set GCSPR_EL0 to anything here, we will

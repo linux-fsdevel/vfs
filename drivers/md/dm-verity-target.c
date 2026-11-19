@@ -171,6 +171,15 @@ static void verity_hash_at_level(struct dm_verity *v, sector_t block, int level,
 }
 
 /*
+ * Skip verity work in response to I/O error when system is shutting down.
+ */
+static inline bool verity_is_system_shutting_down(void)
+{
+	return system_state == SYSTEM_HALT || system_state == SYSTEM_POWER_OFF
+		|| system_state == SYSTEM_RESTART;
+}
+
+/*
  * Handle verification errors.
  */
 static int verity_handle_err(struct dm_verity *v, enum verity_block_type type,
@@ -218,6 +227,15 @@ static int verity_handle_err(struct dm_verity *v, enum verity_block_type type,
 out:
 	if (v->mode == DM_VERITY_MODE_LOGGING)
 		return 0;
+
+	/*
+	 * Devices may already be quiesced (e.g. UFS set offline by its
+	 * shutdown hook), so a failure here does not imply corruption.  Fail
+	 * the I/O but do not restart or panic, which would also override the
+	 * reboot reason of the shutdown already in progress.
+	 */
+	if (verity_is_system_shutting_down())
+		return 1;
 
 	if (v->mode == DM_VERITY_MODE_RESTART)
 		kernel_restart("dm-verity device corrupted");
@@ -593,15 +611,6 @@ error:
 	return r;
 }
 
-/*
- * Skip verity work in response to I/O error when system is shutting down.
- */
-static inline bool verity_is_system_shutting_down(void)
-{
-	return system_state == SYSTEM_HALT || system_state == SYSTEM_POWER_OFF
-		|| system_state == SYSTEM_RESTART;
-}
-
 static void restart_io_error(struct work_struct *w)
 {
 	kernel_restart("dm-verity device has I/O error");
@@ -823,13 +832,6 @@ static int verity_map(struct dm_target *ti, struct bio *bio)
 	submit_bio_noacct(bio);
 
 	return DM_MAPIO_SUBMITTED;
-}
-
-static void verity_postsuspend(struct dm_target *ti)
-{
-	struct dm_verity *v = ti->private;
-	flush_workqueue(v->verify_wq);
-	dm_bufio_client_reset(v->bufio);
 }
 
 /*
@@ -1113,9 +1115,8 @@ static int verity_alloc_most_once(struct dm_verity *v)
 		return -E2BIG;
 	}
 
-	v->validated_blocks = kvcalloc(BITS_TO_LONGS(v->data_blocks),
-				       sizeof(unsigned long),
-				       GFP_KERNEL);
+	v->validated_blocks = kvzalloc_objs(unsigned long,
+					    BITS_TO_LONGS(v->data_blocks));
 	if (!v->validated_blocks) {
 		ti->error = "failed to allocate bitset for check_at_most_once";
 		return -ENOMEM;
@@ -1733,12 +1734,21 @@ static int verity_security_set_signature(struct block_device *bdev,
 					  v->sig_size);
 }
 
+static void verity_security_clear_signature(struct block_device *bdev)
+{
+	security_bdev_setintegrity(bdev, LSM_INT_DMVERITY_SIG_VALID, NULL, 0);
+}
+
 #else
 
 static inline int verity_security_set_signature(struct block_device *bdev,
 						struct dm_verity *v)
 {
 	return 0;
+}
+
+static inline void verity_security_clear_signature(struct block_device *bdev)
+{
 }
 
 #endif /* CONFIG_DM_VERITY_VERIFY_ROOTHASH_SIG */
@@ -1779,7 +1789,30 @@ bad:
 	return r;
 }
 
+static void verity_security_clear_integrity(struct dm_target *ti)
+{
+	struct block_device *bdev = dm_disk(dm_table_get_md(ti->table))->part0;
+
+	security_bdev_setintegrity(bdev, LSM_INT_DMVERITY_ROOTHASH, NULL, 0);
+	verity_security_clear_signature(bdev);
+}
+
+#else
+
+static inline void verity_security_clear_integrity(struct dm_target *ti)
+{
+}
+
 #endif /* CONFIG_SECURITY */
+
+static void verity_postsuspend(struct dm_target *ti)
+{
+	struct dm_verity *v = ti->private;
+
+	flush_workqueue(v->verify_wq);
+	dm_bufio_client_reset(v->bufio);
+	verity_security_clear_integrity(ti);
+}
 
 static struct target_type verity_target = {
 	.name		= "verity",

@@ -8,6 +8,7 @@
  */
 
 #include <linux/blkdev.h>
+#include <linux/string.h>
 
 #include "dir.h"
 #include "mft.h"
@@ -166,8 +167,8 @@ found_it:
 			 */
 			if (ie->key.file_name.file_name_type == FILE_NAME_DOS) {
 				if (!name) {
-					name = kmalloc(sizeof(struct ntfs_name),
-							GFP_NOFS);
+					name = kmalloc_obj(struct ntfs_name,
+							   GFP_NOFS);
 					if (!name) {
 						err = -ENOMEM;
 						goto err_out;
@@ -238,7 +239,7 @@ found_it:
 		 */
 		rc = ntfs_collate_names(uname, uname_len,
 				(__le16 *)&ie->key.file_name.file_name,
-				ie->key.file_name.file_name_length, 1,
+				ie->key.file_name.file_name_length, false,
 				IGNORE_CASE, vol->upcase, vol->upcase_len);
 		/*
 		 * If uname collates before the name of the current entry, there
@@ -257,7 +258,7 @@ found_it:
 		 */
 		rc = ntfs_collate_names(uname, uname_len,
 				(__le16 *)&ie->key.file_name.file_name,
-				ie->key.file_name.file_name_length, 1,
+				ie->key.file_name.file_name_length, false,
 				CASE_SENSITIVE, vol->upcase, vol->upcase_len);
 		if (rc == -1)
 			break;
@@ -308,6 +309,20 @@ found_it:
 	ia_mapping = ia_vi->i_mapping;
 descend_into_child_node:
 	/*
+	 * The child node has to be inside $INDEX_ALLOCATION. A directory that
+	 * lacks the attribute gets an empty index inode that is not
+	 * non-resident, and reading a folio from it locks the mft record that
+	 * is already locked here.
+	 */
+	if (!NInoNonResident(NTFS_I(ia_vi)) || vcn < 0 ||
+	    (u64)vcn >= (u64)i_size_read(ia_vi) >> dir_ni->itype.index.vcn_size_bits) {
+		ntfs_error(sb,
+			"Child node vcn %lld is outside $INDEX_ALLOCATION in directory inode 0x%llx.",
+			vcn, dir_ni->mft_no);
+		err = -EIO;
+		goto err_out;
+	}
+	/*
 	 * Convert vcn to index into the index allocation attribute in units
 	 * of PAGE_SIZE and map the page cache page, reading it from
 	 * disk if necessary.
@@ -331,7 +346,6 @@ descend_into_child_node:
 	}
 
 	memcpy_from_folio(kaddr, folio, 0, PAGE_SIZE);
-	post_read_mst_fixup((struct ntfs_record *)kaddr, PAGE_SIZE);
 	folio_unlock(folio);
 	folio_put(folio);
 fast_descend_into_child_node:
@@ -349,6 +363,14 @@ fast_descend_into_child_node:
 	if (index_end > kaddr + PAGE_SIZE) {
 		ntfs_error(sb,
 			   "Index buffer (VCN 0x%llx) of directory inode 0x%llx crosses page boundary. Impossible! Cannot access! This is probably a bug in the driver.",
+			   vcn, dir_ni->mft_no);
+		goto unm_err_out;
+	}
+	err = post_read_mst_fixup((struct ntfs_record *)ia,
+				  dir_ni->itype.index.block_size);
+	if (err) {
+		ntfs_error(sb,
+			   "MST fixup failed for index block vcn %lld in directory inode 0x%llx.",
 			   vcn, dir_ni->mft_no);
 		goto unm_err_out;
 	}
@@ -401,8 +423,8 @@ found_it2:
 			 */
 			if (ie->key.file_name.file_name_type == FILE_NAME_DOS) {
 				if (!name) {
-					name = kmalloc(sizeof(struct ntfs_name),
-							GFP_NOFS);
+					name = kmalloc_obj(struct ntfs_name,
+							   GFP_NOFS);
 					if (!name) {
 						err = -ENOMEM;
 						goto unm_err_out;
@@ -474,7 +496,7 @@ found_it2:
 		 */
 		rc = ntfs_collate_names(uname, uname_len,
 				(__le16 *)&ie->key.file_name.file_name,
-				ie->key.file_name.file_name_length, 1,
+				ie->key.file_name.file_name_length, false,
 				IGNORE_CASE, vol->upcase, vol->upcase_len);
 		/*
 		 * If uname collates before the name of the current entry, there
@@ -493,7 +515,7 @@ found_it2:
 		 */
 		rc = ntfs_collate_names(uname, uname_len,
 				(__le16 *)&ie->key.file_name.file_name,
-				ie->key.file_name.file_name_length, 1,
+				ie->key.file_name.file_name_length, false,
 				CASE_SENSITIVE, vol->upcase, vol->upcase_len);
 		if (rc == -1)
 			break;
@@ -617,7 +639,6 @@ static inline int ntfs_filldir(struct ntfs_volume *vol,
 		ntfs_debug("Skipping hidden file.");
 		return 0;
 	}
-
 	name_len = ntfs_ucstonls(vol, (__le16 *)&ie->key.file_name.file_name,
 			ie->key.file_name.file_name_length, &name,
 			NTFS_MAX_NAME_LEN * NLS_MAX_CHARSET_SIZE + 1);
@@ -626,13 +647,16 @@ static inline int ntfs_filldir(struct ntfs_volume *vol,
 				(long long)MREF_LE(ie->data.dir.indexed_file));
 		return 0;
 	}
-
+	if (NVolStreamsWindows(vol) && strchr((char *)name, ':')) {
+		ntfs_debug("Skipping file name containing a stream separator.");
+		return 0;
+	}
 	mref = MREF_LE(ie->data.dir.indexed_file);
-	if (ie->key.file_name.file_attributes &
+	if (ie->key.file_name.file_attributes & FILE_ATTR_REPARSE_POINT)
+		dt_type = ntfs_reparse_tag_dt_types(vol, mref);
+	else if (ie->key.file_name.file_attributes &
 			FILE_ATTR_DUP_FILE_NAME_INDEX_PRESENT)
 		dt_type = DT_DIR;
-	else if (ie->key.file_name.file_attributes & FILE_ATTR_REPARSE_POINT)
-		dt_type = ntfs_reparse_tag_dt_types(vol, mref);
 	else
 		dt_type = DT_REG;
 
@@ -700,7 +724,7 @@ static int ntfs_ia_blocks_readahead(struct ntfs_inode *ia_ni, loff_t pos)
 	if (dir_start_index >= dir_end_index)
 		return 0;
 
-	dir_ra = kzalloc(sizeof(*dir_ra), GFP_NOFS);
+	dir_ra = kzalloc_obj(*dir_ra, GFP_NOFS);
 	if (!dir_ra)
 		return -ENOMEM;
 
@@ -777,7 +801,7 @@ static int ntfs_readdir(struct file *file, struct dir_context *actor)
 		return -ENOMEM;
 	}
 
-	ra = kzalloc(sizeof(struct file_ra_state), GFP_NOFS);
+	ra = kzalloc_obj(struct file_ra_state, GFP_NOFS);
 	if (!ra) {
 		kfree(name);
 		ntfs_index_ctx_put(ictx);
@@ -813,7 +837,7 @@ static int ntfs_readdir(struct file *file, struct dir_context *actor)
 			goto out;
 		}
 	} else if (!private) {
-		private = kzalloc(sizeof(struct ntfs_file_private), GFP_KERNEL);
+		private = kzalloc_obj(struct ntfs_file_private);
 		if (!private) {
 			err = -ENOMEM;
 			goto out;
@@ -949,7 +973,7 @@ nextdir:
 		}
 
 		if (!nir) {
-			nir = kzalloc(sizeof(struct ntfs_index_ra), GFP_KERNEL);
+			nir = kzalloc_obj(struct ntfs_index_ra);
 			if (nir) {
 				nir->start_index = index;
 				nir->count = 1;
@@ -1121,8 +1145,9 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 
 	ntfs_debug("Entering for inode 0x%llx.", ni->mft_no);
 
-	if (NVolShutdown(vol))
-		return -EIO;
+	err = ntfs_emergency_state(vol);
+	if (err)
+		return err;
 
 	ctx = ntfs_attr_get_search_ctx(ni, NULL);
 	if (!ctx)
@@ -1182,6 +1207,8 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 	err = sync_blockdev(vi->i_sb->s_bdev);
 	if (unlikely(err && !ret))
 		ret = err;
+	if (!ret)
+		ret = blkdev_issue_flush(vi->i_sb->s_bdev);
 	if (likely(!ret))
 		ntfs_debug("Done.");
 	else

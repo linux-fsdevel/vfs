@@ -550,6 +550,8 @@ static u32 ieee80211_get_rate_duration(struct ieee80211_hw *hw,
 		group = HE_GROUP_IDX(streams, status->he_gi, bw);
 		break;
 	case RX_ENC_EHT:
+		if (status->eht.gi > NL80211_RATE_INFO_EHT_GI_3_2)
+			return 0;
 		streams = status->nss;
 		idx = status->rate_idx;
 		group = EHT_GROUP_IDX(streams, status->eht.gi, bw);
@@ -631,6 +633,22 @@ static bool ieee80211_fill_rate_info(struct ieee80211_hw *hw,
 
 	if (!ri || !sband)
 	    return false;
+
+	/*
+	 * ieee80211_get_rate_duration() only handles these widths. Drivers
+	 * may also report e.g. HE/EHT RU allocations, which cannot be used
+	 * to estimate airtime here.
+	 */
+	switch (ri->bw) {
+	case RATE_INFO_BW_20:
+	case RATE_INFO_BW_40:
+	case RATE_INFO_BW_80:
+	case RATE_INFO_BW_160:
+	case RATE_INFO_BW_320:
+		break;
+	default:
+		return false;
+	}
 
 	stat->bw = ri->bw;
 	stat->nss = ri->nss;
@@ -770,6 +788,8 @@ u32 ieee80211_rate_expected_tx_airtime(struct ieee80211_hw *hw,
 		return ieee80211_calc_rx_airtime(hw, &stat, len) * 1024;
 
 	duration = ieee80211_get_rate_duration(hw, &stat, &overhead);
+	if (!duration)
+		return 0;
 
 	/*
 	 * Assume that HT/VHT transmission on any AC except VO will

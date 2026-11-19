@@ -376,7 +376,7 @@ static struct xi3c_xfer *xi3c_master_alloc_xfer(unsigned int ncmds)
 {
 	struct xi3c_xfer *xfer;
 
-	xfer = kzalloc_flex(*xfer, cmds, ncmds, GFP_KERNEL);
+	xfer = kzalloc_flex(*xfer, cmds, ncmds);
 	if (!xfer)
 		return NULL;
 
@@ -735,7 +735,7 @@ static int xi3c_master_send_bdcast_ccc_cmd(struct xi3c_master *master,
 	if (!xfer)
 		return -ENOMEM;
 
-	buf = kmalloc_objs(*buf, xfer_len, GFP_KERNEL);
+	buf = kmalloc_objs(*buf, xfer_len);
 	if (!buf)
 		return -ENOMEM;
 
@@ -806,8 +806,8 @@ static int xi3c_master_send_direct_ccc_cmd(struct xi3c_master *master,
 
 	/* Report actual byte count so the core sees the right length on short reads */
 	if (!ret && ccc->rnw)
-		ccc->dests[0].payload.len = min(xfer->cmds[1].rx_actual,
-						ccc->dests[0].payload.len);
+		ccc->dests[0].payload.actual_len = min(xfer->cmds[1].rx_actual,
+						       ccc->dests[0].payload.len);
 
 	return ret;
 }
@@ -1070,7 +1070,7 @@ static int xi3c_master_probe(struct platform_device *pdev)
 	struct xi3c_master *master;
 	int ret;
 
-	master = devm_kzalloc(&pdev->dev, sizeof(*master), GFP_KERNEL);
+	master = devm_kzalloc_obj(&pdev->dev, *master);
 	if (!master)
 		return -ENOMEM;
 

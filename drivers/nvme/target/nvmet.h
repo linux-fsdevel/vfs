@@ -7,6 +7,7 @@
 #define _NVMET_H
 
 #include <linux/dma-mapping.h>
+#include <linux/jiffies.h>
 #include <linux/types.h>
 #include <linux/device.h>
 #include <linux/kref.h>
@@ -112,6 +113,8 @@ struct nvmet_ns {
 
 	bool			buffered_io;
 	bool			enabled;
+#define NVMET_NS_IO_LIVE	0
+	unsigned long		flags;
 	struct nvmet_subsys	*subsys;
 	const char		*device_path;
 
@@ -159,8 +162,10 @@ struct nvmet_sq {
 	u32			sqhd;
 	bool			sqhd_disabled;
 #ifdef CONFIG_NVME_TARGET_AUTH
+	struct mutex		auth_lock;
 	bool			authenticated;
 	struct delayed_work	auth_expired_work;
+	bool			auth_expiry_active;
 	u16			dhchap_tid;
 	u8			sc_c;
 	u8			dhchap_status;
@@ -270,6 +275,7 @@ struct nvmet_ctrl {
 	u16			cntlid;
 	u16			max_qid;
 	u32			kato;
+	bool			tbkas;
 
 	struct nvmet_port	*port;
 
@@ -317,6 +323,19 @@ struct nvmet_ctrl {
 	struct nvmet_pr_log_mgr pr_log_mgr;
 };
 
+struct nvmet_passthru {
+	struct percpu_ref	ref;
+	struct completion	disable_done;
+#define NVMET_PASSTHRU_ENABLED	0
+	unsigned long		flags;
+
+	struct nvme_ctrl	*ctrl;
+	char			*ctrl_path;
+	unsigned int		admin_timeout;
+	unsigned int		io_timeout;
+	unsigned int		clear_ids;
+};
+
 struct nvmet_subsys {
 	enum nvme_subsys_type	type;
 
@@ -343,6 +362,7 @@ struct nvmet_subsys {
 	bool			subsys_discovered;
 	char			*subsysnqn;
 	bool			pi_support;
+	bool			tbkas;
 
 	struct config_group	group;
 
@@ -356,12 +376,8 @@ struct nvmet_subsys {
 	char			*firmware_rev;
 
 #ifdef CONFIG_NVME_TARGET_PASSTHRU
-	struct nvme_ctrl	*passthru_ctrl;
-	char			*passthru_ctrl_path;
+	struct nvmet_passthru	*passthru;
 	struct config_group	passthru_group;
-	unsigned int		admin_timeout;
-	unsigned int		io_timeout;
-	unsigned int		clear_ids;
 #endif /* CONFIG_NVME_TARGET_PASSTHRU */
 
 #ifdef CONFIG_BLK_DEV_ZONED
@@ -472,6 +488,7 @@ struct nvmet_req {
 			struct request		*rq;
 			struct work_struct      work;
 			bool			use_workqueue;
+			bool			ref_held;
 		} p;
 #ifdef CONFIG_BLK_DEV_ZONED
 		struct {
@@ -698,6 +715,13 @@ void nvmet_add_async_event(struct nvmet_ctrl *ctrl, u8 event_type,
 #define NVMET_KAS		10
 #define NVMET_DISC_KATO_MS		120000
 
+/*
+ * Largest keep-alive timeout in seconds that can be reported back in
+ * milliseconds and converted to jiffies without overflowing.
+ */
+#define NVMET_MAX_KATO	\
+	min3(U32_MAX / MSEC_PER_SEC, U32_MAX / HZ, MAX_JIFFY_OFFSET / HZ)
+
 int __init nvmet_init_configfs(void);
 void __exit nvmet_exit_configfs(void);
 
@@ -791,7 +815,44 @@ u16 nvmet_parse_passthru_admin_cmd(struct nvmet_req *req);
 u16 nvmet_parse_passthru_io_cmd(struct nvmet_req *req);
 static inline bool nvmet_is_passthru_subsys(struct nvmet_subsys *subsys)
 {
-	return subsys->passthru_ctrl;
+	return subsys->passthru &&
+		test_bit(NVMET_PASSTHRU_ENABLED, &subsys->passthru->flags);
+}
+
+static inline struct nvmet_passthru *nvmet_subsys_passthru(
+		struct nvmet_subsys *subsys)
+{
+	lockdep_assert_held(&subsys->lock);
+
+	if (!subsys->passthru) {
+		subsys->passthru = kzalloc_obj(*subsys->passthru);
+		if (!subsys->passthru)
+			return NULL;
+	}
+	return subsys->passthru;
+}
+
+static inline struct nvmet_passthru *nvmet_passthru_ref_held(
+		struct nvmet_req *req)
+{
+	if (req->p.ref_held)
+		return nvmet_req_subsys(req)->passthru;
+
+	return NULL;
+}
+
+static inline bool nvmet_get_passthru_ref(struct nvmet_req *req)
+{
+	if (!percpu_ref_tryget_live(&nvmet_req_subsys(req)->passthru->ref))
+		return false;
+
+	req->p.ref_held = true;
+	return true;
+}
+
+static inline void nvmet_put_passthru_ref(struct nvmet_passthru *passthru)
+{
+	percpu_ref_put(&passthru->ref);
 }
 #else /* CONFIG_NVME_TARGET_PASSTHRU */
 static inline void nvmet_passthru_subsys_free(struct nvmet_subsys *subsys)
@@ -811,6 +872,23 @@ static inline u16 nvmet_parse_passthru_io_cmd(struct nvmet_req *req)
 static inline bool nvmet_is_passthru_subsys(struct nvmet_subsys *subsys)
 {
 	return NULL;
+}
+static inline struct nvmet_passthru *nvmet_subsys_passthru(
+		struct nvmet_subsys *subsys)
+{
+	return NULL;
+}
+static inline struct nvmet_passthru *nvmet_passthru_ref_held(
+		struct nvmet_req *req)
+{
+	return NULL;
+}
+static inline bool nvmet_get_passthru_ref(struct nvmet_req *req)
+{
+	return false;
+}
+static inline void nvmet_put_passthru_ref(struct nvmet_passthru *passthru)
+{
 }
 #endif /* CONFIG_NVME_TARGET_PASSTHRU */
 
@@ -899,7 +977,8 @@ static inline void nvmet_req_bio_put(struct nvmet_req *req, struct bio *bio)
 #ifdef CONFIG_NVME_TARGET_TCP_TLS
 static inline key_serial_t nvmet_queue_tls_keyid(struct nvmet_sq *sq)
 {
-	return sq->tls_key ? key_serial(sq->tls_key) : 0;
+	/* A PCI endpoint controller is created without a queue */
+	return sq && sq->tls_key ? key_serial(sq->tls_key) : 0;
 }
 static inline void nvmet_sq_put_tls_key(struct nvmet_sq *sq)
 {
@@ -924,6 +1003,7 @@ u8 nvmet_setup_auth(struct nvmet_ctrl *ctrl, struct nvmet_sq *sq, bool reset);
 void nvmet_auth_sq_init(struct nvmet_sq *sq);
 void nvmet_destroy_auth(struct nvmet_ctrl *ctrl);
 void nvmet_auth_sq_free(struct nvmet_sq *sq);
+void nvmet_auth_sq_destroy(struct nvmet_sq *sq);
 int nvmet_setup_dhgroup(struct nvmet_ctrl *ctrl, u8 dhgroup_id);
 bool nvmet_check_auth_status(struct nvmet_req *req);
 int nvmet_auth_host_hash(struct nvmet_req *req, u8 *response,
@@ -950,6 +1030,7 @@ static inline void nvmet_auth_sq_init(struct nvmet_sq *sq)
 }
 static inline void nvmet_destroy_auth(struct nvmet_ctrl *ctrl) {};
 static inline void nvmet_auth_sq_free(struct nvmet_sq *sq) {};
+static inline void nvmet_auth_sq_destroy(struct nvmet_sq *sq) {};
 static inline bool nvmet_check_auth_status(struct nvmet_req *req)
 {
 	return true;

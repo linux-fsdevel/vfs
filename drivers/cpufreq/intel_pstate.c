@@ -1135,6 +1135,14 @@ static bool hybrid_clear_max_perf_cpu(void)
 	return ret;
 }
 
+static unsigned int intel_pstate_scale_freq_ref(struct cpufreq_policy *policy)
+{
+	if (READ_ONCE(all_cpu_data[policy->cpu]->capacity_perf))
+		return policy->cpuinfo.max_freq;
+
+	return 0;
+}
+
 static void intel_pstate_update_freq_limits(struct cpudata *cpu)
 {
 	int scaling = cpu->pstate.scaling;
@@ -3088,6 +3096,7 @@ static struct cpufreq_driver intel_pstate = {
 	.offline	= intel_pstate_cpu_offline,
 	.online		= intel_pstate_cpu_online,
 	.update_limits	= intel_pstate_update_limits,
+	.scale_freq_ref = intel_pstate_scale_freq_ref,
 	.name		= "intel_pstate",
 };
 
@@ -3380,10 +3389,11 @@ static void intel_cpufreq_cpu_exit(struct cpufreq_policy *policy)
 
 static int intel_cpufreq_suspend(struct cpufreq_policy *policy)
 {
+	struct cpudata *cpu = all_cpu_data[policy->cpu];
+
 	intel_pstate_suspend(policy);
 
 	if (hwp_active) {
-		struct cpudata *cpu = all_cpu_data[policy->cpu];
 		u64 value = READ_ONCE(cpu->hwp_req_cached);
 
 		/*
@@ -3394,6 +3404,17 @@ static int intel_cpufreq_suspend(struct cpufreq_policy *policy)
 		value &= ~HWP_DESIRED_PERF(~0L);
 		wrmsrq_on_cpu(cpu->cpu, MSR_HWP_REQUEST, value);
 		WRITE_ONCE(cpu->hwp_req_cached, value);
+	} else {
+		/*
+		 * Invalidate the cached P-state value that may be stale when
+		 * the governor is started again during resume and may prevent
+		 * MSR_IA32_PERF_CTL from being updated.
+		 *
+		 * This does not require synchronization because the core
+		 * prevents frequency updates for suspended policies from
+		 * occurring.
+		 */
+		cpu->pstate.current_pstate = 0;
 	}
 
 	return 0;
@@ -3411,6 +3432,7 @@ static struct cpufreq_driver intel_cpufreq = {
 	.suspend	= intel_cpufreq_suspend,
 	.resume		= intel_pstate_resume,
 	.update_limits	= intel_pstate_update_limits,
+	.scale_freq_ref = intel_pstate_scale_freq_ref,
 	.name		= "intel_cpufreq",
 };
 
@@ -3425,6 +3447,8 @@ static void intel_pstate_driver_cleanup(void)
 		if (all_cpu_data[cpu]) {
 			if (intel_pstate_driver == &intel_pstate)
 				intel_pstate_clear_update_util_hook(cpu);
+
+			intel_pstate_disable_hwp_interrupt(all_cpu_data[cpu]);
 
 			kfree(all_cpu_data[cpu]);
 			WRITE_ONCE(all_cpu_data[cpu], NULL);
@@ -3637,12 +3661,12 @@ static struct acpi_platform_list plat_info[] __initdata = {
 static bool __init intel_pstate_platform_pwr_mgmt_exists(void)
 {
 	const struct x86_cpu_id *id;
-	u64 misc_pwr;
+	u64 misc_pwr = 0;
 	int idx;
 
 	id = x86_match_cpu(intel_pstate_cpu_oob_ids);
 	if (id) {
-		rdmsrq(MSR_MISC_PWR_MGMT, misc_pwr);
+		rdmsrq_safe(MSR_MISC_PWR_MGMT, &misc_pwr);
 		if (misc_pwr & BITMASK_OOB) {
 			pr_debug("Bit 8 or 18 in the MISC_PWR_MGMT MSR set\n");
 			pr_debug("P states are controlled in Out of Band mode by the firmware/hardware\n");

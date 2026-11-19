@@ -62,7 +62,7 @@ static inline bool fuse_no_acl(const struct fuse_conn *fc,
 	return !fc->posix_acl && (i_user_ns(inode) != &init_user_ns);
 }
 
-struct posix_acl *fuse_get_acl(struct mnt_idmap *idmap,
+struct posix_acl *fuse_get_acl(const struct mnt_idmap *idmap,
 			       struct dentry *dentry, int type)
 {
 	struct inode *inode = d_inode(dentry);
@@ -90,13 +90,22 @@ struct posix_acl *fuse_get_inode_acl(struct inode *inode, int type, bool rcu)
 	return __fuse_get_acl(fc,  inode, type, rcu);
 }
 
-int fuse_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int fuse_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct posix_acl *acl, int type)
 {
 	struct inode *inode = d_inode(dentry);
 	struct fuse_conn *fc = get_fuse_conn(inode);
 	const char *name;
 	int ret;
+
+	/*
+	 * Without default_permissions the server does all permission
+	 * checking, including who may change POSIX ACLs. That's the same
+	 * thing fuse_do_setattr() does for chmod() and chown() by passing
+	 * ATTR_FORCE.
+	 */
+	if (fc->default_permissions && !inode_owner_or_capable(idmap, inode))
+		return -EPERM;
 
 	if (fuse_is_bad(inode))
 		return -EIO;

@@ -181,10 +181,15 @@ static int fbnic_fw_config_after_crash(struct fbnic_dev *fbd)
 		return -1;
 	}
 
+	/* The rx mode work rewrites the same shadow under the instance lock
+	 * alone, and this runs from the service task under RTNL only.
+	 */
+	netdev_lock(fbd->netdev);
 	fbnic_rpc_reset_valid_entries(fbd);
 	netif_addr_lock_bh(fbd->netdev);
 	__fbnic_set_rx_mode(fbd, &fbd->netdev->uc, &fbd->netdev->mc);
 	netif_addr_unlock_bh(fbd->netdev);
+	netdev_unlock(fbd->netdev);
 
 	return 0;
 }
@@ -229,18 +234,25 @@ static void fbnic_service_task(struct work_struct *work)
 
 	fbnic_fw_check_heartbeat(fbd);
 
-	fbnic_health_check(fbd);
-
-	fbnic_bmc_rpc_check(fbd);
-
 	if (netif_carrier_ok(fbd->netdev)) {
 		netdev_lock(fbd->netdev);
 		fbnic_napi_depletion_check(fbd->netdev);
 		netdev_unlock(fbd->netdev);
 	}
 
-	if (netif_running(netdev))
+	/* fbnic_service_task_stop() does not wait for a pass that is already
+	 * blocked on RTNL, so one can run after ndo_stop. Leave host state
+	 * alone in that case, and do not re-arm; __fbnic_open() reclaims and
+	 * rebuilds it. The PM path calls ndo_stop with the device detached but
+	 * still running; fbnic_up() starts the task again on resume.
+	 */
+	if (netif_running(netdev) && netif_device_present(netdev)) {
+		fbnic_health_check(fbd);
+
+		fbnic_bmc_rpc_check(fbd);
+
 		schedule_delayed_work(&fbd->service_task, HZ);
+	}
 
 	rtnl_unlock();
 }
@@ -276,8 +288,6 @@ static int fbnic_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(46));
-	if (err)
-		err = dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(32));
 	if (err) {
 		dev_err(&pdev->dev, "DMA configuration failed: %d\n", err);
 		return err;
@@ -434,6 +444,7 @@ static int fbnic_pm_suspend(struct device *dev)
 {
 	struct fbnic_dev *fbd = dev_get_drvdata(dev);
 	struct net_device *netdev = fbd->netdev;
+	struct fbnic_net *fbn;
 
 	if (fbnic_init_failure(fbd))
 		goto null_uc_addr;
@@ -441,13 +452,24 @@ static int fbnic_pm_suspend(struct device *dev)
 	rtnl_lock();
 	netdev_lock(netdev);
 
+	fbn = netdev_priv(netdev);
+
 	netif_device_detach(netdev);
 
 	if (netif_running(netdev))
 		netdev->netdev_ops->ndo_stop(netdev);
 
+	/* The IRQs are about to be freed, so drop the napi vector count */
+	fbn->num_napi = 0;
+
 	netdev_unlock(netdev);
 	rtnl_unlock();
+
+	/* ndo_stop could not wait for a pass already blocked on RTNL. That
+	 * pass no longer re-arms, but wait for it to finish before the
+	 * mailbox, IRQs and MMIO go away.
+	 */
+	cancel_delayed_work_sync(&fbd->service_task);
 
 null_uc_addr:
 	fbnic_fw_log_disable(fbd);
@@ -508,16 +530,20 @@ static int __fbnic_pm_resume(struct device *dev)
 	if (fbnic_init_failure(fbd))
 		return 0;
 
+	rtnl_lock();
+	netdev_lock(netdev);
+
 	fbn = netdev_priv(netdev);
 
 	/* Reset the queues if needed */
 	fbnic_reset_queues(fbn, fbn->num_tx_queues, fbn->num_rx_queues);
 
-	rtnl_lock();
-	netdev_lock(netdev);
-
-	if (netif_running(netdev))
+	if (netif_running(netdev)) {
 		err = __fbnic_open(fbn);
+		/* On failure the vectors are freed, so drop the count */
+		if (err)
+			fbn->num_napi = 0;
+	}
 
 	netdev_unlock(netdev);
 	rtnl_unlock();
@@ -545,19 +571,26 @@ static void __fbnic_pm_attach(struct device *dev)
 	struct net_device *netdev = fbd->netdev;
 	struct fbnic_net *fbn;
 
-	rtnl_lock();
-	fbnic_reset_hw_stats(fbd);
-	rtnl_unlock();
-
 	if (fbnic_init_failure(fbd))
 		return;
 
 	fbn = netdev_priv(netdev);
 
+	/* Hold RTNL until the device is attached, so the service task pass
+	 * fbnic_up() schedules cannot run until it will see it present.
+	 */
+	rtnl_lock();
+	netdev_lock(netdev);
+
+	fbnic_reset_hw_stats(fbd);
+
 	if (netif_running(netdev))
 		fbnic_up(fbn);
 
 	netif_device_attach(netdev);
+
+	netdev_unlock(netdev);
+	rtnl_unlock();
 }
 
 static int __maybe_unused fbnic_pm_resume(struct device *dev)

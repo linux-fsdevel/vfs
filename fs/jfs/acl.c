@@ -89,7 +89,7 @@ static int __jfs_set_acl(tid_t tid, struct inode *inode, int type,
 	return rc;
 }
 
-int jfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
+int jfs_set_acl(const struct mnt_idmap *idmap, struct dentry *dentry,
 		struct posix_acl *acl, int type)
 {
 	int rc;
@@ -97,6 +97,9 @@ int jfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	int update_mode = 0;
 	struct inode *inode = d_inode(dentry);
 	umode_t mode = inode->i_mode;
+
+	if (sb_emergency_ro(inode->i_sb))
+		return -EROFS;
 
 	tid = txBegin(inode->i_sb, 0);
 	mutex_lock(&JFS_IP(inode)->commit_mutex);

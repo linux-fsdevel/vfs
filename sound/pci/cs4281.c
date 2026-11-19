@@ -324,7 +324,7 @@ MODULE_PARM_DESC(dual_codec, "Secondary Codec ID (0 = disabled).");
 #define BA0_SSCR_XLPSRC		(1<<8)	/* External SRC Loopback Mode */
 #define BA0_SSCR_LPSRC		(1<<7)	/* SRC Loopback Mode */
 #define BA0_SSCR_CDTX		(1<<5)	/* CD Transfer Data */
-#define BA0_SSCR_HVC		(1<<3)	/* Harware Volume Control Enable */
+#define BA0_SSCR_HVC		(1<<3)	/* Hardware Volume Control Enable */
 
 #define BA0_FMLVC		0x0754	/* FM Synthesis Left Volume Control */
 #define BA0_FMRVC		0x0758	/* FM Synthesis Right Volume Control */
@@ -1104,25 +1104,23 @@ static void snd_cs4281_proc_read(struct snd_info_entry *entry,
 
 static ssize_t snd_cs4281_BA0_read(struct snd_info_entry *entry,
 				   void *file_private_data,
-				   struct file *file, char __user *buf,
+				   struct file *file, char *buf,
 				   size_t count, loff_t pos)
 {
 	struct cs4281 *chip = entry->private_data;
 	
-	if (copy_to_user_fromio(buf, chip->ba0 + pos, count))
-		return -EFAULT;
+	memcpy_fromio(buf, chip->ba0 + pos, count);
 	return count;
 }
 
 static ssize_t snd_cs4281_BA1_read(struct snd_info_entry *entry,
 				   void *file_private_data,
-				   struct file *file, char __user *buf,
+				   struct file *file, char *buf,
 				   size_t count, loff_t pos)
 {
 	struct cs4281 *chip = entry->private_data;
 	
-	if (copy_to_user_fromio(buf, chip->ba1 + pos, count))
-		return -EFAULT;
+	memcpy_fromio(buf, chip->ba1 + pos, count);
 	return count;
 }
 
@@ -1811,11 +1809,11 @@ static void snd_cs4281_opl3_command(struct snd_opl3 *opl3, unsigned short cmd,
 	udelay(30);
 }
 
-static int __snd_cs4281_probe(struct pci_dev *pci,
-			      const struct pci_device_id *pci_id)
+static int snd_cs4281_probe(struct pci_dev *pci,
+			    const struct pci_device_id *pci_id)
 {
 	static int dev;
-	struct snd_card *card;
+	struct snd_card *card __free(snd_card_free) = NULL;
 	struct cs4281 *chip;
 	struct snd_opl3 *opl3;
 	int err;
@@ -1868,14 +1866,9 @@ static int __snd_cs4281_probe(struct pci_dev *pci,
 		return err;
 
 	pci_set_drvdata(pci, card);
+	card = NULL; /* probe succeeded, don't release as error */
 	dev++;
 	return 0;
-}
-
-static int snd_cs4281_probe(struct pci_dev *pci,
-			    const struct pci_device_id *pci_id)
-{
-	return snd_card_free_on_error(&pci->dev, __snd_cs4281_probe(pci, pci_id));
 }
 
 /*

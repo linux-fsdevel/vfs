@@ -241,21 +241,21 @@ static const struct regulator_desc tps65224_buck_regs[] = {
 			  TPS65224_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_CTRL(1),
 			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
-			  4, 0, 0, NULL, 0, 0),
+			  ARRAY_SIZE(tps65224_bucks_2_3_4_ranges), 0, 0, NULL, 0, 0),
 	TPS6594_REGULATOR("BUCK3", "buck3", TPS6594_BUCK_3,
 			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_VOUT_1(2),
 			  TPS65224_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_CTRL(2),
 			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
-			  4, 0, 0, NULL, 0, 0),
+			  ARRAY_SIZE(tps65224_bucks_2_3_4_ranges), 0, 0, NULL, 0, 0),
 	TPS6594_REGULATOR("BUCK4", "buck4", TPS6594_BUCK_4,
 			  REGULATOR_VOLTAGE, tps6594_bucks_ops, TPS65224_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_VOUT_1(3),
 			  TPS65224_MASK_BUCKS_VSET,
 			  TPS6594_REG_BUCKX_CTRL(3),
 			  TPS6594_BIT_BUCK_EN, 0, 0, tps65224_bucks_2_3_4_ranges,
-			  4, 0, 0, NULL, 0, 0),
+			  ARRAY_SIZE(tps65224_bucks_2_3_4_ranges), 0, 0, NULL, 0, 0),
 };
 
 static const struct tps6594_regulator_irq_type tps6594_buck1_irq_types[] = {
@@ -721,8 +721,9 @@ static int tps6594_regulator_probe(struct platform_device *pdev)
 
 	reg_irq_nb = desc->num_irq_types * (desc->num_buck_regs + desc->num_ldo_regs);
 
-	irq_data = devm_kmalloc_array(tps->dev, reg_irq_nb,
-				      sizeof(struct tps6594_regulator_irq_data), GFP_KERNEL);
+	irq_data = devm_kmalloc_objs(tps->dev,
+				     struct tps6594_regulator_irq_data,
+				     reg_irq_nb);
 	if (!irq_data)
 		return -ENOMEM;
 
@@ -810,10 +811,9 @@ static int tps6594_regulator_probe(struct platform_device *pdev)
 			return error;
 	}
 
-	irq_ext_reg_data = devm_kmalloc_array(tps->dev,
-					      desc->num_ext_irqs,
-					      sizeof(struct tps6594_ext_regulator_irq_data),
-					      GFP_KERNEL);
+	irq_ext_reg_data = devm_kmalloc_objs(tps->dev,
+					     struct tps6594_ext_regulator_irq_data,
+					     desc->num_ext_irqs);
 	if (!irq_ext_reg_data)
 		return -ENOMEM;
 

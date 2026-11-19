@@ -988,8 +988,7 @@ static int hidpp_root_get_protocol_version(struct hidpp_device *hidpp)
 	}
 
 	/* the device might not be connected */
-	if (ret == HIDPP_ERROR_CONNECT_FAIL ||
-	    ret == HIDPP_ERROR_RESOURCE_ERROR ||
+	if (ret == HIDPP_ERROR_RESOURCE_ERROR ||
 	    ret == HIDPP_ERROR_UNKNOWN_DEVICE)
 		return -EIO;
 
@@ -3136,8 +3135,7 @@ static int wtp_allocate(struct hid_device *hdev, const struct hid_device_id *id)
 	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
 	struct wtp_data *wd;
 
-	wd = devm_kzalloc(&hdev->dev, sizeof(struct wtp_data),
-			GFP_KERNEL);
+	wd = devm_kzalloc_obj(&hdev->dev, struct wtp_data);
 	if (!wd)
 		return -ENOMEM;
 
@@ -3392,8 +3390,7 @@ static int k400_allocate(struct hid_device *hdev)
 	struct hidpp_device *hidpp = hid_get_drvdata(hdev);
 	struct k400_private_data *k400;
 
-	k400 = devm_kzalloc(&hdev->dev, sizeof(struct k400_private_data),
-			    GFP_KERNEL);
+	k400 = devm_kzalloc_obj(&hdev->dev, struct k400_private_data);
 	if (!k400)
 		return -ENOMEM;
 
@@ -4405,50 +4402,8 @@ static int hidpp_initialize_battery(struct hidpp_device *hidpp)
 	return ret;
 }
 
-static bool hidpp_is_bolt_child(struct hid_device *hdev)
-{
-	struct device *parent = hdev->dev.parent;
-	struct hid_device *receiver_hdev;
-
-	if (!parent)
-		return false;
-
-	receiver_hdev = to_hid_device(parent);
-	return receiver_hdev->vendor == USB_VENDOR_ID_LOGITECH &&
-	       receiver_hdev->product == USB_DEVICE_ID_LOGITECH_BOLT_RECEIVER;
-}
-
-static int hidpp_bolt_init(struct hidpp_device *hidpp)
-{
-	struct hid_device *hdev = hidpp->hid_dev;
-	char *name;
-	int ret;
-
-	ret = hidpp_serial_init(hidpp);
-	if (ret)
-		return ret;
-
-	name = hidpp_get_device_name(hidpp);
-	if (!name)
-		return -EIO;
-
-	snprintf(hdev->name, sizeof(hdev->name), "%s", name);
-	dbg_hid("HID++ Bolt: Got name: %s\n", name);
-
-	kfree(name);
-	return 0;
-}
-
-static int hidpp_receiver_init(struct hidpp_device *hidpp)
-{
-	if (hidpp_is_bolt_child(hidpp->hid_dev))
-		return hidpp_bolt_init(hidpp);
-
-	return hidpp_unifying_init(hidpp);
-}
-
 /* Get name + serial for USB and Bluetooth HID++ devices */
-static void hidpp_non_receiver_init(struct hidpp_device *hidpp)
+static void hidpp_non_unifying_init(struct hidpp_device *hidpp)
 {
 	struct hid_device *hdev = hidpp->hid_dev;
 	char *name;
@@ -4718,7 +4673,7 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 	unsigned int connect_mask = HID_CONNECT_DEFAULT;
 
 	/* report_fixup needs drvdata to be set before we call hid_parse */
-	hidpp = devm_kzalloc(&hdev->dev, sizeof(*hidpp), GFP_KERNEL);
+	hidpp = devm_kzalloc_obj(&hdev->dev, *hidpp);
 	if (!hidpp)
 		return -ENOMEM;
 
@@ -4800,9 +4755,9 @@ static int hidpp_probe(struct hid_device *hdev, const struct hid_device_id *id)
 
 	/* Get name + serial, store in hdev->name + hdev->uniq */
 	if (id->group == HID_GROUP_LOGITECH_DJ_DEVICE)
-		hidpp_receiver_init(hidpp);
+		hidpp_unifying_init(hidpp);
 	else
-		hidpp_non_receiver_init(hidpp);
+		hidpp_non_unifying_init(hidpp);
 
 	if (hidpp->quirks & HIDPP_QUIRK_DELAYED_INIT)
 		connect_mask &= ~HID_CONNECT_HIDINPUT;
@@ -4834,6 +4789,7 @@ hid_hw_open_fail:
 hid_hw_start_fail:
 	sysfs_remove_group(&hdev->dev.kobj, &ps_attribute_group);
 	cancel_work_sync(&hidpp->work);
+	cancel_work_sync(&hidpp->reset_hi_res_work);
 	mutex_destroy(&hidpp->send_mutex);
 	return ret;
 }
@@ -4924,6 +4880,8 @@ static const struct hid_device_id hidpp_devices[] = {
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC08D) },
 	{ /* Logitech G502 X Plus Wireless Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC095) },
+	{ /* Logitech G502 X Lightspeed Wireless Gaming Mouse over USB */
+	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC098) },
 	{ /* Logitech G703 Gaming Mouse over USB */
 	  HID_USB_DEVICE(USB_VENDOR_ID_LOGITECH, 0xC087) },
 	{ /* Logitech G703 Hero Gaming Mouse over USB */

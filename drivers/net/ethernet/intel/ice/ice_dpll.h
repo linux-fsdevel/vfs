@@ -133,10 +133,12 @@ struct ice_dpll {
  * @eec: pointer to EEC dpll dev
  * @pps: pointer to PPS dpll dev
  * @txc: pointer to TXC dpll dev
+ * @tspll: pointer to TSPLL dpll dev (E825 only)
  * @inputs: input pins pointer
  * @outputs: output pins pointer
  * @rclk: recovered pins pointer
  * @txclks: TX clock reference pins pointer
+ * @tspll_in: TSPLL TIME_REF fwnode input pin (E825 only)
  * @num_inputs: number of input pins available on dpll
  * @num_outputs: number of output pins available on dpll
  * @cgu_state_acq_err_num: number of errors returned during periodic work
@@ -156,6 +158,7 @@ struct ice_dpll {
  *     txclk_notify_rwsem (read)
  *       -> pf->dplls.lock
  *         -> ctrl_pf->dplls.lock
+ *         -> adapter->cgu_synce_lock
  *
  *   - @lock serializes all DPLL state mutations on this PF. When the
  *     controlling PF's lock must also be taken (e.g. updating the shared
@@ -167,6 +170,9 @@ struct ice_dpll {
  *     dpll_*_change_ntf() calls. ice_dpll_deinit() takes the write side
  *     standalone (not nested under any other lock) to drain in-flight
  *     readers before pins and the TXC DPLL device are freed.
+ *   - adapter->cgu_synce_lock serializes changes of the CGU registers R10 and
+ *     R11. All E825C PFs reach one CGU, so @lock, which is per PF, does not
+ *     cover them.
  */
 struct ice_dplls {
 	struct kthread_worker *kworker;
@@ -177,12 +183,14 @@ struct ice_dplls {
 	struct ice_dpll eec;
 	struct ice_dpll pps;
 	struct ice_dpll txc;
+	struct ice_dpll tspll;
 	struct ice_dpll_pin *inputs;
 	struct ice_dpll_pin *outputs;
 	struct ice_dpll_pin sma[ICE_DPLL_PIN_SW_NUM];
 	struct ice_dpll_pin ufl[ICE_DPLL_PIN_SW_NUM];
 	struct ice_dpll_pin rclk;
 	struct ice_dpll_pin txclks[ICE_DPLL_TXCLK_NUM_MAX];
+	struct ice_dpll_pin tspll_in;
 	u8 num_inputs;
 	u8 num_outputs;
 	u8 sma_data;

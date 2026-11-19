@@ -22,6 +22,7 @@
 #include <linux/file.h>
 #include <linux/fs.h>
 #include <linux/fs_context.h>
+#include <linux/pseudo_fs.h>
 #include <linux/init.h>
 #include <linux/kstrtox.h>
 #include <linux/limits.h>
@@ -98,6 +99,13 @@ static const struct binfmt_misc_flag *misc_flag_by_char(const char c)
 		if (misc_flags[i].c == c)
 			return &misc_flags[i];
 	return NULL;
+}
+
+static bool misc_valid_delim(const char c)
+{
+	if (!isascii(c) || !ispunct(c))
+		return false;
+	return c != '\\';
 }
 
 struct binfmt_misc_entry {
@@ -331,8 +339,8 @@ static int entry_attach_interpreter(struct binfmt_misc_entry *e,
 		return -ENOSPC;
 
 	/* One allocation, both strings in it, like the entry's own buffer. */
-	interp = kmalloc(struct_size(interp, name, nlen + plen + 2),
-			 GFP_KERNEL_ACCOUNT);
+	interp = kmalloc_flex(*interp, name, nlen + plen + 2,
+			      GFP_KERNEL_ACCOUNT);
 	if (!interp) {
 		dec_ucount(ucounts, UCOUNT_BINFMT_MISC_INTERPRETERS);
 		return -ENOMEM;
@@ -858,8 +866,7 @@ static struct binfmt_misc_entry *create_entry(const char __user *buffer,
 	if ((count < 11) || (count > MAX_REGISTER_LENGTH))
 		return ERR_PTR(-EINVAL);
 
-	e = kmalloc(struct_size(e, buf, count + MISC_DELIM_PAD),
-		    GFP_KERNEL_ACCOUNT);
+	e = kmalloc_flex(*e, buf, count + MISC_DELIM_PAD, GFP_KERNEL_ACCOUNT);
 	if (!e)
 		return ERR_PTR(-ENOMEM);
 
@@ -872,10 +879,9 @@ static struct binfmt_misc_entry *create_entry(const char __user *buffer,
 
 	del = *p++;	/* delimiter */
 
-	pr_debug("register: delim: %#x {%c}\n", del, del);
+	pr_debug("register: delim: %#x\n", del);
 
-	/* A flag-char delimiter runs the flag scan off the buffer. */
-	if (misc_flag_by_char(del))
+	if (!misc_valid_delim(del))
 		return ERR_PTR(-EINVAL);
 
 	/* Pad the buffer with the delim to simplify parsing below. */
@@ -1570,8 +1576,7 @@ static int bm_fill_super(struct super_block *sb, struct fs_context *fc)
 	if (user_ns != current_user_ns())
 		return -EINVAL;
 
-	/* Never exec off this instance and never let anything stack on it. */
-	sb->s_iflags |= SB_I_NOEXEC | SB_I_NODEV;
+	/* Never let anything stack on this instance. */
 	sb->s_stack_depth = FILESYSTEM_MAX_STACK_DEPTH;
 
 	/*
@@ -1655,6 +1660,7 @@ static void bm_kill_sb(struct super_block *sb)
 
 static int bm_init_fs_context(struct fs_context *fc)
 {
+	fc_init_pseudo(fc);
 	fc->ops = &bm_context_ops;
 	return 0;
 }

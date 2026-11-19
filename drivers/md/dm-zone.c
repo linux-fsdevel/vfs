@@ -33,6 +33,8 @@ static int dm_blk_do_report_zones(struct mapped_device *md, struct dm_table *t,
 					      nr_zones - args->zone_idx);
 		if (ret < 0)
 			return ret;
+		if (!ret)
+			return -EIO;
 	} while (args->zone_idx < nr_zones &&
 		 args->next_sector < get_capacity(md->disk));
 
@@ -447,10 +449,8 @@ void dm_finalize_zone_settings(struct dm_table *t, struct queue_limits *lim)
 	struct mapped_device *md = t->md;
 
 	if (lim->features & BLK_FEAT_ZONED) {
-		if (dm_table_supports_zone_append(t))
-			clear_bit(DMF_EMULATE_ZONE_APPEND, &md->flags);
-		else
-			set_bit(DMF_EMULATE_ZONE_APPEND, &md->flags);
+		assign_bit(DMF_EMULATE_ZONE_APPEND, &md->flags,
+			   !dm_table_supports_zone_append(t));
 	} else {
 		clear_bit(DMF_EMULATE_ZONE_APPEND, &md->flags);
 		md->disk->nr_zones = 0;

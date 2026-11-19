@@ -13,6 +13,8 @@
 /*
  * Characters to print to indicate error conditions or uncommon filesystem state.
  * RO is not an error.
+ * Don't use 'E' because that's used to signal that there's an error stored in
+ * fs_info->fs_error (see btrfs_state_to_string() below).
  */
 static const char fs_state_chars[] = {
 	[BTRFS_FS_STATE_REMOUNTING]		= 'M',
@@ -24,37 +26,37 @@ static const char fs_state_chars[] = {
 	[BTRFS_FS_STATE_NO_DATA_CSUMS]		= 'C',
 	[BTRFS_FS_STATE_SKIP_META_CSUMS]	= 'S',
 	[BTRFS_FS_STATE_LOG_CLEANUP_ERROR]	= 'L',
-	[BTRFS_FS_STATE_EMERGENCY_SHUTDOWN]	= 'E',
+	[BTRFS_FS_STATE_NO_DELAYED_IPUT]	= 'I',
+	[BTRFS_FS_STATE_EMERGENCY_SHUTDOWN]	= 'H',
 };
 
 static void btrfs_state_to_string(const struct btrfs_fs_info *info, char *buf)
 {
 	unsigned int bit;
-	bool states_printed = false;
 	unsigned long fs_state = READ_ONCE(info->fs_state);
 	char *curr = buf;
+
+	if (likely(BTRFS_FS_ERROR(info) == 0 && fs_state == 0)) {
+		*curr = 0;
+		return;
+	}
 
 	memcpy(curr, STATE_STRING_PREFACE, sizeof(STATE_STRING_PREFACE));
 	curr += sizeof(STATE_STRING_PREFACE) - 1;
 
-	if (unlikely(BTRFS_FS_ERROR(info))) {
+	if (BTRFS_FS_ERROR(info))
 		*curr++ = 'E';
-		states_printed = true;
-	}
 
-	for_each_set_bit(bit, &fs_state, sizeof(fs_state)) {
-		WARN_ON_ONCE(bit >= BTRFS_FS_STATE_COUNT);
-		if ((bit < BTRFS_FS_STATE_COUNT) && fs_state_chars[bit]) {
+	for_each_set_bit(bit, &fs_state, BTRFS_FS_STATE_COUNT) {
+		if (fs_state_chars[bit])
 			*curr++ = fs_state_chars[bit];
-			states_printed = true;
-		}
 	}
 
-	/* If no states were printed, reset the buffer */
-	if (!states_printed)
+	/* If nothing printed, ensure we return an empty string. */
+	if (curr == (buf + sizeof(STATE_STRING_PREFACE) - 1))
 		curr = buf;
 
-	*curr++ = 0;
+	*curr = 0;
 }
 #endif
 
@@ -130,10 +132,10 @@ void __btrfs_handle_fs_error(struct btrfs_fs_info *fs_info, const char *function
 #endif
 
 	/*
-	 * Special case: if the error is EROFS, and we're already under
-	 * SB_RDONLY, then it is safe here.
+	 * Special case: if the error is EROFS, and we're already read-only,
+	 * then it is safe here.
 	 */
-	if (error == -EROFS && sb_rdonly(sb))
+	if (error == -EROFS && btrfs_fs_rdonly(fs_info))
 		return;
 
 #ifdef CONFIG_PRINTK
@@ -166,13 +168,17 @@ void __btrfs_handle_fs_error(struct btrfs_fs_info *fs_info, const char *function
 	if (!(sb->s_flags & SB_BORN))
 		return;
 
-	if (sb_rdonly(sb))
+	if (btrfs_fs_rdonly(fs_info))
 		return;
 
 	btrfs_discard_stop(fs_info);
 
-	/* Handle error by forcing the filesystem readonly. */
-	btrfs_set_sb_rdonly(sb);
+	/*
+	 * Handle error by forcing the filesystem readonly. SB_RDONLY needs
+	 * s_umount, see sb_set_emergency_ro().
+	 */
+	set_bit(BTRFS_FS_STATE_RO, &fs_info->fs_state);
+	sb_set_emergency_ro(sb);
 	btrfs_info(fs_info, "forced readonly");
 	/*
 	 * Note that a running device replace operation is not canceled here

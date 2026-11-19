@@ -129,14 +129,14 @@ bool nf_queue_entry_get_refs(struct nf_queue_entry *entry)
 }
 EXPORT_SYMBOL_GPL(nf_queue_entry_get_refs);
 
-void nf_queue_nf_hook_drop(struct net *net)
+void nf_queue_nf_hook_drop(struct net *net, const struct nf_hook_ops *ops)
 {
 	const struct nf_queue_handler *qh;
 
 	rcu_read_lock();
 	qh = rcu_dereference(nf_queue_handler);
 	if (qh)
-		qh->nf_hook_drop(net);
+		qh->nf_hook_drop(net, ops);
 	rcu_read_unlock();
 }
 EXPORT_SYMBOL_GPL(nf_queue_nf_hook_drop);
@@ -219,6 +219,7 @@ static int __nf_queue(struct sk_buff *skb, const struct nf_hook_state *state,
 	*entry = (struct nf_queue_entry) {
 		.skb	= skb,
 		.skb_dev = skb->dev,
+		.in_nf_duplicate = current->in_nf_duplicate,
 		.state	= *state,
 		.hook_index = index,
 		.size	= sizeof(*entry) + route_key_size,

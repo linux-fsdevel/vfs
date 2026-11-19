@@ -22,6 +22,7 @@
 #include <linux/err.h>
 #include <linux/of.h>
 #include <linux/of_device.h>
+#include <linux/stringify.h>
 
 /* RSTOUT mask register physical address for Orion5x, Kirkwood and Dove */
 #define ORION_RSTOUT_MASK_OFFSET	0x20108
@@ -231,6 +232,9 @@ static int armada370_start(struct watchdog_device *wdt_dev)
 	/* Set watchdog duration */
 	writel(dev->clk_rate * wdt_dev->timeout,
 	       dev->reg + dev->data->wdt_counter_offset);
+	if (dev->wdt.info->options & WDIOF_PRETIMEOUT)
+		writel(dev->clk_rate * (wdt_dev->timeout - wdt_dev->pretimeout),
+		       dev->reg + TIMER1_VAL_OFF);
 
 	/* Clear the watchdog expiration bit */
 	atomic_io_modify(dev->reg + TIMER_A370_STATUS, WDT_A370_EXPIRED, 0);
@@ -558,8 +562,7 @@ static int orion_wdt_probe(struct platform_device *pdev)
 	unsigned int wdt_max_duration;	/* (seconds) */
 	int ret, irq;
 
-	dev = devm_kzalloc(&pdev->dev, sizeof(struct orion_watchdog),
-			   GFP_KERNEL);
+	dev = devm_kzalloc_obj(&pdev->dev, struct orion_watchdog);
 	if (!dev)
 		return -ENOMEM;
 
@@ -687,7 +690,7 @@ MODULE_PARM_DESC(heartbeat, "Initial watchdog heartbeat in seconds");
 
 module_param(nowayout, bool, 0);
 MODULE_PARM_DESC(nowayout, "Watchdog cannot be stopped once started (default="
-				__MODULE_STRING(WATCHDOG_NOWAYOUT) ")");
+				__stringify(WATCHDOG_NOWAYOUT) ")");
 
 MODULE_LICENSE("GPL v2");
 MODULE_ALIAS("platform:orion_wdt");

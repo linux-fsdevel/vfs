@@ -599,7 +599,10 @@ static int soc21_common_early_init(struct amdgpu_ip_block *ip_block)
 		adev->cg_flags =
 			AMD_CG_SUPPORT_GFX_CGCG |
 			AMD_CG_SUPPORT_GFX_CGLS |
+			AMD_CG_SUPPORT_GFX_MGCG |
 			AMD_CG_SUPPORT_REPEATER_FGCG |
+			AMD_CG_SUPPORT_GFX_FGCG |
+			AMD_CG_SUPPORT_GFX_PERF_CLK |
 			AMD_CG_SUPPORT_VCN_MGCG |
 			AMD_CG_SUPPORT_JPEG_MGCG |
 			AMD_CG_SUPPORT_ATHUB_MGCG |
@@ -1042,11 +1045,6 @@ static int soc21_common_resume(struct amdgpu_ip_block *ip_block)
 	return soc21_common_hw_init(ip_block);
 }
 
-static bool soc21_common_is_idle(struct amdgpu_ip_block *ip_block)
-{
-	return true;
-}
-
 static int soc21_common_set_clockgating_state(struct amdgpu_ip_block *ip_block,
 					   enum amd_clockgating_state state)
 {
@@ -1111,7 +1109,6 @@ static const struct amd_ip_funcs soc21_common_ip_funcs = {
 	.hw_fini = soc21_common_hw_fini,
 	.suspend = soc21_common_suspend,
 	.resume = soc21_common_resume,
-	.is_idle = soc21_common_is_idle,
 	.set_clockgating_state = soc21_common_set_clockgating_state,
 	.set_powergating_state = soc21_common_set_powergating_state,
 	.get_clockgating_state = soc21_common_get_clockgating_state,

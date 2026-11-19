@@ -813,8 +813,11 @@ static int omap_gpio_request(struct gpio_chip *chip, unsigned offset)
 {
 	struct gpio_bank *bank = gpiochip_get_data(chip);
 	unsigned long flags;
+	int ret;
 
-	pm_runtime_get_sync(chip->parent);
+	ret = pm_runtime_resume_and_get(chip->parent);
+	if (ret < 0)
+		return ret;
 
 	raw_spin_lock_irqsave(&bank->lock, flags);
 	omap_enable_gpio_module(bank, offset);
@@ -1032,8 +1035,6 @@ static void omap_gpio_mod_init(struct gpio_bank *bank)
 static int omap_gpio_chip_init(struct gpio_bank *bank, struct device *pm_dev)
 {
 	struct gpio_irq_chip *irq;
-	static int gpio;
-	const char *label;
 	int ret;
 
 	/*
@@ -1055,11 +1056,7 @@ static int omap_gpio_chip_init(struct gpio_bank *bank, struct device *pm_dev)
 		if (bank->regs->wkup_en)
 			bank->chip.parent = &omap_mpuio_device.dev;
 	} else {
-		label = devm_kasprintf(bank->chip.parent, GFP_KERNEL, "gpio-%d-%d",
-				       gpio, gpio + bank->width - 1);
-		if (!label)
-			return -ENOMEM;
-		bank->chip.label = label;
+		bank->chip.label = dev_name(bank->chip.parent);
 	}
 	bank->chip.base = -1;
 	bank->chip.ngpio = bank->width;
@@ -1085,9 +1082,6 @@ static int omap_gpio_chip_init(struct gpio_bank *bank, struct device *pm_dev)
 			       0, dev_name(bank->chip.parent), bank);
 	if (ret)
 		gpiochip_remove(&bank->chip);
-
-	if (!bank->is_mpuio)
-		gpio += bank->width;
 
 	return ret;
 }
@@ -1410,7 +1404,7 @@ static int omap_gpio_probe(struct platform_device *pdev)
 	if (!pdata)
 		return -EINVAL;
 
-	bank = devm_kzalloc(dev, sizeof(*bank), GFP_KERNEL);
+	bank = devm_kzalloc_obj(dev, *bank);
 	if (!bank)
 		return -ENOMEM;
 
@@ -1468,7 +1462,13 @@ static int omap_gpio_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, bank);
 
 	pm_runtime_enable(dev);
-	pm_runtime_get_sync(dev);
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0) {
+		pm_runtime_disable(dev);
+		if (bank->dbck_flag)
+			clk_unprepare(bank->dbck);
+		return ret;
+	}
 
 	if (bank->is_mpuio)
 		omap_mpuio_init(bank);
