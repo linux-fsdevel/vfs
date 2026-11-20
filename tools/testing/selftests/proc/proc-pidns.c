@@ -17,6 +17,7 @@
 #include <sys/stat.h>
 #include <sys/prctl.h>
 
+#include "../filesystems/wrappers.h"
 #include "kselftest_harness.h"
 
 #define ASSERT_ERRNO(expected, _t, seen)				\
@@ -115,13 +116,13 @@ TEST_F(ns, pidns_mount_string_path)
 
 TEST_F(ns, pidns_fsconfig_string_path)
 {
-	int fsfd = fsopen("proc", FSOPEN_CLOEXEC);
+	int fsfd = sys_fsopen("proc", FSOPEN_CLOEXEC);
 	ASSERT_SUCCESS(fsfd);
 
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_SET_STRING, "pidns", "/tmp/dummy/pidns", 0));
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_SET_STRING, "pidns", "/tmp/dummy/pidns", 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
 
-	int mountfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
+	int mountfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
 	ASSERT_SUCCESS(mountfd);
 
 	ASSERT_ERRNO_EQ(-ENOENT, faccessat(mountfd, "1/", X_OK, 0));
@@ -133,13 +134,13 @@ TEST_F(ns, pidns_fsconfig_string_path)
 
 TEST_F(ns, pidns_fsconfig_fd)
 {
-	int fsfd = fsopen("proc", FSOPEN_CLOEXEC);
+	int fsfd = sys_fsopen("proc", FSOPEN_CLOEXEC);
 	ASSERT_SUCCESS(fsfd);
 
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_SET_FD, "pidns", NULL, self->dummy_pidns));
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_SET_FD, "pidns", NULL, self->dummy_pidns));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
 
-	int mountfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
+	int mountfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
 	ASSERT_SUCCESS(mountfd);
 
 	ASSERT_ERRNO_EQ(-ENOENT, faccessat(mountfd, "1/", X_OK, 0));
@@ -165,19 +166,20 @@ TEST_F(ns, pidns_reconfigure_remount)
 
 TEST_F(ns, pidns_reconfigure_fsconfig_string_path)
 {
-	int fsfd = fsopen("proc", FSOPEN_CLOEXEC);
+	int fsfd = sys_fsopen("proc", FSOPEN_CLOEXEC);
 	ASSERT_SUCCESS(fsfd);
 
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
 
-	int mountfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
+	int mountfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
 	ASSERT_SUCCESS(mountfd);
 
 	ASSERT_SUCCESS(faccessat(mountfd, "1/", X_OK, 0));
 	ASSERT_SUCCESS(faccessat(mountfd, "self/", X_OK, 0));
 
-	ASSERT_ERRNO_EQ(-EBUSY, fsconfig(fsfd, FSCONFIG_SET_STRING, "pidns", "/tmp/dummy/pidns", 0));
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_RECONFIGURE, NULL, NULL, 0)); /* noop */
+	ASSERT_ERRNO_EQ(-EBUSY, sys_fsconfig(fsfd, FSCONFIG_SET_STRING,
+					     "pidns", "/tmp/dummy/pidns", 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_RECONFIGURE, NULL, NULL, 0)); /* noop */
 
 	ASSERT_SUCCESS(faccessat(mountfd, "1/", X_OK, 0));
 	ASSERT_SUCCESS(faccessat(mountfd, "self/", X_OK, 0));
@@ -188,19 +190,20 @@ TEST_F(ns, pidns_reconfigure_fsconfig_string_path)
 
 TEST_F(ns, pidns_reconfigure_fsconfig_fd)
 {
-	int fsfd = fsopen("proc", FSOPEN_CLOEXEC);
+	int fsfd = sys_fsopen("proc", FSOPEN_CLOEXEC);
 	ASSERT_SUCCESS(fsfd);
 
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_CREATE, NULL, NULL, 0));
 
-	int mountfd = fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
+	int mountfd = sys_fsmount(fsfd, FSMOUNT_CLOEXEC, 0);
 	ASSERT_SUCCESS(mountfd);
 
 	ASSERT_SUCCESS(faccessat(mountfd, "1/", X_OK, 0));
 	ASSERT_SUCCESS(faccessat(mountfd, "self/", X_OK, 0));
 
-	ASSERT_ERRNO_EQ(-EBUSY, fsconfig(fsfd, FSCONFIG_SET_FD, "pidns", NULL, self->dummy_pidns));
-	ASSERT_SUCCESS(fsconfig(fsfd, FSCONFIG_CMD_RECONFIGURE, NULL, NULL, 0)); /* noop */
+	ASSERT_ERRNO_EQ(-EBUSY, sys_fsconfig(fsfd, FSCONFIG_SET_FD, "pidns",
+					     NULL, self->dummy_pidns));
+	ASSERT_SUCCESS(sys_fsconfig(fsfd, FSCONFIG_CMD_RECONFIGURE, NULL, NULL, 0)); /* noop */
 
 	ASSERT_SUCCESS(faccessat(mountfd, "1/", X_OK, 0));
 	ASSERT_SUCCESS(faccessat(mountfd, "self/", X_OK, 0));
