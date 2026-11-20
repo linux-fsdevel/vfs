@@ -2391,6 +2391,11 @@ __latent_entropy struct task_struct *copy_process(
 	p->nr_dirtied = 0;
 	p->nr_dirtied_pause = 128 >> (PAGE_SHIFT - 10);
 	p->dirty_paused_when = 0;
+#ifdef CONFIG_MEMCG
+	p->stat_batch_lruvec = NULL;
+	p->stat_batch_dirty = 0;
+	p->stat_batch_writeback = 0;
+#endif
 
 	p->pdeath_signal = 0;
 	p->task_works = NULL;
