@@ -687,7 +687,7 @@ static bool ep_busy_loop(struct eventpoll *ep)
 		 */
 		if (prefer_busy_poll)
 			napi_resume_irqs(napi_id);
-		ep->napi_id = 0;
+		WRITE_ONCE(ep->napi_id, 0);
 		return false;
 	}
 	return false;
@@ -720,11 +720,11 @@ static inline void ep_set_busy_poll_napi_id(struct epitem *epi)
 	 *	or
 	 * Nothing to do if we already have this ID
 	 */
-	if (!napi_id_valid(napi_id) || napi_id == ep->napi_id)
+	if (!napi_id_valid(napi_id) || napi_id == READ_ONCE(ep->napi_id))
 		return;
 
 	/* record NAPI ID for use in next busy poll */
-	ep->napi_id = napi_id;
+	WRITE_ONCE(ep->napi_id, napi_id);
 }
 
 static long ep_eventpoll_bp_ioctl(struct file *file, unsigned int cmd,
@@ -1495,7 +1495,23 @@ static int ep_poll_callback(wait_queue_entry_t *wait, unsigned mode, int sync, v
 	struct eventpoll *ep = epi->ep;
 	__poll_t pollflags = key_to_poll(key);
 	unsigned long flags;
+	__poll_t events;
 	int ewake = 0;
+
+	/*
+	 * epi->event.events is updated under ep->mtx, not ep->lock, so an
+	 * event nobody asked for can be dropped without taking ep->lock.
+	 */
+	events = READ_ONCE(epi->event.events);
+	if (pollflags && !(pollflags & (events | POLLFREE))) {
+		/* Pairs with smp_mb() in ep_modify(). */
+		smp_mb();
+		events = READ_ONCE(epi->event.events);
+		if (!(pollflags & events)) {
+			ep_set_busy_poll_napi_id(epi);
+			return !(events & EPOLLEXCLUSIVE);
+		}
+	}
 
 	spin_lock_irqsave(&ep->lock, flags);
 
@@ -2008,8 +2024,9 @@ static int ep_modify(struct eventpoll *ep, struct epitem *epi,
 	 *    we do not miss events from ep_poll_callback if an
 	 *    event occurs immediately after we call f_op->poll().
 	 *    We need this because we did not take ep->lock while
-	 *    changing epi above (but ep_poll_callback does take
-	 *    ep->lock).
+	 *    changing epi above.  ep_poll_callback either takes
+	 *    ep->lock before it checks epi->event.events, or does
+	 *    smp_mb() before it drops an event without the lock.
 	 *
 	 * 2) We also need to ensure we do not miss _past_ events
 	 *    when calling f_op->poll().  This barrier also
