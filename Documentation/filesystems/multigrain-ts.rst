@@ -123,3 +123,9 @@ inode_set_ctime_current(). If the filesystem has a ->getattr routine that
 doesn't call generic_fillattr, then it should call fill_mg_cmtime() to
 fill those values. For setattr, it should use setattr_copy() to update the
 timestamps, or otherwise mimic its behavior.
+
+Multigrain timestamps are only enabled on a superblock whose s_time_gran is 1:
+a fine-grained timestamp truncated to a coarser granularity can be no later
+than the coarse-grained one, so the kernel can't guarantee a visible change.
+The filesystem must set s_time_gran before it allocates any inode, since
+whether an inode uses multigrain timestamps is decided when it is allocated.
