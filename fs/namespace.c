@@ -5630,14 +5630,14 @@ static int statmount_string(struct kstatmount *s, u64 flag)
 	 */
 	if (seq->count == start)
 		return ret;
+	/* signal a retry */
+	if (unlikely(seq_has_overflowed(seq)))
+		return -EAGAIN;
+
 	if (unlikely(check_add_overflow(sizeof(*sm), seq->count, &kbufsize)))
 		return -EOVERFLOW;
 	if (kbufsize >= s->bufsize)
 		return -EOVERFLOW;
-
-	/* signal a retry */
-	if (unlikely(seq_has_overflowed(seq)))
-		return -EAGAIN;
 
 	if (ret)
 		return ret;
