@@ -1621,6 +1621,28 @@ static void filemap_end_dropbehind(struct folio *folio)
 }
 
 /*
+ * Clear the dropbehind flag on a folio so that it stays in the page cache.
+ */
+static void filemap_clear_dropbehind(struct address_space *mapping,
+		struct folio *folio)
+{
+	struct inode *inode = mapping->host;
+	struct wb_lock_cookie cookie = {};
+	struct bdi_writeback *wb;
+
+	if (!folio_test_dropbehind(folio))
+		return;
+	if (!folio_test_clear_dropbehind(folio))
+		return;
+	if (!folio_test_dirty(folio) || !mapping_can_writeback(mapping))
+		return;
+
+	wb = unlocked_inode_to_wb_begin(inode, &cookie);
+	wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -folio_nr_pages(folio));
+	unlocked_inode_to_wb_end(inode, &cookie);
+}
+
+/*
  * If folio was marked as dropbehind, then pages should be dropped when writeback
  * completes. Do that now. If we fail, it's likely because of a big folio -
  * just reset dropbehind for that case and latter completions should invalidate.
@@ -2058,19 +2080,8 @@ no_page:
 	if (!folio)
 		return ERR_PTR(-ENOENT);
 	/* not an uncached lookup, clear uncached if set */
-	if (!(fgp_flags & FGP_DONTCACHE) && folio_test_clear_dropbehind(folio)) {
-		if (folio_test_dirty(folio) &&
-		    mapping_can_writeback(mapping)) {
-			struct inode *inode = mapping->host;
-			struct bdi_writeback *wb;
-			struct wb_lock_cookie cookie = {};
-			long nr = folio_nr_pages(folio);
-
-			wb = unlocked_inode_to_wb_begin(inode, &cookie);
-			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
-			unlocked_inode_to_wb_end(inode, &cookie);
-		}
-	}
+	if (!(fgp_flags & FGP_DONTCACHE))
+		filemap_clear_dropbehind(mapping, folio);
 	return folio;
 }
 EXPORT_SYMBOL(__filemap_get_folio_mpol);
@@ -2887,7 +2898,14 @@ put_folios:
 		for (i = 0; i < folio_batch_count(&fbatch); i++) {
 			struct folio *folio = fbatch.folios[i];
 
-			filemap_end_dropbehind_read(folio);
+			/*
+			 * An uncached read drops the folio. Any other read
+			 * keeps it in the page cache.
+			 */
+			if (iocb->ki_flags & IOCB_DONTCACHE)
+				filemap_end_dropbehind_read(folio);
+			else
+				filemap_clear_dropbehind(mapping, folio);
 			folio_put(folio);
 		}
 		folio_batch_init(&fbatch);
