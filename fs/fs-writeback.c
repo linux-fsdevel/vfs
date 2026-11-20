@@ -2470,6 +2470,9 @@ static long wb_do_writeback(struct bdi_writeback *wb)
 	wrote += wb_check_background_flush(wb);
 	clear_bit(WB_writeback_running, &wb->state);
 
+	/* Don't pin another cgroup's memcg via a pending batch while idle. */
+	dirty_stat_flush_current();
+
 	return wrote;
 }
 

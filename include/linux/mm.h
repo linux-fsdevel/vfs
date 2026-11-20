@@ -1990,6 +1990,12 @@ int folio_mc_copy(struct folio *dst, struct folio *src);
 
 unsigned long nr_free_buffer_pages(void);
 
+#ifdef CONFIG_MEMCG
+void dirty_stat_flush_current(void);
+#else
+static inline void dirty_stat_flush_current(void) { }
+#endif
+
 /* Returns the number of bytes in this potentially compound page. */
 static inline unsigned long page_size(const struct page *page)
 {

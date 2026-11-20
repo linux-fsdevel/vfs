@@ -67,6 +67,7 @@ struct cfs_rq;
 struct fs_struct;
 struct io_context;
 struct io_uring_task;
+struct lruvec;
 struct mempolicy;
 struct nameidata;
 struct nsproxy;
@@ -1468,6 +1469,16 @@ struct task_struct {
 	int				nr_dirtied_pause;
 	/* Start of a write-and-pause period: */
 	unsigned long			dirty_paused_when;
+#ifdef CONFIG_MEMCG
+	/*
+	 * Pending NR_FILE_DIRTY/NR_WRITEBACK lruvec deltas; the lruvec is
+	 * kept alive by a css reference on its memcg (not for the root).
+	 * See stat_batch_mod() in mm/page-writeback.c.
+	 */
+	struct lruvec			*stat_batch_lruvec;
+	int				stat_batch_dirty;
+	int				stat_batch_writeback;
+#endif
 
 #ifdef CONFIG_LATENCYTOP
 	int				latency_record_count;

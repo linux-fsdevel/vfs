@@ -1810,6 +1810,9 @@ static int balance_dirty_pages(struct bdi_writeback *wb,
 	unsigned long start_time = jiffies;
 	int ret = 0;
 
+	/* The loop below reads the dirty stats. */
+	dirty_stat_flush_current();
+
 	for (;;) {
 		unsigned long now = jiffies;
 
@@ -2595,6 +2598,125 @@ bool noop_dirty_folio(struct address_space *mapping, struct folio *folio)
 }
 EXPORT_SYMBOL(noop_dirty_folio);
 
+#ifdef CONFIG_MEMCG
+
+#define STAT_BATCH_MAX		64
+
+/*
+ * Per-task batching of the NR_FILE_DIRTY and NR_WRITEBACK lruvec stats.
+ * Consecutive folios on the writeback path almost always share a lruvec,
+ * so hold the pending delta in the task and apply it through
+ * mod_lruvec_state() once it would grow past STAT_BATCH_MAX.
+ *
+ * A task applies its own pending delta before balance_dirty_pages()
+ * reads the dirty stats, and at file_write_and_wait_range() entry
+ * before writeback and wait; deltas pending in other tasks stay
+ * invisible until those tasks flush.
+ *
+ * The cached lruvec is kept valid outside the RCU section by a css
+ * reference on its memcg; the root memcg needs none.  Writeback workers
+ * clean folios for other cgroups, so they flush when a writeback round
+ * ends rather than pin a memcg while idle.
+ *
+ * Only the owning task touches the batch, hence no locking.  Interrupt
+ * context, deltas above the limit and a memcg being released all bypass
+ * it.
+ */
+static void stat_batch_flush_task(struct task_struct *t)
+{
+	struct lruvec *lruvec = t->stat_batch_lruvec;
+	int dirty = t->stat_batch_dirty;
+	int writeback = t->stat_batch_writeback;
+
+	/*
+	 * Key the flush off the cached lruvec, not off the counters: a
+	 * batch whose deltas have cancelled out to zero still owns the
+	 * css reference that was taken when it was started.
+	 */
+	if (!lruvec) {
+		VM_WARN_ON_ONCE(dirty || writeback);
+		return;
+	}
+	t->stat_batch_dirty = 0;
+	t->stat_batch_writeback = 0;
+	t->stat_batch_lruvec = NULL;
+	if (dirty)
+		mod_lruvec_state(lruvec, NR_FILE_DIRTY, dirty);
+	if (writeback)
+		mod_lruvec_state(lruvec, NR_WRITEBACK, writeback);
+	if (!mem_cgroup_is_root(lruvec_memcg(lruvec)))
+		css_put(&lruvec_memcg(lruvec)->css);
+}
+
+void dirty_stat_flush_current(void)
+{
+	stat_batch_flush_task(current);
+}
+
+static void stat_batch_mod(struct folio *folio, enum node_stat_item item,
+			   long nr)
+{
+	struct task_struct *t = current;
+	struct mem_cgroup *memcg;
+	struct lruvec *lruvec;
+	bool pinned;
+	int *slot;
+
+	rcu_read_lock();
+	memcg = folio_memcg(folio);
+	/* An untracked folio has no lruvec, only a node. */
+	if (!memcg) {
+		rcu_read_unlock();
+		mod_node_page_state(folio_pgdat(folio), item, nr);
+		return;
+	}
+
+	lruvec = mem_cgroup_lruvec(memcg, folio_pgdat(folio));
+
+	/* current is not the owner in interrupt context. */
+	if (unlikely(!in_task() || nr > STAT_BATCH_MAX ||
+		     nr < -STAT_BATCH_MAX)) {
+		mod_lruvec_state(lruvec, item, nr);
+		rcu_read_unlock();
+		return;
+	}
+
+	slot = item == NR_FILE_DIRTY ?
+		&t->stat_batch_dirty : &t->stat_batch_writeback;
+
+	if (likely(t->stat_batch_lruvec == lruvec &&
+		   *slot + nr <= STAT_BATCH_MAX &&
+		   *slot + nr >= -STAT_BATCH_MAX)) {
+		*slot += nr;
+		rcu_read_unlock();
+		return;
+	}
+
+	/* Reference the new memcg before dropping the RCU section. */
+	pinned = !mem_cgroup_is_root(memcg);
+	if (pinned && !css_tryget(&memcg->css)) {
+		mod_lruvec_state(lruvec, item, nr);
+		rcu_read_unlock();
+		return;
+	}
+
+	stat_batch_flush_task(t);
+	t->stat_batch_lruvec = lruvec;
+	t->stat_batch_dirty = item == NR_FILE_DIRTY ? nr : 0;
+	t->stat_batch_writeback = item == NR_WRITEBACK ? nr : 0;
+	rcu_read_unlock();
+}
+
+#else /* !CONFIG_MEMCG */
+
+static void stat_batch_mod(struct folio *folio, enum node_stat_item item,
+			   long nr)
+{
+	mod_node_page_state(folio_pgdat(folio), item, nr);
+}
+
+#endif /* CONFIG_MEMCG */
+
 /*
  * Helper function for set_page_dirty family.
  *
@@ -2614,7 +2736,7 @@ static void folio_account_dirtied(struct folio *folio,
 		inode_attach_wb(inode, folio);
 		wb = inode_to_wb(inode);
 
-		lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, nr);
+		stat_batch_mod(folio, NR_FILE_DIRTY, nr);
 		if (folio_test_dropbehind(folio))
 			wb_stat_mod(wb, WB_DONTCACHE_DIRTY, nr);
 		__zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
@@ -2913,7 +3035,7 @@ bool folio_clear_dirty_for_io(struct folio *folio)
 		wb = unlocked_inode_to_wb_begin(inode, &cookie);
 		if (folio_test_clear_dirty(folio)) {
 			long nr = folio_nr_pages(folio);
-			lruvec_stat_mod_folio(folio, NR_FILE_DIRTY, -nr);
+			stat_batch_mod(folio, NR_FILE_DIRTY, -nr);
 			if (folio_test_dropbehind(folio))
 				wb_stat_mod(wb, WB_DONTCACHE_DIRTY, -nr);
 			zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, -nr);
@@ -3031,7 +3153,7 @@ void __folio_start_writeback(struct folio *folio, bool keep_write)
 		folio_test_set_writeback(folio);
 	}
 
-	lruvec_stat_mod_folio(folio, NR_WRITEBACK, nr);
+	stat_batch_mod(folio, NR_WRITEBACK, nr);
 	zone_stat_mod_folio(folio, NR_ZONE_WRITE_PENDING, nr);
 
 	access_ret = arch_make_folio_accessible(folio);

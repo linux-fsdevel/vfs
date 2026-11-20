@@ -1007,6 +1007,8 @@ void __noreturn do_exit(long code)
 	exit_nsproxy_namespaces(tsk);
 	exit_task_work(tsk);
 	exit_thread(tsk);
+	/* After exit_task_work(): a deferred fput() can still dirty pages. */
+	dirty_stat_flush_current();
 
 	sched_autogroup_exit_task(tsk);
 	cgroup_task_exit(tsk);
