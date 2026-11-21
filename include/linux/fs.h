@@ -3125,6 +3125,51 @@ extern loff_t fixed_size_llseek(struct file *file, loff_t offset,
 extern loff_t no_seek_end_llseek_size(struct file *, loff_t, int, loff_t);
 extern loff_t no_seek_end_llseek(struct file *, loff_t, int);
 int rw_verify_area(int, struct file *, const loff_t *, size_t);
+
+/**
+ * rw_clamp_count - shorten an I/O so it does not extend past the maximum offset
+ * @read_write:	READ or WRITE
+ * @file:	file the I/O is done on
+ * @ppos:	file position of the I/O, or NULL for stream files
+ * @count:	number of bytes requested
+ *
+ * A read or write that starts at a valid file position but would end past
+ * the maximum file offset should transfer the bytes up to that offset and
+ * return a short count, rather than fail.  rw_verify_area() rejects such a
+ * range, so callers clamp @count with this helper before verifying it.
+ *
+ * The maximum offset is LLONG_MAX, or U64_MAX for files with
+ * FOP_UNSIGNED_OFFSET, whose positions are unsigned.
+ *
+ * Out-of-range positions and counts are left alone so that
+ * rw_verify_area() still rejects them.  So is a write starting at the
+ * maximum offset, which cannot transfer anything.  A read starting there
+ * is clamped to zero bytes and reports end of file.
+ *
+ * Return: the possibly shortened count.
+ */
+static inline size_t rw_clamp_count(int read_write, struct file *file,
+				    const loff_t *ppos, size_t count)
+{
+	u64 pos, max = LLONG_MAX;
+
+	if (!ppos || unlikely((ssize_t)count < 0))
+		return count;
+
+	pos = *ppos;
+	if (unlikely(file->f_op->fop_flags & FOP_UNSIGNED_OFFSET))
+		max = U64_MAX;
+	else if (unlikely(*ppos < 0))
+		return count;
+
+	if (likely(count <= max - pos))
+		return count;
+	if (read_write == WRITE && pos == max)
+		return count;
+
+	return max - pos;
+}
+
 extern int generic_file_open(struct inode * inode, struct file * filp);
 extern int nonseekable_open(struct inode * inode, struct file * filp);
 extern int stream_open(struct inode * inode, struct file * filp);
