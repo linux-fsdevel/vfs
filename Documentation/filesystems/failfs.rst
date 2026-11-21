@@ -65,9 +65,18 @@ implementation, not a guaranteed interface, and may be loosened later.
 For now a process that entered failfs counts as chrooted, so it cannot
 create user namespaces to regain ``CAP_SYS_CHROOT``, and ``chroot(2)``
 or ``fchroot(2)`` back out require ``CAP_SYS_CHROOT``. The remaining way
-out today is ``setns(2)`` with a mount namespace file descriptor, which
-requires ``CAP_SYS_ADMIN`` over the target mount namespace as well as
+out today is ``setns(2)`` into a mount namespace, which requires
+``CAP_SYS_ADMIN`` over the target mount namespace as well as
 ``CAP_SYS_CHROOT`` and ``CAP_SYS_ADMIN`` in the caller's user namespace
-and resets both root and working directory. A process that holds no such
-file descriptor and restricts ``*chdir()``/``*chroot()``/``setns()`` via
-seccomp cannot currently get back out.
+and resets both root and working directory.
+
+That way out does not need privileges or a namespace file descriptor. A
+pidfd names the namespaces of another task without a path lookup, and
+joining an existing user namespace is not refused for a chrooted task
+the way creating one is. An unprivileged caller can thus leave with
+``setns(pidfd, CLONE_NEWUSER | CLONE_NEWNS)`` on any task it may access
+in ``PTRACE_MODE_READ`` mode that runs in a user namespace owned by the
+caller's effective uid and in a mount namespace owned by that user
+namespace. A process that restricts
+``*chdir()``/``*chroot()``/``setns()`` via seccomp cannot currently get
+back out.
