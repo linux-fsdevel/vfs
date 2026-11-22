@@ -293,8 +293,13 @@ int dbMount(struct inode *ipbmap)
 		goto err_release_metapage;
 	}
 
-	for (i = 0; i < MAXAG; i++)
+	for (i = 0; i < MAXAG; i++) {
 		bmp->db_agfree[i] = le64_to_cpu(dbmp_le->dn_agfree[i]);
+		if (bmp->db_agfree[i] < 0) {
+			err = -EINVAL;
+			goto err_release_metapage;
+		}
+	}
 	bmp->db_agsize = le64_to_cpu(dbmp_le->dn_agsize);
 	bmp->db_maxfreebud = dbmp_le->dn_maxfreebud;
 
@@ -1677,6 +1682,10 @@ s64 dbDiscardAG(struct inode *ip, int agno, s64 minlen)
 	IWRITE_LOCK(ipbmap, RDWRLOCK_DMAP);
 
 	nblocks = bmp->db_agfree[agno];
+	if (nblocks < minlen) {
+		IWRITE_UNLOCK(ipbmap);
+		return 0;
+	}
 	max_ranges = nblocks;
 	do_div(max_ranges, minlen);
 	range_cnt = min_t(u64, max_ranges + 1, 32 * 1024);
