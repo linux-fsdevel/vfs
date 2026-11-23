@@ -31,7 +31,8 @@ void autofs_catatonic_mode(struct autofs_sb_info *sbi)
 		nwq = wq->next;
 		wq->status = -ENOENT; /* Magic is gone - report failure */
 		kfree(wq->name.name - wq->offset);
-		wq->name.name = NULL;
+		/* Pairs with smp_load_acquire() in autofs_wait() */
+		smp_store_release(&wq->name.name, NULL);
 		wake_up(&wq->queue);
 		if (!--wq->wait_ctr)
 			kfree(wq);
@@ -437,7 +438,8 @@ int autofs_wait(struct autofs_sb_info *sbi,
 	 * wq->name.name is NULL iff the lock is already released
 	 * or the mount has been made catatonic.
 	 */
-	wait_event_killable(wq->queue, wq->name.name == NULL);
+	/* Pairs with smp_store_release() in autofs_wait_release() */
+	wait_event_killable(wq->queue, !smp_load_acquire(&wq->name.name));
 	status = wq->status;
 
 	/*
@@ -502,8 +504,9 @@ int autofs_wait_release(struct autofs_sb_info *sbi,
 
 	*wql = wq->next;	/* Unlink from chain */
 	kfree(wq->name.name - wq->offset);
-	wq->name.name = NULL;	/* Do not wait on this queue */
 	wq->status = status;
+	/* Do not wait on this queue; pairs with autofs_wait() */
+	smp_store_release(&wq->name.name, NULL);
 	wake_up(&wq->queue);
 	if (!--wq->wait_ctr)
 		kfree(wq);
