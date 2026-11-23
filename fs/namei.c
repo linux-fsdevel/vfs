@@ -2693,6 +2693,13 @@ static const char *path_init(struct nameidata *nd, unsigned flags)
 	nd->flags = flags;
 	nd->state |= ND_JUMPED;
 
+	/*
+	 * A retry in ref-walk mode after -ECHILD, or with LOOKUP_REVAL after
+	 * -ESTALE, starts the walk over. Start the link count from where we
+	 * left off, so we don't double count.
+	 */
+	nd->total_link_count = nd->saved ? nd->saved->total_link_count : 0;
+
 	nd->m_seq = __read_seqcount_begin(&mount_lock.seqcount);
 	nd->r_seq = __read_seqcount_begin(&rename_lock.seqcount);
 	smp_rmb();
