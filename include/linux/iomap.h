@@ -259,6 +259,9 @@ struct iomap_ops {
  * @flags: Zero or more of the iomap_begin flags above.
  * @iomap: Map describing the I/O iteration
  * @srcmap: Source map for COW operations
+ * @fbatch: Optional batch of dirty folios for zero-range processing, set up
+ *	by iomap_zero_range() and filled by iomap_fill_dirty_folios()
+ * @private: File system specific data for this iteration; opaque to iomap
  */
 struct iomap_iter {
 	struct inode *inode;
@@ -282,8 +285,9 @@ int iomap_iter_advance(struct iomap_iter *iter, u64 count);
  * @pos: File position to trim from.
  * @len: Length of the mapping to trim to.
  *
- * Returns a trimmed length that the operation applies to for the current
- * iteration.
+ * Return: The length that the operation applies to for the current
+ * iteration: @len, limited to the end of the current mapping and, if
+ * @iter->srcmap is not a hole, to the end of the source mapping.
  */
 static inline u64 iomap_length_trim(const struct iomap_iter *iter, loff_t pos,
 		u64 len)
@@ -299,7 +303,9 @@ static inline u64 iomap_length_trim(const struct iomap_iter *iter, loff_t pos,
  * iomap_length - length of the current iomap iteration
  * @iter: iteration structure
  *
- * Returns the length that the operation applies to for the current iteration.
+ * Return: The length of the current iteration: @iter->len, limited to the end
+ * of the current mapping and, if @iter->srcmap is not a hole, to the end of
+ * the source mapping.
  */
 static inline u64 iomap_length(const struct iomap_iter *iter)
 {
@@ -308,6 +314,9 @@ static inline u64 iomap_length(const struct iomap_iter *iter)
 
 /**
  * iomap_iter_advance_full - advance by the full length of current map
+ * @iter: iteration structure
+ *
+ * Return: Always 0.
  */
 static inline int iomap_iter_advance_full(struct iomap_iter *iter)
 {
@@ -319,9 +328,12 @@ static inline int iomap_iter_advance_full(struct iomap_iter *iter)
  * @i: iteration structure
  *
  * Write operations on file systems with reflink support might require a
- * source and a destination map.  This function retourns the source map
- * for a given operation, which may or may no be identical to the destination
- * map in &i->iomap.
+ * source and a destination map.  This function returns the source map
+ * for a given operation, which may or may not be identical to the destination
+ * map in ``i->iomap``.
+ *
+ * Return: The source map for the current iteration, or a pointer to
+ * ``i->iomap`` if there is no separate source map.
  */
 static inline const struct iomap *iomap_iter_srcmap(const struct iomap_iter *i)
 {
@@ -350,7 +362,8 @@ int iomap_iter_continue(const struct iomap_iter *iter, struct iomap *iomap,
  * compile-time-constant @begin and @end callbacks, the compiler can call them
  * directly, avoiding the indirect-call overhead.
  *
- * Returns 1 to continue iterating, 0 once the range is fully consumed, or a
+ * Return: 1 to continue iterating, 0 once the range is fully consumed or the
+ * file system made no progress without marking the mapping stale, or a
  * negative errno on error.
  */
 static __always_inline int iomap_iter_next(const struct iomap_iter *iter,
