@@ -776,12 +776,11 @@ do {										\
 extern int do_wait_intr(wait_queue_head_t *, wait_queue_entry_t *);
 extern int do_wait_intr_irq(wait_queue_head_t *, wait_queue_entry_t *);
 
-#define __wait_event_interruptible_locked(wq, condition, exclusive, fn)		\
+#define __wait_event_interruptible_locked(wq, condition, wq_flags, fn)		\
 ({										\
 	int __ret;								\
 	DEFINE_WAIT(__wait);							\
-	if (exclusive)								\
-		__wait.flags |= WQ_FLAG_EXCLUSIVE;				\
+	__wait.flags = (wq_flags);						\
 	do {									\
 		__ret = fn(&(wq), &__wait);					\
 		if (__ret)							\
@@ -876,7 +875,8 @@ extern int do_wait_intr_irq(wait_queue_head_t *, wait_queue_entry_t *);
  */
 #define wait_event_interruptible_exclusive_locked(wq, condition)		\
 	((condition)								\
-	 ? 0 : __wait_event_interruptible_locked(wq, condition, 1, do_wait_intr))
+	 ? 0 : __wait_event_interruptible_locked(wq, condition,			\
+						 WQ_FLAG_EXCLUSIVE, do_wait_intr))
 
 /**
  * wait_event_interruptible_exclusive_locked_irq - sleep until a condition gets true
@@ -907,7 +907,8 @@ extern int do_wait_intr_irq(wait_queue_head_t *, wait_queue_entry_t *);
  */
 #define wait_event_interruptible_exclusive_locked_irq(wq, condition)		\
 	((condition)								\
-	 ? 0 : __wait_event_interruptible_locked(wq, condition, 1, do_wait_intr_irq))
+	 ? 0 : __wait_event_interruptible_locked(wq, condition,			\
+						 WQ_FLAG_EXCLUSIVE, do_wait_intr_irq))
 
 
 #define __wait_event_killable(wq, condition)					\
