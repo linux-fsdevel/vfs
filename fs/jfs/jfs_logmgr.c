@@ -1984,7 +1984,7 @@ static int lbmRead(struct jfs_log * log, int pn, struct lbuf ** bpp)
 		submit_bio(bio);
 	}
 
-	wait_event(bp->l_ioevent, (bp->l_flag != lbmREAD));
+	lbmIOWait(bp, 0);
 
 	return 0;
 }
@@ -2279,9 +2279,11 @@ static void lbmIODone(struct bio *bio)
 	 *	Group Commit pageout:
 	 */
 	else if (bp->l_flag & lbmGC) {
+		/* lmPostGC() may free or requeue @bp. */
+		bp->l_flag |= lbmDONE;
 		LCACHE_UNLOCK(flags);
 		lmPostGC(bp);
-		LCACHE_LOCK(flags);		/* disable+lock */
+		return;
 	}
 
 	/*
