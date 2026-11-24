@@ -449,7 +449,7 @@ static inline unsigned long dax_folio_put(struct folio *folio)
 	for (i = 0; i < (1UL << order); i++) {
 		struct page *page = folio_page(folio, i);
 
-		WARN_ON_ONCE(folio_ref_count((struct folio *)page));
+		WARN_ON_ONCE(page_ref_count(page));
 	}
 
 	return ref;
