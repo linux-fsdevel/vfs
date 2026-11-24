@@ -172,13 +172,13 @@ typedef int (dio_iodone_t)(struct kiocb *iocb, loff_t offset,
  * Together with FMODE_NONOTIFY_PERM defines which fsnotify events shouldn't be
  * generated (see below)
  */
-#define FMODE_NONOTIFY		((__force fmode_t)(1 << 25))
+#define FMODE_NONOTIFY		((__force fmode_t)(1 << 26))
 
 /*
  * Together with FMODE_NONOTIFY defines which fsnotify events shouldn't be
  * generated (see below)
  */
-#define FMODE_NONOTIFY_PERM	((__force fmode_t)(1 << 26))
+#define FMODE_NONOTIFY_PERM	((__force fmode_t)(1 << 25))
 
 /* File is capable of returning -EAGAIN if I/O will block */
 #define FMODE_NOWAIT		((__force fmode_t)(1 << 27))
