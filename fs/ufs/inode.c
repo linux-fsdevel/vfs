@@ -457,6 +457,11 @@ static int ufs_read_folio(struct file *file, struct folio *folio)
 	return block_read_full_folio(folio, ufs_getfrag_block);
 }
 
+static void ufs_readahead(struct readahead_control *rac)
+{
+	mpage_readahead(rac, ufs_getfrag_block);
+}
+
 int ufs_prepare_chunk(struct folio *folio, loff_t pos, unsigned len)
 {
 	return __block_write_begin(folio, pos, len, ufs_getfrag_block);
@@ -510,6 +515,7 @@ const struct address_space_operations ufs_aops = {
 	.dirty_folio = block_dirty_folio,
 	.invalidate_folio = block_invalidate_folio,
 	.read_folio = ufs_read_folio,
+	.readahead = ufs_readahead,
 	.writepages = ufs_writepages,
 	.write_begin = ufs_write_begin,
 	.write_end = ufs_write_end,
