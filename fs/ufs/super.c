@@ -725,6 +725,7 @@ static int ufs_fill_super(struct super_block *sb, struct fs_context *fc)
 	struct ufs_buffer_head * ubh;	
 	struct inode *inode;
 	unsigned block_size, super_block_size;
+	unsigned int logical_size;
 	unsigned flags;
 	unsigned super_block_offset;
 	unsigned maxsymlen;
@@ -922,6 +923,25 @@ static int ufs_fill_super(struct super_block *sb, struct fs_context *fc)
 		goto failed;
 	}
 	
+	/*
+	 * The sizes above are what each flavour usually has, and are only
+	 * used to read the superblock.  The buffer cache cannot use a block
+	 * smaller than the device's logical block, so on a disk with 4K
+	 * logical blocks they could not even do that, and a filesystem with
+	 * 4K fragments was refused before its superblock was looked at.
+	 * Read it in logical blocks instead; the fragment size it gives then
+	 * takes over below, as before.
+	 */
+	logical_size = bdev_logical_block_size(sb->s_bdev);
+	if (block_size < logical_size) {
+		block_size = logical_size;
+		super_block_size = round_up(super_block_size, logical_size);
+		uspi->s_fsize = block_size;
+		uspi->s_fmask = ~(block_size - 1);
+		uspi->s_fshift = (unsigned int)ilog2(block_size);
+		uspi->s_sbsize = super_block_size;
+	}
+
 again:	
 	if (!sb_set_blocksize(sb, block_size)) {
 		pr_err("failed to set blocksize\n");
@@ -1031,6 +1051,11 @@ magic_found:
 	if (uspi->s_bsize / uspi->s_fsize > 8) {
 		pr_err("%s(): too many fragments per block (%u)\n",
 		       __func__, uspi->s_bsize / uspi->s_fsize);
+		goto failed;
+	}
+	if (uspi->s_fsize < logical_size) {
+		pr_err("%s(): fragment size %u is smaller than the device's logical block size %u\n",
+		       __func__, uspi->s_fsize, logical_size);
 		goto failed;
 	}
 	if (uspi->s_fsize != block_size || uspi->s_sbsize != super_block_size) {
