@@ -5624,6 +5624,10 @@ static int statmount_string(struct kstatmount *s, u64 flag)
 		return -EINVAL;
 	}
 
+	/* signal a retry */
+	if (unlikely(seq_has_overflowed(seq)))
+		return -EAGAIN;
+
 	/*
 	 * If nothing was emitted, return to avoid setting the flag
 	 * and terminating the buffer.
@@ -5634,10 +5638,6 @@ static int statmount_string(struct kstatmount *s, u64 flag)
 		return -EOVERFLOW;
 	if (kbufsize >= s->bufsize)
 		return -EOVERFLOW;
-
-	/* signal a retry */
-	if (unlikely(seq_has_overflowed(seq)))
-		return -EAGAIN;
 
 	if (ret)
 		return ret;
