@@ -17,6 +17,7 @@
 #include <linux/capability.h>
 #include <linux/bitops.h>
 #include <linux/bio.h>
+#include <linux/blkdev.h>
 #include <asm/byteorder.h>
 
 #include "ufs_fs.h"
@@ -311,12 +312,32 @@ static void ufs_change_blocknr(struct inode *inode, sector_t beg,
 	UFSD("EXIT\n");
 }
 
+/*
+ * Zero @n fragments from @beg, taken for a page being written, on the
+ * device itself.  Such a block is larger than the page when the block is,
+ * and its other fragments may be read back from the device before anything
+ * else writes them, so the zeroes have to be there already.
+ *
+ * Only for data.  A buffer the block device's cache has over the fragments
+ * is cleaned, not zeroed, and an indirect block is read through it.
+ */
+static int ufs_zero_frags_now(struct inode *inode, sector_t beg,
+			      unsigned int n)
+{
+	struct super_block *sb = inode->i_sb;
+
+	clean_bdev_aliases(sb->s_bdev, beg, n);
+	return sb_issue_zeroout(sb, beg, n, GFP_NOFS);
+}
+
 static void ufs_clear_frags(struct inode *inode, sector_t beg, unsigned int n,
 			    int sync)
 {
 	struct buffer_head *bh;
 	sector_t end = beg + n;
 
+	if (sync && !ufs_zero_frags_now(inode, beg, n))
+		return;
 	for (; beg < end; ++beg) {
 		bh = sb_getblk(inode->i_sb, beg);
 		lock_buffer(bh);
