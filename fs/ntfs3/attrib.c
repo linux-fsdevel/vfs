@@ -795,6 +795,21 @@ pack_runs:
 
 			le = (struct ATTR_LIST_ENTRY *)((u8 *)le - le_sz);
 		} else {
+			u32 asize = le32_to_cpu(attr->size);
+			u32 roff = le16_to_cpu(attr->nres.run_off);
+			u32 nsize = ALIGN(roff + 1, 8);
+
+			/*
+			 * Every cluster goes.  Setting evcn alone left the old
+			 * mapping pairs behind it, and chkdsk on Windows
+			 * reports such an attribute record as corrupt.  Leave
+			 * only the zero byte which ends the mapping pairs.
+			 * mi_pack_runs() does not take an empty range.
+			 */
+			if (nsize <= asize) {
+				memset(Add2Ptr(attr, roff), 0, nsize - roff);
+				mi_resize_attr(mi, attr, (int)nsize - (int)asize);
+			}
 			attr->nres.evcn = cpu_to_le64((u64)vcn - 1);
 			mi->dirty = true;
 		}
