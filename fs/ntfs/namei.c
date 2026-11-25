@@ -589,6 +589,13 @@ static struct ntfs_inode *__ntfs_create(struct mnt_idmap *idmap, struct inode *d
 		err = ntfs_attr_open(ni, AT_INDEX_ROOT, I30, 4);
 		if (err)
 			goto err_out;
+		/*
+		 * ntfs_attr_open() sets data_size to the length of the new
+		 * $INDEX_ROOT, as ntfs_read_locked_inode() does with i_size
+		 * too.  i_size stayed at the 0 set above, so stat() gave 0
+		 * until the directory was read back from disk.
+		 */
+		i_size_write(vi, ni->data_size);
 	} else {
 		/* Add DATA attribute to inode. */
 		err = ntfs_attr_add(ni, AT_DATA, AT_UNNAMED, 0, NULL, 0);
