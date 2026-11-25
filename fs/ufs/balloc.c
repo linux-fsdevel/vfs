@@ -301,6 +301,24 @@ static void ufs_change_blocknr(struct inode *inode, sector_t beg,
 			bh->b_blocknr = newb + pos;
 			clean_bdev_bh_alias(bh);
 			mark_buffer_dirty(bh);
+			/*
+			 * We are inside a write that has not moved i_size
+			 * yet.  Writeback drops a folio wholly past i_size
+			 * without writing it and leaves it clean with its
+			 * buffers dirty, so that later writes do not reach
+			 * the device either.  It may skip the buffers past
+			 * i_size of one that straddles it, too.  The folio
+			 * being written stays locked until the write has
+			 * moved i_size, so only the others need this.
+			 */
+			if (folio != locked_folio &&
+			    (loff_t)(beg + pos) << inode->i_blkbits >=
+			    i_size_read(inode)) {
+				/* A folio's buffers carry no reference. */
+				get_bh(bh);
+				sync_dirty_buffer(bh);
+				put_bh(bh);
+			}
 			++j;
 			bh = bh->b_this_page;
 		} while (bh != head);
