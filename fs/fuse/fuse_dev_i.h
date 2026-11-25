@@ -12,6 +12,18 @@
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <linux/fs.h>
+#include <linux/cache.h>
+
+/*
+ * virtiofs DMA-maps fuse_req::out.h for DMA_FROM_DEVICE in place.
+ * Put @out on its own granule and start @waitq on the next one.
+ * fuse_dev_init() allocates the slab at this alignment.
+ */
+#if IS_ENABLED(CONFIG_VIRTIO_FS)
+#define FUSE_REQ_DMA_ALIGN __aligned(ARCH_DMA_MINALIGN)
+#else
+#define FUSE_REQ_DMA_ALIGN
+#endif
 
 /* Ordinary requests have even IDs, while interrupts IDs are odd */
 #define FUSE_INT_REQ_BIT (1ULL << 0)
@@ -94,10 +106,10 @@ struct fuse_req {
 	struct {
 		/** @out.h: The request output header */
 		struct fuse_out_header h;
-	} out;
+	} out FUSE_REQ_DMA_ALIGN;
 
 	/** @waitq: Used to wake up the task waiting for completion of request */
-	wait_queue_head_t waitq;
+	wait_queue_head_t waitq FUSE_REQ_DMA_ALIGN;
 
 #if IS_ENABLED(CONFIG_VIRTIO_FS)
 	/**
@@ -117,6 +129,8 @@ struct fuse_req {
 	/** @create_time: When (in jiffies) the request was created */
 	unsigned long create_time;
 };
+
+#undef FUSE_REQ_DMA_ALIGN
 
 /* One forget request */
 struct fuse_forget_link {
