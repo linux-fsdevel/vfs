@@ -834,9 +834,10 @@ static int do_quotactl(struct super_block *sb, int type, int cmd, qid_t id,
 static int quotactl_cmd_write(int cmd)
 {
 	/*
-	 * We cannot allow Q_GETQUOTA and Q_GETNEXTQUOTA without write access
-	 * as dquot_acquire() may allocate space for new structure and OCFS2
-	 * needs to increment on-disk use count.
+	 * We cannot allow Q_GETQUOTA, Q_GETNEXTQUOTA, Q_XGETQUOTA and
+	 * Q_XGETNEXTQUOTA without write access as dquot_acquire() may allocate
+	 * space for new structure and OCFS2 needs to increment on-disk use
+	 * count.
 	 */
 	switch (cmd) {
 	case Q_GETFMT:
@@ -844,8 +845,6 @@ static int quotactl_cmd_write(int cmd)
 	case Q_SYNC:
 	case Q_XGETQSTAT:
 	case Q_XGETQSTATV:
-	case Q_XGETQUOTA:
-	case Q_XGETNEXTQUOTA:
 	case Q_XQUOTASYNC:
 		return 0;
 	}
