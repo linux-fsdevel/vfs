@@ -3038,6 +3038,36 @@ int ni_write_parents(struct ntfs_inode *ni, int sync)
 }
 
 /*
+ * ni_reparse_tag - Return the tag of the reparse point in @attr.
+ *
+ * The tag is the first field of the reparse data (MS-FSCC 2.1.2.2).
+ * ntfs_create_inode() keeps the reparse data of a long symlink
+ * non-resident, so it may have to be read from disk.  Returns 0 if it
+ * cannot be read.
+ */
+static __le32 ni_reparse_tag(struct ntfs_inode *ni, struct ATTRIB *attr)
+{
+	const struct REPARSE_POINT *rp;
+	struct runs_tree run;
+	__le32 tag;
+
+	if (!attr->non_res) {
+		rp = resident_data_ex(attr, sizeof(struct REPARSE_POINT));
+		return rp ? rp->ReparseTag : 0;
+	}
+
+	if (le64_to_cpu(attr->nres.data_size) < sizeof(tag))
+		return 0;
+
+	run_init(&run);
+	if (attr_load_runs_vcn(ni, ATTR_REPARSE, NULL, 0, &run, 0) ||
+	    ntfs_read_run_nb(ni->mi.sbi, &run, 0, &tag, sizeof(tag), NULL))
+		tag = 0;
+	run_close(&run);
+	return tag;
+}
+
+/*
  * ni_update_parent
  *
  * Update duplicate info of ATTR_FILE_NAME in MFT and in parent directories.
@@ -3096,15 +3126,12 @@ static bool ni_update_parent(struct ntfs_inode *ni, struct NTFS_DUP_INFO *dup,
 		attr = ni_find_attr(ni, NULL, NULL, ATTR_REPARSE, NULL, 0, NULL,
 				    NULL);
 
-		if (attr) {
-			const struct REPARSE_POINT *rp;
-
-			rp = resident_data_ex(attr,
-					      sizeof(struct REPARSE_POINT));
-			/* If ATTR_REPARSE exists 'rp' can't be NULL. */
-			if (rp)
-				dup->extend_data = rp->ReparseTag;
-		}
+		/*
+		 * Reading only resident data here used to leave extend_data 0
+		 * for a long symlink, and readdir then reported it as DT_REG.
+		 */
+		if (attr)
+			dup->extend_data = ni_reparse_tag(ni, attr);
 	} else if (ni->ni_flags & NI_FLAG_EA) {
 		attr = ni_find_attr(ni, attr, &le, ATTR_EA_INFO, NULL, 0, NULL,
 				    NULL);
