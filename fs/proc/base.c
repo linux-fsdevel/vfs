@@ -1116,7 +1116,8 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 	mutex_lock(&oom_adj_mutex);
 	if (legacy) {
 		if (oom_adj < task->signal->oom_score_adj &&
-				!capable(CAP_SYS_RESOURCE)) {
+				(!file_ns_capable(file, &init_user_ns, CAP_SYS_RESOURCE) ||
+				 !capable(CAP_SYS_RESOURCE))) {
 			err = -EACCES;
 			goto err_unlock;
 		}
@@ -1129,7 +1130,8 @@ static int __set_oom_adj(struct file *file, int oom_adj, bool legacy)
 			  task_pid_nr(task));
 	} else {
 		if ((short)oom_adj < task->signal->oom_score_adj_min &&
-				!capable(CAP_SYS_RESOURCE)) {
+				(!file_ns_capable(file, &init_user_ns, CAP_SYS_RESOURCE) ||
+				 !capable(CAP_SYS_RESOURCE))) {
 			err = -EACCES;
 			goto err_unlock;
 		}
