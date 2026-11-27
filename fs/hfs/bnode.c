@@ -426,7 +426,7 @@ struct hfs_bnode *hfs_bnode_find(struct hfs_btree *tree, u32 num)
 
 	rec_off = tree->node_size - 2;
 	off = hfs_bnode_read_u16(node, rec_off);
-	if (off != sizeof(struct hfs_bnode_desc))
+	if (off != HFS_BNODE_FIRST_REC_OFF)
 		goto node_error;
 	for (i = 1; i <= node->num_recs; off = next_off, i++) {
 		rec_off -= 2;

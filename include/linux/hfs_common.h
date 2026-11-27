@@ -475,6 +475,12 @@ struct hfs_bnode_desc {
 	u16 reserved;
 } __packed;
 
+/* Size of the node descriptor at the start of every node */
+#define HFS_BNODE_DESC_SIZE	sizeof(struct hfs_bnode_desc)
+
+/* Offset of record 0, which follows the node descriptor */
+#define HFS_BNODE_FIRST_REC_OFF	HFS_BNODE_DESC_SIZE
+
 /* HFS/HFS+ BTree node types */
 #define HFS_NODE_INDEX	0x00	/* An internal (index) node */
 #define HFS_NODE_HEADER	0x01	/* The tree header node (node 0) */

@@ -74,7 +74,7 @@ static u32 hfsplus_init_header_node(struct inode *attr_file,
 	desc = (struct hfs_bnode_desc *)buf;
 	desc->type = HFS_NODE_HEADER;
 	desc->num_recs = cpu_to_be16(HFSPLUS_BTREE_HDR_NODE_RECS_COUNT);
-	offset = sizeof(struct hfs_bnode_desc);
+	offset = HFS_BNODE_FIRST_REC_OFF;
 	*--rec_offsets = cpu_to_be16(offset);
 
 	head = (struct hfs_btree_header_rec *)(buf + offset);
@@ -96,7 +96,7 @@ static u32 hfsplus_init_header_node(struct inode *attr_file,
 		u32 map_node_bits;
 
 		desc->next = cpu_to_be32(be32_to_cpu(head->leaf_tail) + 1);
-		map_node_bits = 8 * (node_size - sizeof(struct hfs_bnode_desc) -
+		map_node_bits = 8 * (node_size - HFS_BNODE_DESC_SIZE -
 					(2 * sizeof(u16)) - 2);
 		map_nodes = (be32_to_cpu(head->node_count) -
 				hdr_node_map_rec_bits +
@@ -157,7 +157,7 @@ static void hfsplus_init_map_node(u8 *buf, u16 node_size, u32 next_node)
 	rec_offsets = (__be16 *)(buf + node_size);
 
 	/* record #1 */
-	offset = sizeof(struct hfs_bnode_desc);
+	offset = HFS_BNODE_FIRST_REC_OFF;
 	*--rec_offsets = cpu_to_be16(offset);
 
 	/* record #2 */

@@ -613,16 +613,15 @@ bool hfs_bnode_num_recs_invalid(struct hfs_bnode *node)
 	u32 table_size;
 	u32 area_size;
 	u32 rec_size = sizeof(__be16);
-	u32 desc_size = sizeof(struct hfs_bnode_desc);
 
 	if (!node || !node->tree)
 		return true;
 
 	node_size = node->tree->node_size;
-	if (node_size < desc_size)
+	if (node_size < HFS_BNODE_DESC_SIZE)
 		return true;
 
-	area_size = node_size - desc_size;
+	area_size = node_size - HFS_BNODE_DESC_SIZE;
 	table_size = ((u32)node->num_recs + 1) * rec_size;
 
 	return table_size > area_size;
@@ -645,12 +644,11 @@ bool hfs_brec_offsets_invalid(struct hfs_bnode *node, u16 off, u16 next_off)
 	u32 table_size;
 	u32 table_start;
 	u32 rec_size = sizeof(__be16);
-	u32 desc_size = sizeof(struct hfs_bnode_desc);
 
 	if (!node || !node->tree)
 		return true;
 
-	if (off < desc_size || (off & 1))
+	if (off < HFS_BNODE_FIRST_REC_OFF || (off & 1))
 		return true;
 
 	if (next_off <= off ||
