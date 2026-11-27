@@ -256,5 +256,5 @@ extern int jfs_readdir(struct file *file, struct dir_context *ctx);
 
 extern bool check_dtroot(dtroot_t *p);
 
-extern bool check_dtpage(dtpage_t *p);
+bool check_dtpage(dtpage_t *p, s64 bn);
 #endif				/* !_H_JFS_DTREE */
