@@ -71,7 +71,8 @@ u8 hfs_bnode_read_u8(struct hfs_bnode *node, u32 off)
 	return data;
 }
 
-void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off)
+void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off,
+			u32 key_capacity)
 {
 	struct hfs_btree *tree;
 	u32 key_len;
@@ -84,8 +85,8 @@ void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off)
 	else
 		key_len = tree->max_key_len + 2;
 
-	if (key_len > sizeof(hfsplus_btree_key) || key_len < 1) {
-		memset(key, 0, sizeof(hfsplus_btree_key));
+	if (key_len > key_capacity || key_len < 1) {
+		memset(key, 0, key_capacity);
 		pr_err("hfsplus: Invalid key length: %u\n", key_len);
 		return;
 	}
@@ -591,7 +592,7 @@ struct hfs_bnode *hfs_bnode_find(struct hfs_btree *tree, u32 num)
 
 	rec_off = tree->node_size - 2;
 	off = hfs_bnode_read_u16(node, rec_off);
-	if (off != sizeof(struct hfs_bnode_desc))
+	if (off != HFS_BNODE_FIRST_REC_OFF)
 		goto node_error;
 	for (i = 1; i <= node->num_recs; off = next_off, i++) {
 		rec_off -= 2;

@@ -229,7 +229,7 @@ struct hfs_btree *hfs_btree_open(struct super_block *sb, u32 id, btree_keycmp ke
 
 	/* Load the header */
 	head = (struct hfs_btree_header_rec *)(kmap_local_folio(folio, 0) +
-					       sizeof(struct hfs_bnode_desc));
+					       HFS_BNODE_FIRST_REC_OFF);
 	tree->root = be32_to_cpu(head->root);
 	tree->leaf_count = be32_to_cpu(head->leaf_count);
 	tree->leaf_head = be32_to_cpu(head->leaf_head);
@@ -337,7 +337,7 @@ void hfs_btree_write(struct hfs_btree *tree)
 	/* Load the header */
 	page = node->page[0];
 	head = (struct hfs_btree_header_rec *)(kmap_local_page(page) +
-					       sizeof(struct hfs_bnode_desc));
+					       HFS_BNODE_FIRST_REC_OFF);
 
 	head->root = cpu_to_be32(tree->root);
 	head->leaf_count = cpu_to_be32(tree->leaf_count);
@@ -381,8 +381,9 @@ static struct hfs_bnode *hfs_bmap_new_bmap(struct hfs_bnode *prev, u32 idx)
 	desc.num_recs = cpu_to_be16(1);
 	desc.reserved = 0;
 	hfs_bnode_write(node, &desc, 0, sizeof(desc));
-	hfs_bnode_write_u16(node, 14, 0x8000);
-	hfs_bnode_write_u16(node, tree->node_size - 2, 14);
+	hfs_bnode_write_u16(node, HFS_BNODE_FIRST_REC_OFF, 0x8000);
+	hfs_bnode_write_u16(node, tree->node_size - 2,
+			    HFS_BNODE_FIRST_REC_OFF);
 	hfs_bnode_write_u16(node, tree->node_size - 4, tree->node_size - 6);
 
 	return node;
