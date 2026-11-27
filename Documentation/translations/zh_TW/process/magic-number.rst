@@ -62,7 +62,6 @@ Linux 魔術數
 ===================== ================ ======================== ==========================================
 PG_MAGIC              'P'              pg_{read,write}_hdr      ``include/linux/pg.h``
 APM_BIOS_MAGIC        0x4101           apm_user                 ``arch/x86/kernel/apm_32.c``
-FASYNC_MAGIC          0x4601           fasync_struct            ``include/linux/fs.h``
 SLIP_MAGIC            0x5302           slip                     ``drivers/net/slip.h``
 KV_MAGIC              0x5f4b565f       kernel_vars_s            ``arch/mips/include/asm/sn/klkernvars.h``
 CODA_MAGIC            0xC0DAC0DA       coda_file_info           ``fs/coda/coda_fs_i.h``
