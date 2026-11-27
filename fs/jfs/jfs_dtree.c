@@ -113,9 +113,10 @@ struct dtsplit {
 /* get page buffer for specified block address */
 #define DT_GETPAGE(IP, BN, MP, SIZE, P, RC)				\
 do {									\
-	BT_GETPAGE(IP, BN, MP, dtpage_t, SIZE, P, RC, i_dtroot);	\
+	s64 dt_bn = (BN);						\
+	BT_GETPAGE(IP, dt_bn, MP, dtpage_t, SIZE, P, RC, i_dtroot);	\
 	if (!(RC)) {							\
-		if ((BN) && !check_dtpage(P)) {				\
+		if (dt_bn && !check_dtpage(P, dt_bn)) {				\
 			BT_PUTPAGE(MP);					\
 			jfs_error((IP)->i_sb,				\
 				  "DT_GETPAGE: dtree page corrupt\n");	\
@@ -2826,8 +2827,12 @@ int jfs_readdir(struct file *file, struct dir_context *ctx)
 				return 0;
 			}
 
-			if ((rc = dtReadFirst(ip, &btstack)))
+			rc = dtReadFirst(ip, &btstack);
+			if (rc) {
+				/* Avoid retrying a corrupt first page on the next call. */
+				ctx->pos = DIREND;
 				return rc;
+			}
 
 			DT_GETSEARCH(ip, btstack.top, bn, mp, p, index);
 		}
@@ -4381,11 +4386,19 @@ bool check_dtroot(dtroot_t *p)
 	return true;
 }
 
-bool check_dtpage(dtpage_t *p)
+bool check_dtpage(dtpage_t *p, s64 bn)
 {
 	DECLARE_BITMAP(bitmap, DTPAGEMAXSLOT) = {0};
 	const int stblsize = ((PSIZE >> L2DTSLOTSIZE) + 31) >> L2DTSLOTSIZE;
 	int i;
+
+	/* A directory page cannot be its own sibling. */
+	if (unlikely(le64_to_cpu(p->header.next) == bn ||
+		     le64_to_cpu(p->header.prev) == bn)) {
+		jfs_err("Self-referential sibling link in dtpage %lld\n",
+			(long long)bn);
+		return false;
+	}
 
 	/* Validate maxslot (maximum number of slots in the page)
 	 * dtpage_t slot array is defined to hold up to DTPAGEMAXSLOT (128) slots
