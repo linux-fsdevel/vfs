@@ -256,14 +256,26 @@ static inline void hfsplus_mark_inode_dirty(struct inode *inode,
 	mark_inode_dirty(inode);
 }
 
+/* hfs_find_init() allocates search_key and key as one buffer */
+#define HFS_FIND_KEY_BUFS	2
+
+/*
+ * Size of the key_len field at the start of every key. The max_key_len
+ * of the b-tree header record does not count it (see hfs_btree_open()),
+ * so a key buffer needs max_key_len + HFSPLUS_KEY_LEN_SIZE bytes.
+ */
+#define HFSPLUS_KEY_LEN_SIZE	sizeof_field(hfsplus_btree_key, key_len)
+
 struct hfs_find_data {
-	/* filled by caller */
+	/* set by hfs_find_init() */
 	hfsplus_btree_key *search_key;
 	hfsplus_btree_key *key;
-	/* filled by find */
 	struct hfs_btree *tree;
+	/* filled by find */
 	struct hfs_bnode *bnode;
-	/* filled by findrec */
+	/* set by hfs_find_init(): size of each of search_key and key */
+	u32 key_capacity;
+	/* filled by findrec, reset by hfs_find_result_init() */
 	int record;
 	int keyoffset, keylength;
 	int entryoffset, entrylength;
@@ -371,7 +383,8 @@ void hfs_bmap_free(struct hfs_bnode *node);
 void hfs_bnode_read(struct hfs_bnode *node, void *buf, u32 off, u32 len);
 u16 hfs_bnode_read_u16(struct hfs_bnode *node, u32 off);
 u8 hfs_bnode_read_u8(struct hfs_bnode *node, u32 off);
-void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off);
+void hfs_bnode_read_key(struct hfs_bnode *node, void *key, u32 off,
+			u32 key_capacity);
 void hfs_bnode_write(struct hfs_bnode *node, void *buf, u32 off, u32 len);
 void hfs_bnode_write_u16(struct hfs_bnode *node, u32 off, u16 data);
 void hfs_bnode_clear(struct hfs_bnode *node, u32 off, u32 len);
