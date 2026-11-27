@@ -1366,14 +1366,11 @@ static inline struct dentry *file_dentry(const struct file *file)
 
 struct fasync_struct {
 	rwlock_t		fa_lock;
-	int			magic;
 	int			fa_fd;
 	struct fasync_struct	*fa_next; /* singly linked list */
 	struct file		*fa_file;
 	struct rcu_head		fa_rcu;
 };
-
-#define FASYNC_MAGIC 0x4601
 
 /* SMP safe fasync helpers: */
 extern int fasync_helper(int, struct file *, int, struct fasync_struct **);

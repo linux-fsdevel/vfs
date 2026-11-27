@@ -1063,7 +1063,6 @@ struct fasync_struct *fasync_insert_entry(int fd, struct file *filp, struct fasy
 	}
 
 	rwlock_init(&new->fa_lock);
-	new->magic = FASYNC_MAGIC;
 	new->fa_file = filp;
 	new->fa_fd = fd;
 	new->fa_next = *fapp;
@@ -1127,11 +1126,6 @@ static void kill_fasync_rcu(struct fasync_struct *fa, int sig, int band)
 		struct fown_struct *fown;
 		unsigned long flags;
 
-		if (fa->magic != FASYNC_MAGIC) {
-			printk(KERN_ERR "kill_fasync: bad magic number in "
-			       "fasync_struct!\n");
-			return;
-		}
 		read_lock_irqsave(&fa->fa_lock, flags);
 		if (fa->fa_file) {
 			fown = file_f_owner(fa->fa_file);
