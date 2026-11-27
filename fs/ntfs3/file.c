@@ -514,12 +514,9 @@ static long ntfs_fallocate(struct file *file, int mode, loff_t vbo, loff_t len)
 		goto out;
 	}
 
-	if (mode & (FALLOC_FL_PUNCH_HOLE | FALLOC_FL_COLLAPSE_RANGE |
-		    FALLOC_FL_INSERT_RANGE)) {
-		inode_dio_wait(inode);
-		filemap_invalidate_lock(mapping);
-		map_locked = true;
-	}
+	inode_dio_wait(inode);
+	filemap_invalidate_lock(mapping);
+	map_locked = true;
 
 	if (mode & FALLOC_FL_PUNCH_HOLE) {
 		u32 frame_size;
@@ -732,15 +729,25 @@ int ntfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			goto out;
 		}
 		inode_dio_wait(inode);
+		filemap_invalidate_lock(inode->i_mapping);
 		oldsize = i_size_read(inode);
 		newsize = attr->ia_size;
 
 		if (newsize != oldsize) {
-			truncate_setsize(inode, newsize);
-
-			err = ntfs_set_size(inode, newsize);
+			if (newsize > oldsize) {
+				truncate_pagecache(inode, oldsize);
+				err = ntfs_set_size(inode, newsize);
+				if (!err)
+					pagecache_isize_extended(inode, oldsize,
+								 newsize);
+			} else {
+				truncate_setsize(inode, newsize);
+				err = ntfs_set_size(inode, newsize);
+				if (err)
+					i_size_write(inode, oldsize);
+			}
 			if (err) {
-				i_size_write(inode, oldsize);
+				filemap_invalidate_unlock(inode->i_mapping);
 				goto out;
 			}
 
@@ -749,6 +756,7 @@ int ntfs_setattr(struct mnt_idmap *idmap, struct dentry *dentry,
 			inode_set_mtime_to_ts(inode,
 					      inode_set_ctime_current(inode));
 		}
+		filemap_invalidate_unlock(inode->i_mapping);
 	}
 
 	setattr_copy(idmap, inode, attr);
@@ -1280,11 +1288,17 @@ static ssize_t ntfs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 	endbyte = vbo + ret;
 
 	if (endbyte > inode->i_size) {
+		if (iocb->ki_flags & IOCB_NOWAIT) {
+			ret = -EAGAIN;
+			goto out;
+		}
 		/*
 		 * Normal files: increase file size, allocate space.
 		 * Sparse/Compressed: increase file size. No space allocated.
 		 */
+		filemap_invalidate_lock(inode->i_mapping);
 		ret = ntfs_set_size(inode, endbyte);
+		filemap_invalidate_unlock(inode->i_mapping);
 		if (ret)
 			goto out;
 	}
